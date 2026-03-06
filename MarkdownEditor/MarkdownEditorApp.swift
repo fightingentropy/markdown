@@ -5,13 +5,19 @@ struct MarkdownEditorApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var workspace = Workspace()
     @State private var appUpdater = AppUpdater()
+    @State private var assistantSettings = AssistantSettings()
+    @State private var noteAssistant = NoteAssistant()
     @FocusedValue(\.editorController) private var editorController
 
     var body: some Scene {
         WindowGroup {
             Group {
                 if workspace.hasVault {
-                    ContentView(workspace: workspace)
+                    ContentView(
+                        workspace: workspace,
+                        assistant: noteAssistant,
+                        assistantSettings: assistantSettings
+                    )
                 } else {
                     WelcomeView(workspace: workspace)
                 }
@@ -52,6 +58,10 @@ struct MarkdownEditorApp: App {
                     .disabled(!appUpdater.canCheckForUpdates)
             }
             formatMenu
+        }
+
+        Settings {
+            AssistantSettingsView(settings: assistantSettings)
         }
     }
 

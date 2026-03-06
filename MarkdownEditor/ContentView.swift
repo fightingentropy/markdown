@@ -3,6 +3,8 @@ import SwiftUI
 
 struct ContentView: View {
     @Bindable var workspace: Workspace
+    @Bindable var assistant: NoteAssistant
+    let assistantSettings: AssistantSettings
     @State private var controller = EditorController()
     @State private var showPreview = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
@@ -18,6 +20,16 @@ struct ContentView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .navigationTitle(workspace.selectedFileName)
+        .overlay(alignment: .bottomTrailing) {
+            NoteAssistantPanel(
+                assistant: assistant,
+                settings: assistantSettings,
+                currentFileTitle: workspace.selectedFileName,
+                hasSelectedFile: workspace.selectedFileURL != nil
+            )
+            .padding(.trailing, 22)
+            .padding(.bottom, 20)
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 HStack(spacing: 2) {
@@ -30,7 +42,7 @@ struct ContentView: View {
                         Image(systemName: showPreview ? "pencil" : "eye")
                     }
                     .help(showPreview ? "Show Editor" : "Show Preview")
-                    .disabled(workspace.selectedFileURL == nil)
+                    .disabled(!workspace.selectedFileIsMarkdown)
                 }
             }
 
@@ -54,6 +66,7 @@ struct ContentView: View {
         }
         .onAppear {
             restoreExpandedFoldersIfNeeded()
+            synchronizeAssistantContext()
         }
         .onDisappear {
             persistExpandedFolders()
@@ -69,6 +82,10 @@ struct ContentView: View {
         }
         .onChange(of: workspace.text) { _, _ in
             workspace.scheduleAutosave()
+            synchronizeAssistantContext()
+        }
+        .onChange(of: workspace.selectedFileURL) { _, _ in
+            synchronizeAssistantContext()
         }
     }
 
@@ -140,7 +157,9 @@ struct ContentView: View {
     @ViewBuilder
     private var detail: some View {
         if workspace.selectedFileURL != nil {
-            if showPreview {
+            if workspace.selectedFileIsImage, let selectedURL = workspace.selectedFileURL {
+                ImagePreview(url: selectedURL)
+            } else if showPreview {
                 MarkdownPreview(markdown: workspace.text)
                     .id(workspace.selectedFileURL)
             } else {
@@ -334,6 +353,8 @@ private struct SidebarNodeList: View {
                 }
             } else if let file = workspace.fileItem(for: node.url) {
                 SidebarFileRow(file: file, workspace: workspace)
+            } else {
+                SidebarAssetRow(node: node, workspace: workspace)
             }
         }
     }
@@ -349,6 +370,30 @@ private struct SidebarNodeList: View {
                 }
             }
         )
+    }
+}
+
+private struct SidebarAssetRow: View {
+    let node: SidebarNode
+    let workspace: Workspace
+
+    var body: some View {
+        Button {
+            workspace.selectFile(node.url)
+        } label: {
+            HStack(spacing: 8) {
+                Label(node.name, systemImage: "photo")
+                    .lineLimit(1)
+
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 2)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .listRowBackground(node.url == workspace.selectedFileURL ? Color.accentColor.opacity(0.14) : Color.clear)
     }
 }
 
@@ -437,6 +482,23 @@ private func isMD(_ url: URL) -> Bool {
 }
 
 private extension ContentView {
+    func synchronizeAssistantContext() {
+        guard workspace.selectedFileIsMarkdown else {
+            assistant.updateContext(
+                fileURL: nil,
+                title: "",
+                markdown: ""
+            )
+            return
+        }
+
+        assistant.updateContext(
+            fileURL: workspace.selectedFileURL,
+            title: workspace.selectedFileName,
+            markdown: workspace.text
+        )
+    }
+
     func collapseSidebarFolders() {
         expandedFolderURLs.removeAll()
     }
@@ -494,6 +556,222 @@ private extension ContentView {
         withAnimation(.easeInOut(duration: 0.2)) {
             columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
         }
+    }
+}
+
+private struct ImagePreview: View {
+    let url: URL
+    @State private var zoomScale: CGFloat = 1
+
+    var body: some View {
+        Group {
+            if let image = NSImage(contentsOf: url) {
+                ZStack(alignment: .topTrailing) {
+                    ZoomableImageScrollView(image: image, zoomScale: $zoomScale)
+                        .padding(24)
+
+                    HStack(spacing: 8) {
+                        Button {
+                            zoomScale = clampedZoom(zoomScale - 0.2)
+                        } label: {
+                            Image(systemName: "minus")
+                        }
+                        .help("Zoom Out")
+                        .disabled(zoomScale <= minimumZoomScale)
+
+                        Text("\(Int(zoomScale * 100))%")
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .frame(minWidth: 44)
+
+                        Button {
+                            zoomScale = clampedZoom(zoomScale + 0.2)
+                        } label: {
+                            Image(systemName: "plus")
+                        }
+                        .help("Zoom In")
+                        .disabled(zoomScale >= maximumZoomScale)
+
+                        Button("Reset") {
+                            zoomScale = 1
+                        }
+                        .font(.caption)
+                        .help("Reset Zoom")
+                        .disabled(abs(zoomScale - 1) < 0.01)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .padding(16)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black.opacity(0.18))
+            } else {
+                ContentUnavailableView(
+                    "Image Unavailable",
+                    systemImage: "photo",
+                    description: Text("This image couldn't be loaded.")
+                )
+            }
+        }
+    }
+
+    private var minimumZoomScale: CGFloat { 0.25 }
+    private var maximumZoomScale: CGFloat { 4 }
+
+    private func clampedZoom(_ scale: CGFloat) -> CGFloat {
+        min(max(scale, minimumZoomScale), maximumZoomScale)
+    }
+}
+
+private struct ZoomableImageScrollView: NSViewRepresentable {
+    let image: NSImage
+    @Binding var zoomScale: CGFloat
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(zoomScale: $zoomScale)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.contentView = CenteringClipView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.allowsMagnification = true
+        scrollView.minMagnification = 0.25
+        scrollView.maxMagnification = 4
+        scrollView.magnification = 1
+
+        let imageView = NSImageView()
+        imageView.imageScaling = .scaleNone
+        imageView.imageAlignment = .alignCenter
+        imageView.image = image
+        imageView.frame = CGRect(origin: .zero, size: image.size)
+
+        let documentView = FlippedDocumentView(frame: CGRect(origin: .zero, size: image.size))
+        documentView.addSubview(imageView)
+        scrollView.documentView = documentView
+
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.handleLiveMagnify(_:)),
+            name: NSScrollView.willStartLiveMagnifyNotification,
+            object: scrollView
+        )
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.handleEndMagnify(_:)),
+            name: NSScrollView.didEndLiveMagnifyNotification,
+            object: scrollView
+        )
+
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let documentView = scrollView.documentView,
+              let imageView = documentView.subviews.first as? NSImageView else {
+            return
+        }
+
+        if imageView.image != image {
+            imageView.image = image
+        }
+
+        if imageView.frame.size != image.size {
+            imageView.frame = CGRect(origin: .zero, size: image.size)
+        }
+
+        if documentView.frame.size != image.size {
+            documentView.frame = CGRect(origin: .zero, size: image.size)
+        }
+
+        let imageSize = image.size
+        if context.coordinator.lastImageSize != imageSize {
+            context.coordinator.lastImageSize = imageSize
+            context.coordinator.didApplyInitialZoom = false
+        }
+
+        if !context.coordinator.didApplyInitialZoom {
+            let visibleSize = scrollView.contentView.bounds.size
+            if visibleSize.width > 0, visibleSize.height > 0 {
+                let fittedScale = fittedZoomScale(for: imageSize, in: visibleSize)
+                context.coordinator.didApplyInitialZoom = true
+                if abs(zoomScale - fittedScale) > 0.001 {
+                    zoomScale = fittedScale
+                }
+                scrollView.setMagnification(
+                    fittedScale,
+                    centeredAt: CGPoint(x: documentView.bounds.midX, y: documentView.bounds.midY)
+                )
+                return
+            }
+        }
+
+        if abs(scrollView.magnification - zoomScale) > 0.001 {
+            scrollView.setMagnification(zoomScale, centeredAt: CGPoint(x: documentView.bounds.midX, y: documentView.bounds.midY))
+        }
+    }
+
+    private func fittedZoomScale(for imageSize: CGSize, in visibleSize: CGSize) -> CGFloat {
+        guard imageSize.width > 0, imageSize.height > 0 else { return 1 }
+        let widthScale = visibleSize.width / imageSize.width
+        let heightScale = visibleSize.height / imageSize.height
+        return min(max(min(widthScale, heightScale), 0.25), 1)
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        @Binding private var zoomScale: CGFloat
+        var didApplyInitialZoom = false
+        var lastImageSize = CGSize.zero
+
+        init(zoomScale: Binding<CGFloat>) {
+            _zoomScale = zoomScale
+        }
+
+        @objc
+        func handleEndMagnify(_ notification: Notification) {
+            updateZoomScale(from: notification.object)
+        }
+
+        @objc
+        func handleLiveMagnify(_ notification: Notification) {
+            updateZoomScale(from: notification.object)
+        }
+
+        private func updateZoomScale(from object: Any?) {
+            guard let scrollView = object as? NSScrollView else { return }
+            let currentScale = scrollView.magnification
+            if abs(zoomScale - currentScale) > 0.001 {
+                zoomScale = currentScale
+            }
+        }
+    }
+}
+
+private final class FlippedDocumentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+private final class CenteringClipView: NSClipView {
+    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
+        var constrained = super.constrainBoundsRect(proposedBounds)
+
+        guard let documentSize = documentView?.frame.size else {
+            return constrained
+        }
+
+        if documentSize.width < proposedBounds.width {
+            constrained.origin.x = -(proposedBounds.width - documentSize.width) / 2
+        }
+
+        if documentSize.height < proposedBounds.height {
+            constrained.origin.y = -(proposedBounds.height - documentSize.height) / 2
+        }
+
+        return constrained
     }
 }
 

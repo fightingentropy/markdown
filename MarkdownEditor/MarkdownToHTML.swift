@@ -205,6 +205,12 @@ enum MarkdownToHTML {
             "<a href=\"\(sanitizeURL(groups[2]))\">\(groups[1])</a>"
         }
 
+        // Bare URLs
+        result = regexReplace(result, pattern: #"(?<![=\"'])https?://[^\s<\"]+"#) { groups in
+            let url = sanitizeURL(groups[0])
+            return "<a href=\"\(url)\">\(groups[0])</a>"
+        }
+
         // Bold + Italic
         result = regexReplace(result, pattern: #"\*{3}(.+?)\*{3}"#) { groups in
             "<strong><em>\(groups[1])</em></strong>"

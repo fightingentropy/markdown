@@ -137,5 +137,24 @@ struct SourceEditorView: NSViewRepresentable {
                 highlighter.highlight(storage)
             }
         }
+
+        func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+            guard NSApp.currentEvent?.modifierFlags.contains(.command) == true else {
+                return true
+            }
+
+            let url: URL?
+            if let directURL = link as? URL {
+                url = directURL
+            } else if let string = link as? String {
+                url = URL(string: string)
+            } else {
+                url = nil
+            }
+
+            guard let url else { return false }
+            NSWorkspace.shared.open(url)
+            return true
+        }
     }
 }

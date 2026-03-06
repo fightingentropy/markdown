@@ -77,11 +77,12 @@ final class SyntaxHighlighter {
         apply(#"`[^`\n]+`"#, to: textStorage, in: text, range: range,
               attrs: [.font: Theme.codeFont, .foregroundColor: Theme.codeColor, .backgroundColor: Theme.codeBackground])
 
-        apply(#"\[.+?\]\(.+?\)"#, to: textStorage, in: text, range: range,
-              attrs: [.foregroundColor: Theme.linkColor])
+        applyMarkdownLinks(to: textStorage, in: text, range: range)
 
         apply(#"!\[.*?\]\(.+?\)"#, to: textStorage, in: text, range: range,
               attrs: [.foregroundColor: Theme.linkColor])
+
+        applyBareLinks(to: textStorage, in: text, range: range)
 
         apply(#"^>.*$"#, to: textStorage, in: text, range: range,
               attrs: [.foregroundColor: Theme.quoteColor])
@@ -108,6 +109,39 @@ final class SyntaxHighlighter {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: .anchorsMatchLines) else { return }
         for match in regex.matches(in: text, range: range) {
             storage.addAttributes(attrs, range: match.range)
+        }
+    }
+
+    private func applyMarkdownLinks(to storage: NSTextStorage, in text: String, range: NSRange) {
+        guard let regex = try? NSRegularExpression(pattern: #"\[([^\]]+)\]\(([^)\s]+)\)"#) else { return }
+
+        let nsText = text as NSString
+        for match in regex.matches(in: text, range: range) {
+            guard match.numberOfRanges >= 3 else { continue }
+            let urlString = nsText.substring(with: match.range(at: 2))
+            guard let url = URL(string: urlString) else { continue }
+
+            storage.addAttributes([
+                .foregroundColor: Theme.linkColor,
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+                .link: url
+            ], range: match.range)
+        }
+    }
+
+    private func applyBareLinks(to storage: NSTextStorage, in text: String, range: NSRange) {
+        guard let regex = try? NSRegularExpression(pattern: #"https?://[^\s)>\"]+"#) else { return }
+
+        let nsText = text as NSString
+        for match in regex.matches(in: text, range: range) {
+            let urlString = nsText.substring(with: match.range)
+            guard let url = URL(string: urlString) else { continue }
+
+            storage.addAttributes([
+                .foregroundColor: Theme.linkColor,
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+                .link: url
+            ], range: match.range)
         }
     }
 

@@ -35,7 +35,10 @@ struct SidebarNode: Identifiable, Hashable {
     }
 }
 
-enum SortOrder { case byName, byDate }
+enum SortOrder: String {
+    case byName
+    case byDate
+}
 
 @Observable
 @MainActor
@@ -45,10 +48,26 @@ final class Workspace {
     var selectedFileURL: URL?
     var text: String = ""
     var vaultURL: URL?
-    var sortOrder: SortOrder = .byDate
+    var sortOrder: SortOrder = .byDate {
+        didSet {
+            guard oldValue != sortOrder else { return }
+            persistSortOrder()
+            guard vaultURL != nil else { return }
+            refreshFiles()
+        }
+    }
     var isCommandPalettePresented = false
 
     var hasVault: Bool { vaultURL != nil }
+    var selectedFileIsMarkdown: Bool {
+        guard let selectedFileURL else { return false }
+        return Self.isMarkdownFile(selectedFileURL)
+    }
+
+    var selectedFileIsImage: Bool {
+        guard let selectedFileURL else { return false }
+        return Self.isImageFile(selectedFileURL)
+    }
 
     var selectedFileName: String {
         guard let selectedFileURL else { return "" }
@@ -69,6 +88,7 @@ final class Workspace {
 
     private static let bookmarkKey = "vaultBookmark"
     private static let markdownExtensions: Set<String> = ["md", "markdown", "mdown"]
+    private static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "svg", "tiff", "bmp"]
     private var activeSecurityScopedVaultURL: URL?
     private var autosaveTask: Task<Void, Never>?
 
@@ -101,6 +121,7 @@ final class Workspace {
             UserDefaults.standard.set(bookmark, forKey: Self.bookmarkKey)
         }
         vaultURL = url
+        restoreSortOrder()
         refreshFiles()
         if let restoredURL = restoreSelectedFileURL(), files.contains(where: { $0.url == restoredURL }) {
             selectFile(restoredURL)
@@ -123,6 +144,7 @@ final class Workspace {
 
         beginAccessingVault(url)
         vaultURL = url
+        restoreSortOrder()
 
         if isStale, let fresh = try? url.bookmarkData(
             options: .withSecurityScope,
@@ -163,10 +185,14 @@ final class Workspace {
         guard selectedFileURL != url else { return }
 
         saveCurrentFile()
-        if let content = readFile(url) {
+        if Self.isMarkdownFile(url), let content = readFile(url) {
             let normalizedContent = normalizedContent(for: url, content: content)
             selectedFileURL = url
             text = normalizedContent
+            persistSelectedFileURL(url)
+        } else {
+            selectedFileURL = url
+            text = ""
             persistSelectedFileURL(url)
         }
     }
@@ -183,12 +209,13 @@ final class Workspace {
     func saveCurrentFile() {
         autosaveTask?.cancel()
         guard let url = selectedFileURL else { return }
+        guard Self.isMarkdownFile(url) else { return }
         guard (try? Data(text.utf8).write(to: url, options: .atomic)) != nil else { return }
         updateCachedMetadata(for: url, content: text)
     }
 
     func scheduleAutosave() {
-        guard selectedFileURL != nil else { return }
+        guard selectedFileIsMarkdown else { return }
 
         autosaveTask?.cancel()
         autosaveTask = Task { [weak self] in
@@ -418,6 +445,16 @@ final class Workspace {
                     )
                 )
                 files.append(file)
+            } else if Self.isImageFile(url) {
+                nodes.append(
+                    SidebarNode(
+                        id: url,
+                        url: url,
+                        name: url.lastPathComponent,
+                        kind: .file,
+                        modificationDate: modificationDate
+                    )
+                )
             }
         }
 
@@ -475,8 +512,12 @@ final class Workspace {
         return normalized
     }
 
-    private static func isMarkdownFile(_ url: URL) -> Bool {
+    static func isMarkdownFile(_ url: URL) -> Bool {
         markdownExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    static func isImageFile(_ url: URL) -> Bool {
+        imageExtensions.contains(url.pathExtension.lowercased())
     }
 
     private func persistSelectedFileURL(_ url: URL) {
@@ -498,9 +539,30 @@ final class Workspace {
         UserDefaults.standard.removeObject(forKey: storageKey)
     }
 
+    private func persistSortOrder() {
+        guard let storageKey = sortOrderStorageKey else { return }
+        UserDefaults.standard.set(sortOrder.rawValue, forKey: storageKey)
+    }
+
+    private func restoreSortOrder() {
+        guard let storageKey = sortOrderStorageKey,
+              let rawValue = UserDefaults.standard.string(forKey: storageKey),
+              let restored = SortOrder(rawValue: rawValue) else {
+            sortOrder = .byDate
+            return
+        }
+
+        sortOrder = restored
+    }
+
     private var selectedFileStorageKey: String? {
         guard let vaultURL else { return nil }
         return "selectedFile::" + vaultURL.standardizedFileURL.path
+    }
+
+    private var sortOrderStorageKey: String? {
+        guard let vaultURL else { return nil }
+        return "sortOrder::" + vaultURL.standardizedFileURL.path
     }
 
     private func beginAccessingVault(_ url: URL) {
