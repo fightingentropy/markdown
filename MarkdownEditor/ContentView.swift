@@ -55,11 +55,17 @@ struct ContentView: View {
         .onAppear {
             restoreExpandedFoldersIfNeeded()
         }
+        .onDisappear {
+            persistExpandedFolders()
+        }
         .onChange(of: workspace.vaultURL) { _, _ in
             restoreExpandedFoldersIfNeeded(force: true)
         }
         .onChange(of: workspace.sidebarNodes) { _, _ in
             restoreExpandedFoldersIfNeeded()
+        }
+        .onChange(of: expandedFolderURLs) { _, _ in
+            persistExpandedFolders()
         }
     }
 
@@ -79,8 +85,7 @@ struct ContentView: View {
                     SidebarNodeList(
                         nodes: workspace.sidebarNodes,
                         workspace: workspace,
-                        expandedFolderURLs: $expandedFolderURLs,
-                        onExpansionChanged: persistExpandedFolders
+                        expandedFolderURLs: $expandedFolderURLs
                     )
                 }
                 .listStyle(.sidebar)
@@ -311,7 +316,6 @@ private struct SidebarNodeList: View {
     let nodes: [SidebarNode]
     let workspace: Workspace
     @Binding var expandedFolderURLs: Set<URL>
-    let onExpansionChanged: () -> Void
 
     var body: some View {
         ForEach(nodes) { node in
@@ -320,8 +324,7 @@ private struct SidebarNodeList: View {
                     SidebarNodeList(
                         nodes: node.children,
                         workspace: workspace,
-                        expandedFolderURLs: $expandedFolderURLs,
-                        onExpansionChanged: onExpansionChanged
+                        expandedFolderURLs: $expandedFolderURLs
                     )
                 } label: {
                     Label(node.name, systemImage: "folder")
@@ -341,7 +344,6 @@ private struct SidebarNodeList: View {
                 } else {
                     expandedFolderURLs.remove(url)
                 }
-                onExpansionChanged()
             }
         )
     }
@@ -434,7 +436,6 @@ private func isMD(_ url: URL) -> Bool {
 private extension ContentView {
     func collapseSidebarFolders() {
         expandedFolderURLs.removeAll()
-        persistExpandedFolders()
     }
 
     func folderURLs(in nodes: [SidebarNode]) -> Set<URL> {
@@ -478,6 +479,7 @@ private extension ContentView {
             .map { $0.standardizedFileURL.path }
             .sorted()
         UserDefaults.standard.set(paths, forKey: storageKey)
+        UserDefaults.standard.synchronize()
     }
 
     var sidebarExpansionStorageKey: String? {
