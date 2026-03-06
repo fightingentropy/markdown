@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct MarkdownEditorApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @State private var workspace = Workspace()
     @State private var appUpdater = AppUpdater()
     @FocusedValue(\.editorController) private var editorController
@@ -18,6 +19,11 @@ struct MarkdownEditorApp: App {
             .frame(minWidth: 600, minHeight: 400)
         }
         .defaultSize(width: 1200, height: 800)
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase != .active {
+                workspace.saveCurrentFile()
+            }
+        }
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("New File") { workspace.createNewFile() }

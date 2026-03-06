@@ -67,6 +67,9 @@ struct ContentView: View {
         .onChange(of: expandedFolderURLs) { _, _ in
             persistExpandedFolders()
         }
+        .onChange(of: workspace.text) { _, _ in
+            workspace.scheduleAutosave()
+        }
     }
 
     // MARK: - Sidebar

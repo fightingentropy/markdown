@@ -70,6 +70,7 @@ final class Workspace {
     private static let bookmarkKey = "vaultBookmark"
     private static let markdownExtensions: Set<String> = ["md", "markdown", "mdown"]
     private var activeSecurityScopedVaultURL: URL?
+    private var autosaveTask: Task<Void, Never>?
 
     init() {
         if let data = UserDefaults.standard.data(forKey: Self.bookmarkKey) {
@@ -180,9 +181,21 @@ final class Workspace {
     }
 
     func saveCurrentFile() {
+        autosaveTask?.cancel()
         guard let url = selectedFileURL else { return }
         guard (try? Data(text.utf8).write(to: url, options: .atomic)) != nil else { return }
         updateCachedMetadata(for: url, content: text)
+    }
+
+    func scheduleAutosave() {
+        guard selectedFileURL != nil else { return }
+
+        autosaveTask?.cancel()
+        autosaveTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            await self?.saveCurrentFile()
+        }
     }
 
     func createNewFile() {
