@@ -6,6 +6,7 @@ struct ContentView: View {
     @State private var controller = EditorController()
     @State private var showPreview = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var expandedFolderURLs: Set<URL> = []
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -50,29 +51,35 @@ struct ContentView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.98)))
             }
         }
+        .onAppear {
+            expandSidebarFolders()
+        }
+        .onChange(of: workspace.sidebarNodes) { _, _ in
+            expandSidebarFolders()
+        }
     }
 
     // MARK: - Sidebar
 
     private var sidebar: some View {
         VStack(spacing: 0) {
-            List(workspace.sortedFiles, selection: sidebarSelection) { file in
-                HStack {
-                    Label(workspace.title(for: file), systemImage: "doc.text")
-                    Spacer()
-                    Text(file.modificationDate, format: .dateTime.hour().minute())
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .monospacedDigit()
+            if workspace.sidebarNodes.isEmpty {
+                ContentUnavailableView(
+                    "No Notes",
+                    systemImage: "folder",
+                    description: Text("This folder doesn't contain any markdown files or visible subfolders yet.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List {
+                    SidebarNodeList(
+                        nodes: workspace.sidebarNodes,
+                        workspace: workspace,
+                        expandedFolderURLs: $expandedFolderURLs
+                    )
                 }
-                .tag(file.url)
-                .contextMenu {
-                    Button("Delete", role: .destructive) {
-                        workspace.deleteFile(file.url)
-                    }
-                }
+                .listStyle(.sidebar)
             }
-            .listStyle(.sidebar)
 
             Divider()
 
@@ -189,7 +196,7 @@ private struct CommandPaletteView: View {
                                 ForEach(filteredFiles) { file in
                                     paletteButton(
                                         title: workspace.title(for: file),
-                                        subtitle: file.name == file.displayName ? nil : file.name,
+                                        subtitle: workspace.relativePath(for: file),
                                         systemImage: file.url == workspace.selectedFileURL ? "doc.text.fill" : "doc.text",
                                         isSelected: primaryResult == .file(file.id)
                                     ) {
@@ -285,6 +292,76 @@ private struct CommandPaletteView: View {
     }
 }
 
+private struct SidebarNodeList: View {
+    let nodes: [SidebarNode]
+    let workspace: Workspace
+    @Binding var expandedFolderURLs: Set<URL>
+
+    var body: some View {
+        ForEach(nodes) { node in
+            if node.isFolder {
+                DisclosureGroup(isExpanded: expansionBinding(for: node.url)) {
+                    SidebarNodeList(
+                        nodes: node.children,
+                        workspace: workspace,
+                        expandedFolderURLs: $expandedFolderURLs
+                    )
+                } label: {
+                    Label(node.name, systemImage: "folder")
+                }
+            } else if let file = workspace.fileItem(for: node.url) {
+                SidebarFileRow(file: file, workspace: workspace)
+            }
+        }
+    }
+
+    private func expansionBinding(for url: URL) -> Binding<Bool> {
+        Binding(
+            get: { expandedFolderURLs.contains(url) },
+            set: { isExpanded in
+                if isExpanded {
+                    expandedFolderURLs.insert(url)
+                } else {
+                    expandedFolderURLs.remove(url)
+                }
+            }
+        )
+    }
+}
+
+private struct SidebarFileRow: View {
+    let file: FileItem
+    let workspace: Workspace
+
+    var body: some View {
+        Button {
+            workspace.selectFile(file.url)
+        } label: {
+            HStack(spacing: 8) {
+                Label(workspace.title(for: file), systemImage: file.url == workspace.selectedFileURL ? "doc.text.fill" : "doc.text")
+                    .lineLimit(1)
+
+                Spacer(minLength: 12)
+
+                Text(file.modificationDate, format: .dateTime.hour().minute())
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 2)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("Delete", role: .destructive) {
+                workspace.deleteFile(file.url)
+            }
+        }
+        .listRowBackground(file.url == workspace.selectedFileURL ? Color.accentColor.opacity(0.14) : Color.clear)
+    }
+}
+
 private enum PaletteResult: Equatable {
     case file(URL)
 }
@@ -337,14 +414,17 @@ private func isMD(_ url: URL) -> Bool {
 }
 
 private extension ContentView {
-    var sidebarSelection: Binding<URL?> {
-        Binding(
-            get: { workspace.selectedFileURL },
-            set: { newValue in
-                guard let newValue else { return }
-                workspace.selectFile(newValue)
+    func expandSidebarFolders() {
+        expandedFolderURLs.formUnion(folderURLs(in: workspace.sidebarNodes))
+    }
+
+    func folderURLs(in nodes: [SidebarNode]) -> Set<URL> {
+        Set(nodes.flatMap { node -> [URL] in
+            if node.isFolder {
+                return [node.url] + Array(folderURLs(in: node.children))
             }
-        )
+            return []
+        })
     }
 
     func toggleSidebar() {

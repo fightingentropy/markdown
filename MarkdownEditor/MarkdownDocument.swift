@@ -17,12 +17,31 @@ struct FileItem: Identifiable, Hashable {
     }
 }
 
+struct SidebarNode: Identifiable, Hashable {
+    enum Kind: Hashable {
+        case folder
+        case file
+    }
+
+    let id: URL
+    let url: URL
+    let name: String
+    let kind: Kind
+    let modificationDate: Date
+    var children: [SidebarNode] = []
+
+    var isFolder: Bool {
+        kind == .folder
+    }
+}
+
 enum SortOrder { case byName, byDate }
 
 @Observable
 @MainActor
 final class Workspace {
     var files: [FileItem] = []
+    var sidebarNodes: [SidebarNode] = []
     var selectedFileURL: URL?
     var text: String = ""
     var vaultURL: URL?
@@ -49,6 +68,8 @@ final class Workspace {
     }
 
     private static let bookmarkKey = "vaultBookmark"
+    private static let markdownExtensions: Set<String> = ["md", "markdown", "mdown"]
+    private var activeSecurityScopedVaultURL: URL?
 
     init() {
         if let data = UserDefaults.standard.data(forKey: Self.bookmarkKey) {
@@ -70,6 +91,7 @@ final class Workspace {
     }
 
     func openVault(_ url: URL) {
+        beginAccessingVault(url)
         if let bookmark = try? url.bookmarkData(
             options: .withSecurityScope,
             includingResourceValuesForKeys: nil,
@@ -79,8 +101,11 @@ final class Workspace {
         }
         vaultURL = url
         refreshFiles()
-        if let first = files.first {
+        if let first = sortedFiles.first {
             selectFile(first.url)
+        } else {
+            selectedFileURL = nil
+            text = ""
         }
     }
 
@@ -93,7 +118,7 @@ final class Workspace {
             bookmarkDataIsStale: &isStale
         ) else { return }
 
-        guard url.startAccessingSecurityScopedResource() else { return }
+        beginAccessingVault(url)
         vaultURL = url
 
         if isStale, let fresh = try? url.bookmarkData(
@@ -110,21 +135,20 @@ final class Workspace {
     // MARK: - File Operations
 
     func refreshFiles() {
-        guard let vaultURL else { return }
-        guard let contents = try? FileManager.default.contentsOfDirectory(
-            at: vaultURL,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: .skipsHiddenFiles
-        ) else { return }
+        guard let vaultURL else {
+            files = []
+            sidebarNodes = []
+            return
+        }
 
-        files = contents
-            .filter { ["md", "markdown", "mdown"].contains($0.pathExtension.lowercased()) }
-            .compactMap { url in
-                let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
-                let noteTitle = readFile(url).flatMap(Self.extractTitle(from:))
-                return FileItem(id: url, name: url.lastPathComponent, url: url, modificationDate: date, noteTitle: noteTitle)
-            }
-            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        let snapshot = snapshotDirectory(at: vaultURL)
+        files = snapshot.files
+        sidebarNodes = snapshot.nodes
+
+        if let selectedFileURL, !files.contains(where: { $0.url == selectedFileURL }) {
+            self.selectedFileURL = nil
+            text = ""
+        }
     }
 
     func selectFile(_ url: URL) {
@@ -194,6 +218,7 @@ final class Workspace {
               let string = String(data: data, encoding: .utf8) else { return }
 
         let parent = url.deletingLastPathComponent()
+        beginAccessingVault(parent)
 
         // Try to bookmark the parent for full vault access
         if let bookmark = try? parent.bookmarkData(
@@ -217,6 +242,19 @@ final class Workspace {
 
         text = string
         selectedFileURL = url
+
+        if !sidebarNodes.contains(where: { $0.url == url }) {
+            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
+            sidebarNodes = sortSidebarNodes(sidebarNodes + [
+                SidebarNode(
+                    id: url,
+                    url: url,
+                    name: url.deletingPathExtension().lastPathComponent,
+                    kind: .file,
+                    modificationDate: date
+                )
+            ])
+        }
     }
 
     func createNewFolder() {
@@ -239,6 +277,8 @@ final class Workspace {
         guard (try? fm.createDirectory(at: folderURL, withIntermediateDirectories: false)) != nil else {
             return
         }
+
+        refreshFiles()
     }
 
     func renameFile(_ url: URL, to newName: String) {
@@ -256,6 +296,26 @@ final class Workspace {
             return liveTitle
         }
         return file.sidebarTitle
+    }
+
+    func fileItem(for url: URL) -> FileItem? {
+        files.first(where: { $0.url == url })
+    }
+
+    func relativePath(for file: FileItem) -> String? {
+        guard let vaultURL else {
+            return file.name == file.displayName ? nil : file.name
+        }
+
+        let basePath = vaultURL.standardizedFileURL.path
+        let filePath = file.url.standardizedFileURL.path
+        guard filePath.hasPrefix(basePath) else {
+            return file.name == file.displayName ? nil : file.name
+        }
+
+        let separatorAdjustedBase = basePath.hasSuffix("/") ? basePath : basePath + "/"
+        let relativePath = String(filePath.dropFirst(separatorAdjustedBase.count))
+        return relativePath == file.name && file.name == file.displayName ? nil : relativePath
     }
 
     private static func extractTitle(from content: String) -> String? {
@@ -289,4 +349,112 @@ final class Workspace {
             noteTitle: Self.extractTitle(from: content)
         )
     }
+
+    private func snapshotDirectory(at directoryURL: URL) -> DirectorySnapshot {
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+            options: .skipsHiddenFiles
+        ) else {
+            return DirectorySnapshot(nodes: [], files: [])
+        }
+
+        var nodes: [SidebarNode] = []
+        var files: [FileItem] = []
+
+        for url in contents {
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey])
+            let modificationDate = values?.contentModificationDate ?? .distantPast
+
+            if values?.isDirectory == true {
+                let childSnapshot = snapshotDirectory(at: url)
+                let childLatestDate = childSnapshot.nodes.map(\.modificationDate).max() ?? modificationDate
+                nodes.append(
+                    SidebarNode(
+                        id: url,
+                        url: url,
+                        name: url.lastPathComponent,
+                        kind: .folder,
+                        modificationDate: max(modificationDate, childLatestDate),
+                        children: childSnapshot.nodes
+                    )
+                )
+                files.append(contentsOf: childSnapshot.files)
+            } else if Self.isMarkdownFile(url) {
+                let file = makeFileItem(at: url, modificationDate: modificationDate)
+                nodes.append(
+                    SidebarNode(
+                        id: url,
+                        url: url,
+                        name: file.displayName,
+                        kind: .file,
+                        modificationDate: file.modificationDate
+                    )
+                )
+                files.append(file)
+            }
+        }
+
+        return DirectorySnapshot(
+            nodes: sortSidebarNodes(nodes),
+            files: files
+        )
+    }
+
+    private func makeFileItem(at url: URL, modificationDate: Date) -> FileItem {
+        let noteTitle = readFile(url).flatMap(Self.extractTitle(from:))
+        return FileItem(
+            id: url,
+            name: url.lastPathComponent,
+            url: url,
+            modificationDate: modificationDate,
+            noteTitle: noteTitle
+        )
+    }
+
+    private func sortSidebarNodes(_ nodes: [SidebarNode]) -> [SidebarNode] {
+        nodes.sorted { lhs, rhs in
+            if lhs.isFolder != rhs.isFolder {
+                return lhs.isFolder && !rhs.isFolder
+            }
+
+            switch sortOrder {
+            case .byName:
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            case .byDate:
+                if lhs.modificationDate != rhs.modificationDate {
+                    return lhs.modificationDate > rhs.modificationDate
+                }
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            }
+        }
+    }
+
+    private static func isMarkdownFile(_ url: URL) -> Bool {
+        markdownExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    private func beginAccessingVault(_ url: URL) {
+        let standardizedURL = url.standardizedFileURL
+
+        if activeSecurityScopedVaultURL?.standardizedFileURL == standardizedURL {
+            return
+        }
+
+        if let activeSecurityScopedVaultURL {
+            activeSecurityScopedVaultURL.stopAccessingSecurityScopedResource()
+        }
+
+        if standardizedURL.startAccessingSecurityScopedResource() {
+            activeSecurityScopedVaultURL = standardizedURL
+        } else {
+            activeSecurityScopedVaultURL = nil
+        }
+    }
+
+}
+
+private struct DirectorySnapshot {
+    let nodes: [SidebarNode]
+    let files: [FileItem]
 }

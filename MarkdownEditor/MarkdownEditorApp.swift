@@ -19,10 +19,6 @@ struct MarkdownEditorApp: App {
         }
         .defaultSize(width: 1200, height: 800)
         .commands {
-            CommandGroup(after: .appInfo) {
-                Button("Check for Updates…") { appUpdater.checkForUpdates() }
-                    .disabled(!appUpdater.canCheckForUpdates)
-            }
             CommandGroup(replacing: .newItem) {
                 Button("New File") { workspace.createNewFile() }
                     .keyboardShortcut("n")
@@ -43,6 +39,11 @@ struct MarkdownEditorApp: App {
                 Button("Search Notes") { workspace.isCommandPalettePresented.toggle() }
                     .keyboardShortcut("k")
                     .disabled(!workspace.hasVault)
+            }
+            CommandGroup(after: .help) {
+                Divider()
+                Button("Check for Updates…") { appUpdater.checkForUpdates() }
+                    .disabled(!appUpdater.canCheckForUpdates)
             }
             formatMenu
         }
