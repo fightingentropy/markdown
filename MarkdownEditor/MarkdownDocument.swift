@@ -101,7 +101,9 @@ final class Workspace {
         }
         vaultURL = url
         refreshFiles()
-        if let first = sortedFiles.first {
+        if let restoredURL = restoreSelectedFileURL(), files.contains(where: { $0.url == restoredURL }) {
+            selectFile(restoredURL)
+        } else if let first = sortedFiles.first {
             selectFile(first.url)
         } else {
             selectedFileURL = nil
@@ -130,6 +132,10 @@ final class Workspace {
         }
 
         refreshFiles()
+
+        if let restoredURL = restoreSelectedFileURL(), files.contains(where: { $0.url == restoredURL }) {
+            selectFile(restoredURL)
+        }
     }
 
     // MARK: - File Operations
@@ -148,6 +154,7 @@ final class Workspace {
         if let selectedFileURL, !files.contains(where: { $0.url == selectedFileURL }) {
             self.selectedFileURL = nil
             text = ""
+            clearStoredSelectedFileURL()
         }
     }
 
@@ -159,6 +166,7 @@ final class Workspace {
             let normalizedContent = normalizedContent(for: url, content: content)
             selectedFileURL = url
             text = normalizedContent
+            persistSelectedFileURL(url)
         }
     }
 
@@ -210,6 +218,7 @@ final class Workspace {
         if selectedFileURL == url {
             text = ""
             selectedFileURL = nil
+            clearStoredSelectedFileURL()
         }
         refreshFiles()
     }
@@ -245,6 +254,7 @@ final class Workspace {
 
         text = normalizedString
         selectedFileURL = url
+        persistSelectedFileURL(url)
 
         if !sidebarNodes.contains(where: { $0.url == url }) {
             let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
@@ -454,6 +464,30 @@ final class Workspace {
 
     private static func isMarkdownFile(_ url: URL) -> Bool {
         markdownExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    private func persistSelectedFileURL(_ url: URL) {
+        guard let storageKey = selectedFileStorageKey else { return }
+        UserDefaults.standard.set(url.standardizedFileURL.path, forKey: storageKey)
+    }
+
+    private func restoreSelectedFileURL() -> URL? {
+        guard let storageKey = selectedFileStorageKey,
+              let path = UserDefaults.standard.string(forKey: storageKey) else {
+            return nil
+        }
+
+        return URL(fileURLWithPath: path)
+    }
+
+    private func clearStoredSelectedFileURL() {
+        guard let storageKey = selectedFileStorageKey else { return }
+        UserDefaults.standard.removeObject(forKey: storageKey)
+    }
+
+    private var selectedFileStorageKey: String? {
+        guard let vaultURL else { return nil }
+        return "selectedFile::" + vaultURL.standardizedFileURL.path
     }
 
     private func beginAccessingVault(_ url: URL) {

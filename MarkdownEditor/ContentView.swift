@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var showPreview = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var expandedFolderURLs: Set<URL> = []
+    @State private var restoredVaultKey: String?
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -52,10 +53,13 @@ struct ContentView: View {
             }
         }
         .onAppear {
-            expandSidebarFolders()
+            restoreExpandedFoldersIfNeeded()
+        }
+        .onChange(of: workspace.vaultURL) { _, _ in
+            restoreExpandedFoldersIfNeeded(force: true)
         }
         .onChange(of: workspace.sidebarNodes) { _, _ in
-            expandSidebarFolders()
+            restoreExpandedFoldersIfNeeded()
         }
     }
 
@@ -75,7 +79,8 @@ struct ContentView: View {
                     SidebarNodeList(
                         nodes: workspace.sidebarNodes,
                         workspace: workspace,
-                        expandedFolderURLs: $expandedFolderURLs
+                        expandedFolderURLs: $expandedFolderURLs,
+                        onExpansionChanged: persistExpandedFolders
                     )
                 }
                 .listStyle(.sidebar)
@@ -306,6 +311,7 @@ private struct SidebarNodeList: View {
     let nodes: [SidebarNode]
     let workspace: Workspace
     @Binding var expandedFolderURLs: Set<URL>
+    let onExpansionChanged: () -> Void
 
     var body: some View {
         ForEach(nodes) { node in
@@ -314,7 +320,8 @@ private struct SidebarNodeList: View {
                     SidebarNodeList(
                         nodes: node.children,
                         workspace: workspace,
-                        expandedFolderURLs: $expandedFolderURLs
+                        expandedFolderURLs: $expandedFolderURLs,
+                        onExpansionChanged: onExpansionChanged
                     )
                 } label: {
                     Label(node.name, systemImage: "folder")
@@ -334,6 +341,7 @@ private struct SidebarNodeList: View {
                 } else {
                     expandedFolderURLs.remove(url)
                 }
+                onExpansionChanged()
             }
         )
     }
@@ -424,12 +432,9 @@ private func isMD(_ url: URL) -> Bool {
 }
 
 private extension ContentView {
-    func expandSidebarFolders() {
-        expandedFolderURLs.formUnion(folderURLs(in: workspace.sidebarNodes))
-    }
-
     func collapseSidebarFolders() {
         expandedFolderURLs.removeAll()
+        persistExpandedFolders()
     }
 
     func folderURLs(in nodes: [SidebarNode]) -> Set<URL> {
@@ -439,6 +444,45 @@ private extension ContentView {
             }
             return []
         })
+    }
+
+    func restoreExpandedFoldersIfNeeded(force: Bool = false) {
+        guard let storageKey = sidebarExpansionStorageKey else {
+            expandedFolderURLs = []
+            restoredVaultKey = nil
+            return
+        }
+
+        guard force || restoredVaultKey != storageKey else {
+            let validFolderURLs = folderURLs(in: workspace.sidebarNodes)
+            let filteredURLs = expandedFolderURLs.intersection(validFolderURLs)
+            if filteredURLs != expandedFolderURLs {
+                expandedFolderURLs = filteredURLs
+                persistExpandedFolders()
+            }
+            return
+        }
+
+        let storedPaths = UserDefaults.standard.stringArray(forKey: storageKey) ?? []
+        let validFolderURLs = folderURLs(in: workspace.sidebarNodes)
+        let restoredURLs = Set(storedPaths.map(URL.init(fileURLWithPath:)))
+            .intersection(validFolderURLs)
+
+        expandedFolderURLs = restoredURLs
+        restoredVaultKey = storageKey
+    }
+
+    func persistExpandedFolders() {
+        guard let storageKey = sidebarExpansionStorageKey else { return }
+        let paths = expandedFolderURLs
+            .map { $0.standardizedFileURL.path }
+            .sorted()
+        UserDefaults.standard.set(paths, forKey: storageKey)
+    }
+
+    var sidebarExpansionStorageKey: String? {
+        guard let vaultURL = workspace.vaultURL else { return nil }
+        return "sidebarExpandedFolders::" + vaultURL.standardizedFileURL.path
     }
 
     func toggleSidebar() {
