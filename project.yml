@@ -40,6 +40,8 @@ targets:
     info:
       path: MarkdownEditor/Info.plist
       properties:
+        SUFeedURL: https://raw.githubusercontent.com/fightingentropy/markdown/codex/publish/appcast.xml
+        SUPublicEDKey: qk1d4lmZRxr+pXMwftRYWK7yyjARhSaqWyw024Cjycc=
         CFBundleDocumentTypes:
           - CFBundleTypeExtensions:
               - md
