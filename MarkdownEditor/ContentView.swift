@@ -349,7 +349,19 @@ private struct SidebarNodeList: View {
                         expandedFolderURLs: $expandedFolderURLs
                     )
                 } label: {
-                    Label(node.name, systemImage: "folder")
+                    HStack(spacing: 8) {
+                        Label(node.name, systemImage: "folder")
+                            .lineLimit(1)
+
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            expansionBinding(for: node.url).wrappedValue.toggle()
+                        }
+                    }
                 }
             } else if let file = workspace.fileItem(for: node.url) {
                 SidebarFileRow(file: file, workspace: workspace)
