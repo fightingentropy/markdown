@@ -156,8 +156,9 @@ final class Workspace {
 
         saveCurrentFile()
         if let content = readFile(url) {
+            let normalizedContent = normalizedContent(for: url, content: content)
             selectedFileURL = url
-            text = content
+            text = normalizedContent
         }
     }
 
@@ -217,6 +218,8 @@ final class Workspace {
         guard let data = try? Data(contentsOf: url),
               let string = String(data: data, encoding: .utf8) else { return }
 
+        let normalizedString = normalizedContent(for: url, content: string)
+
         let parent = url.deletingLastPathComponent()
         beginAccessingVault(parent)
 
@@ -235,12 +238,12 @@ final class Workspace {
         // If directory scan failed (sandbox), ensure the dropped file is listed
         if !files.contains(where: { $0.url == url }) {
             let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
-            let noteTitle = Self.extractTitle(from: string)
+            let noteTitle = Self.extractTitle(from: normalizedString)
             files.append(FileItem(id: url, name: url.lastPathComponent, url: url, modificationDate: date, noteTitle: noteTitle))
             files.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         }
 
-        text = string
+        text = normalizedString
         selectedFileURL = url
 
         if !sidebarNodes.contains(where: { $0.url == url }) {
@@ -402,7 +405,9 @@ final class Workspace {
     }
 
     private func makeFileItem(at url: URL, modificationDate: Date) -> FileItem {
-        let noteTitle = readFile(url).flatMap(Self.extractTitle(from:))
+        let noteTitle = readFile(url).flatMap { content in
+            Self.extractTitle(from: normalizedContent(for: url, content: content))
+        }
         return FileItem(
             id: url,
             name: url.lastPathComponent,
@@ -428,6 +433,23 @@ final class Workspace {
                 return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
             }
         }
+    }
+
+    private func normalizedContent(for url: URL, content: String) -> String {
+        if Self.extractTitle(from: content) != nil {
+            return content
+        }
+
+        let trimmedLeadingNewlines = String(content.drop(while: \.isNewline))
+        let title = url.deletingPathExtension().lastPathComponent
+        let body = trimmedLeadingNewlines.isEmpty ? "" : "\n\n\(trimmedLeadingNewlines)"
+        let normalized = "# \(title)\(body)"
+
+        if normalized != content {
+            try? Data(normalized.utf8).write(to: url, options: .atomic)
+        }
+
+        return normalized
     }
 
     private static func isMarkdownFile(_ url: URL) -> Bool {

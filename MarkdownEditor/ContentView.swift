@@ -98,6 +98,16 @@ struct ContentView: View {
                 .menuStyle(.borderlessButton)
                 .fixedSize()
 
+                Button {
+                    collapseSidebarFolders()
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Collapse All Folders")
+                .disabled(expandedFolderURLs.isEmpty)
+
                 Spacer()
             }
             .padding(.horizontal, 12)
@@ -416,6 +426,10 @@ private func isMD(_ url: URL) -> Bool {
 private extension ContentView {
     func expandSidebarFolders() {
         expandedFolderURLs.formUnion(folderURLs(in: workspace.sidebarNodes))
+    }
+
+    func collapseSidebarFolders() {
+        expandedFolderURLs.removeAll()
     }
 
     func folderURLs(in nodes: [SidebarNode]) -> Set<URL> {

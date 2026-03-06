@@ -34,6 +34,8 @@ targets:
         PRODUCT_NAME: Markdown
         INFOPLIST_KEY_CFBundleDisplayName: Markdown
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        INFOPLIST_KEY_SUFeedURL: https://raw.githubusercontent.com/fightingentropy/markdown/codex/publish/appcast.xml
+        INFOPLIST_KEY_SUPublicEDKey: qk1d4lmZRxr+pXMwftRYWK7yyjARhSaqWyw024Cjycc=
         SWIFT_STRICT_CONCURRENCY: complete
     info:
       path: MarkdownEditor/Info.plist

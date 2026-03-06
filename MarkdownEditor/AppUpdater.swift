@@ -30,6 +30,7 @@ final class AppUpdater {
         )
 
         updaterController = controller
+        canCheckForUpdates = controller.updater.canCheckForUpdates
         updateCheckObserver = controller.updater.publisher(for: \.canCheckForUpdates)
             .receive(on: RunLoop.main)
             .assign(to: \.canCheckForUpdates, on: self)

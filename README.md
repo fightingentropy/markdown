@@ -52,31 +52,35 @@ xcodebuild -project MarkdownEditor.xcodeproj -scheme MarkdownEditor -configurati
 
 ## Sparkle Updates
 
-Sparkle is integrated as a Swift Package dependency and a `Check for Updates…` menu item is wired into the app menu.
+Sparkle is integrated and the app is configured with:
 
-The updater stays disabled until these `Info.plist` keys are configured with real values:
+- `SUFeedURL`: `https://raw.githubusercontent.com/fightingentropy/markdown/codex/publish/appcast.xml`
+- `SUPublicEDKey`: configured via `project.yml`
 
-- `SUFeedURL`
-- `SUPublicEDKey`
+The `Check for Updates…` menu item should now be enabled in builds generated from this repo.
 
-You can add them in `project.yml` under `targets.MarkdownEditor.info.properties` or directly in `MarkdownEditor/Info.plist` if you stop regenerating it from XcodeGen.
+### Publishing a new update
 
-Example `project.yml` snippet:
+1. Build a release archive for the app and place it in a release directory such as `releases/`.
+2. Add matching release notes next to the archive using the same base filename with `.md`, `.txt`, or `.html`.
+3. Generate or update the appcast:
 
-```yaml
-targets:
-  MarkdownEditor:
-    info:
-      path: MarkdownEditor/Info.plist
-      properties:
-        SUFeedURL: https://example.com/appcast.xml
-        SUPublicEDKey: YOUR_PUBLIC_ED25519_KEY
+```bash
+./scripts/generate_appcast.sh releases
 ```
 
-To make Sparkle fully functional you still need:
+By default this script assumes release assets and release notes will be published under:
 
-1. A hosted HTTPS appcast feed
-2. A Sparkle EdDSA public key in the app
-3. Signed release archives and appcast entries for each release
+- `https://raw.githubusercontent.com/fightingentropy/markdown/codex/publish/releases`
 
-Until those are configured, the menu item remains present but disabled.
+If you host update archives somewhere else, pass explicit URL prefixes:
+
+```bash
+./scripts/generate_appcast.sh releases https://your-host/releases https://your-host/releases
+```
+
+The appcast itself lives at:
+
+- [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml)
+
+The Sparkle private signing key is stored in the local macOS Keychain. Do not commit exported private keys to the repository.
