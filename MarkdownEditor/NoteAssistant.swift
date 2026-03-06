@@ -55,6 +55,8 @@ final class NoteAssistant {
     }
 
     func sendCurrentDraft(using settings: AssistantSettings) async {
+        settings.loadAPIKeyIfNeeded()
+
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else {
             errorMessage = "Enter a question first."
@@ -76,10 +78,16 @@ final class NoteAssistant {
         draft = ""
         errorMessage = nil
         isSending = true
+        guard let model = AssistantSettings.model(for: settings.selectedModel) else {
+            errorMessage = "Selected assistant model is not available."
+            messages.removeLast()
+            draft = prompt
+            isSending = false
+            return
+        }
         let configuration = AssistantRequestConfiguration(
             apiKey: settings.apiKey,
-            model: settings.selectedModel,
-            endpoint: AssistantSettings.responsesEndpoint
+            model: model
         )
 
         do {
@@ -115,19 +123,19 @@ private struct NoteAssistantClient {
         context: NoteAssistantContext,
         configuration: AssistantRequestConfiguration
     ) async throws -> String {
-        let requestBody = ResponsesRequest(
-            model: configuration.model,
-            instructions: """
-            You are a concise note assistant. Answer questions using the current markdown file as the primary source of truth. If the answer is not in the file, say so clearly. Prefer short direct answers, but use bullets when it improves clarity.
-            """,
-            input: makeInputMessages(messages: messages, context: context)
-        )
-
-        var request = URLRequest(url: configuration.endpoint)
+        var request = URLRequest(url: configuration.model.endpoint)
         request.httpMethod = "POST"
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         request.addValue("Bearer \(configuration.apiKey)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONEncoder().encode(requestBody)
+
+        switch configuration.model.apiStyle {
+        case .chatCompletions:
+            let requestBody = ChatCompletionsRequest(
+                model: configuration.model.id,
+                messages: makeChatMessages(messages: messages, context: context)
+            )
+            request.httpBody = try JSONEncoder().encode(requestBody)
+        }
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -141,8 +149,13 @@ private struct NoteAssistantClient {
             )
         }
 
-        let decoded = try JSONDecoder().decode(ResponsesResponse.self, from: data)
-        let text = decoded.outputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text: String
+        switch configuration.model.apiStyle {
+        case .chatCompletions:
+            let decoded = try JSONDecoder().decode(ChatCompletionsResponse.self, from: data)
+            text = decoded.outputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
         guard !text.isEmpty else {
             throw NoteAssistantError.invalidResponse("OpenCode returned an empty reply.")
         }
@@ -150,13 +163,20 @@ private struct NoteAssistantClient {
         return text
     }
 
-    private func makeInputMessages(
+    private func makeChatMessages(
         messages: [NoteAssistantMessage],
         context: NoteAssistantContext
-    ) -> [ResponsesRequest.InputMessage] {
-        let contextMessage = ResponsesRequest.InputMessage(
-            role: "developer",
-            text: """
+    ) -> [ChatCompletionsRequest.Message] {
+        let systemMessage = ChatCompletionsRequest.Message(
+            role: "system",
+            content: """
+            You are a concise note assistant. Answer questions using the current markdown file as the primary source of truth. If the answer is not in the file, say so clearly. Prefer short direct answers, but use bullets when it improves clarity.
+            """
+        )
+
+        let contextMessage = ChatCompletionsRequest.Message(
+            role: "system",
+            content: """
             Current file path: \(context.fileURL.path)
             Current file title: \(context.title)
 
@@ -166,61 +186,46 @@ private struct NoteAssistantClient {
         )
 
         let historyMessages = messages.map { message in
-            ResponsesRequest.InputMessage(
+            ChatCompletionsRequest.Message(
                 role: message.role.rawValue,
-                text: message.text
+                content: message.text
             )
         }
 
-        return [contextMessage] + historyMessages
+        return [systemMessage, contextMessage] + historyMessages
     }
 }
 
 private struct AssistantRequestConfiguration {
     let apiKey: String
-    let model: String
-    let endpoint: URL
+    let model: AssistantModel
 }
 
-private struct ResponsesRequest: Encodable {
+private struct ChatCompletionsRequest: Encodable {
     let model: String
-    let instructions: String
-    let input: [InputMessage]
+    let messages: [Message]
 
-    struct InputMessage: Encodable {
-        let type = "message"
+    struct Message: Encodable {
         let role: String
-        let content: [InputContent]
-
-        init(role: String, text: String) {
-            self.role = role
-            self.content = [InputContent(text: text)]
-        }
-    }
-
-    struct InputContent: Encodable {
-        let type = "input_text"
-        let text: String
+        let content: String
     }
 }
 
-private struct ResponsesResponse: Decodable {
-    let output: [OutputItem]
+private struct ChatCompletionsResponse: Decodable {
+    let choices: [Choice]
 
     var outputText: String {
-        output
-            .compactMap(\.content)
-            .flatMap { $0 }
-            .compactMap(\.text)
+        choices
+            .compactMap(\.message.content)
             .joined(separator: "\n")
     }
 
-    struct OutputItem: Decodable {
-        let content: [OutputContent]?
+    struct Choice: Decodable {
+        let message: Message
     }
 
-    struct OutputContent: Decodable {
-        let text: String?
+    struct Message: Decodable {
+        let content: String?
     }
 }
 

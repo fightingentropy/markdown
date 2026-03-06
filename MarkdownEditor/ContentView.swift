@@ -562,48 +562,34 @@ private extension ContentView {
 private struct ImagePreview: View {
     let url: URL
     @State private var zoomScale: CGFloat = 1
+    @State private var isShowingControls = false
+    @State private var controlsHideTask: Task<Void, Never>?
 
     var body: some View {
         Group {
             if let image = NSImage(contentsOf: url) {
-                ZStack(alignment: .topTrailing) {
-                    ZoomableImageScrollView(image: image, zoomScale: $zoomScale)
-                        .padding(24)
-
-                    HStack(spacing: 8) {
-                        Button {
-                            zoomScale = clampedZoom(zoomScale - 0.2)
-                        } label: {
-                            Image(systemName: "minus")
-                        }
-                        .help("Zoom Out")
-                        .disabled(zoomScale <= minimumZoomScale)
-
-                        Text("\(Int(zoomScale * 100))%")
-                            .font(.caption)
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                            .frame(minWidth: 44)
-
-                        Button {
-                            zoomScale = clampedZoom(zoomScale + 0.2)
-                        } label: {
-                            Image(systemName: "plus")
-                        }
-                        .help("Zoom In")
-                        .disabled(zoomScale >= maximumZoomScale)
-
-                        Button("Reset") {
-                            zoomScale = 1
-                        }
-                        .font(.caption)
-                        .help("Reset Zoom")
-                        .disabled(abs(zoomScale - 1) < 0.01)
+                ZoomableImageScrollView(image: image, zoomScale: $zoomScale)
+                    .padding(24)
+                    .overlay(alignment: .topTrailing) {
+                        zoomControls
+                            .padding(16)
+                            .opacity(isShowingControls ? 1 : 0)
+                            .offset(y: isShowingControls ? 0 : -6)
+                            .animation(.easeInOut(duration: 0.18), value: isShowingControls)
+                            .allowsHitTesting(isShowingControls)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .padding(16)
-                }
+                    .onHover { isHovering in
+                        if isHovering {
+                            revealControls()
+                        } else {
+                            scheduleControlsHide(after: .milliseconds(900))
+                        }
+                    }
+                    .simultaneousGesture(
+                        TapGesture().onEnded {
+                            revealControls()
+                        }
+                    )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.black.opacity(0.18))
             } else {
@@ -621,6 +607,67 @@ private struct ImagePreview: View {
 
     private func clampedZoom(_ scale: CGFloat) -> CGFloat {
         min(max(scale, minimumZoomScale), maximumZoomScale)
+    }
+
+    private func revealControls() {
+        controlsHideTask?.cancel()
+        isShowingControls = true
+        scheduleControlsHide(after: .seconds(2))
+    }
+
+    private func scheduleControlsHide(after duration: Duration) {
+        controlsHideTask?.cancel()
+        controlsHideTask = Task { @MainActor in
+            try? await Task.sleep(for: duration)
+            guard !Task.isCancelled else { return }
+            isShowingControls = false
+        }
+    }
+
+    private var zoomControls: some View {
+        HStack(spacing: 8) {
+            Button {
+                revealControls()
+                zoomScale = clampedZoom(zoomScale - 0.2)
+            } label: {
+                Image(systemName: "minus")
+            }
+            .help("Zoom Out")
+            .disabled(zoomScale <= minimumZoomScale)
+
+            Text("\(Int(zoomScale * 100))%")
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 44)
+
+            Button {
+                revealControls()
+                zoomScale = clampedZoom(zoomScale + 0.2)
+            } label: {
+                Image(systemName: "plus")
+            }
+            .help("Zoom In")
+            .disabled(zoomScale >= maximumZoomScale)
+
+            Button("Reset") {
+                revealControls()
+                zoomScale = 1
+            }
+            .font(.caption)
+            .help("Reset Zoom")
+            .disabled(abs(zoomScale - 1) < 0.01)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+        .overlay {
+            Capsule(style: .continuous)
+                .strokeBorder(.white.opacity(0.08))
+        }
+        .shadow(color: .black.opacity(0.25), radius: 16, y: 8)
     }
 }
 

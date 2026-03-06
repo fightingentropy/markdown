@@ -22,8 +22,8 @@ struct NoteAssistantPanel: View {
             assistant.isPresented = true
         } label: {
             launcherContent
-            .frame(width: 56, height: 56)
-            .shadow(color: .black.opacity(0.28), radius: 18, y: 10)
+                .frame(width: settings.launcherSize, height: settings.launcherSize)
+                .shadow(color: .black.opacity(0.28), radius: 18, y: 10)
         }
         .buttonStyle(.plain)
         .help("Open Note Assistant")
@@ -31,17 +31,11 @@ struct NoteAssistantPanel: View {
 
     private var launcherContent: some View {
         ZStack(alignment: .bottomTrailing) {
-            AssistantLauncherSurface()
+            AssistantLauncherSurface(settings: settings)
 
-            if !settings.isConfigured {
-                Circle()
-                    .fill(.orange)
-                    .frame(width: 9, height: 9)
-                    .overlay {
-                        Circle()
-                            .strokeBorder(.black.opacity(0.45), lineWidth: 2)
-                    }
-                    .offset(x: -6, y: -6)
+            if !settings.isConfigured && settings.showsLauncherStatusBadge {
+                AssistantLauncherStatusBadge(settings: settings)
+                    .offset(x: -6, y: -5)
             }
         }
     }
@@ -236,67 +230,54 @@ struct NoteAssistantPanel: View {
     }
 }
 
-private struct AssistantLauncherSurface: View {
+struct AssistantLauncherSurface: View {
+    let settings: AssistantSettings
+
     var body: some View {
         ZStack {
-            BubbleLauncherShape()
-                .fill(
-                    .linearGradient(
-                        colors: [
-                            Color(red: 0.12, green: 0.13, blue: 0.16),
-                            Color(red: 0.06, green: 0.07, blue: 0.09)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .shadow(color: .black.opacity(0.34), radius: 12, x: 0, y: 6)
+            RoundedRectangle(cornerRadius: settings.launcherCornerRadius, style: .continuous)
+                .fill(gray(settings.launcherBackgroundLevel))
 
-            BubbleLauncherShape()
-                .stroke(.white.opacity(0.16), lineWidth: 1)
+            RoundedRectangle(cornerRadius: settings.launcherCornerRadius, style: .continuous)
+                .inset(by: 1)
+                .fill(gray(settings.launcherBackgroundLevel + 0.02).opacity(0.45))
 
-            BubbleLauncherShape()
-                .fill(
-                    .linearGradient(
-                        colors: [
-                            .white.opacity(0.1),
-                            .clear
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
+            RoundedRectangle(cornerRadius: settings.launcherCornerRadius, style: .continuous)
+                .strokeBorder(Color.black.opacity(0.55), lineWidth: 1)
 
-            BubbleLauncherShape()
-                .trim(from: 0.08, to: 0.42)
-                .stroke(.white.opacity(0.18), lineWidth: 1)
+            RoundedRectangle(cornerRadius: settings.launcherCornerRadius, style: .continuous)
+                .inset(by: 1.2)
+                .strokeBorder(gray(settings.launcherBorderLevel).opacity(0.5), lineWidth: 1)
 
-            HStack(spacing: 8) {
-                ForEach(0..<3, id: \.self) { _ in
-                    Circle()
-                        .fill(.white.opacity(0.88))
-                        .frame(width: 5, height: 5)
-                }
-            }
+            Image(systemName: settings.launcherSymbol)
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(gray(settings.launcherForegroundLevel))
         }
+    }
+
+    private func gray(_ level: Double) -> Color {
+        let clamped = min(max(level, 0), 1)
+        return Color(red: clamped, green: clamped, blue: min(clamped + 0.01, 1))
     }
 }
 
-private struct BubbleLauncherShape: Shape {
-    func path(in rect: CGRect) -> Path {
-        let bubbleRect = CGRect(x: 7, y: 6, width: rect.width - 14, height: rect.height - 18)
-        let radius: CGFloat = 12
-        let tailWidth: CGFloat = 11
-        let tailHeight: CGFloat = 9
-        let tailMidX = rect.midX - 5
+private struct AssistantLauncherStatusBadge: View {
+    let settings: AssistantSettings
 
-        var path = Path()
-        path.addRoundedRect(in: bubbleRect, cornerSize: CGSize(width: radius, height: radius))
-        path.move(to: CGPoint(x: tailMidX - tailWidth / 2, y: bubbleRect.maxY))
-        path.addLine(to: CGPoint(x: tailMidX, y: bubbleRect.maxY + tailHeight))
-        path.addLine(to: CGPoint(x: tailMidX + tailWidth / 2, y: bubbleRect.maxY))
-        path.closeSubpath()
-        return path
+    var body: some View {
+        Circle()
+            .fill(gray(max(settings.launcherBackgroundLevel - 0.03, 0.02)))
+            .frame(width: 14, height: 14)
+            .overlay {
+                Circle()
+                    .fill(gray(settings.launcherBorderLevel))
+                    .padding(3)
+            }
+    }
+
+    private func gray(_ level: Double) -> Color {
+        let clamped = min(max(level, 0), 1)
+        return Color(red: clamped, green: clamped, blue: min(clamped + 0.01, 1))
     }
 }
 

@@ -1,8 +1,17 @@
-<?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
-        <title>Markdown Appcast</title>
-        <description>Release feed for Markdown.</description>
-        <language>en</language>
+        <title>Markdown</title>
+        <item>
+            <title>1.0.1</title>
+            <pubDate>Fri, 06 Mar 2026 09:07:52 +0000</pubDate>
+            <link>https://github.com/fightingentropy/markdown</link>
+            <sparkle:version>2</sparkle:version>
+            <sparkle:shortVersionString>1.0.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <sparkle:releaseNotesLink>https://raw.githubusercontent.com/fightingentropy/markdown/codex/publish/releases/Markdown-1.0.1.md</sparkle:releaseNotesLink>
+            <enclosure url="https://raw.githubusercontent.com/fightingentropy/markdown/codex/publish/releases/Markdown-1.0.1.zip" length="1909504" type="application/octet-stream" sparkle:edSignature="bRQ5tfF+9oJIAqAYfHs6yhHAAqmwMu7vSKoZlR4HEEq4qzDseG7Q34oj9XJPycdP24r4WKtnqEtr+ZjMIMIeCw=="/>
+        </item>
     </channel>
 </rss>
