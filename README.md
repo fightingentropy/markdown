@@ -54,7 +54,7 @@ xcodebuild -project MarkdownEditor.xcodeproj -scheme MarkdownEditor -configurati
 
 Sparkle is integrated and the app is configured with:
 
-- `SUFeedURL`: `https://raw.githubusercontent.com/fightingentropy/markdown/codex/publish/appcast.xml`
+- `SUFeedURL`: `https://raw.githubusercontent.com/fightingentropy/markdown/main/appcast.xml`
 - `SUPublicEDKey`: configured via `project.yml`
 
 The `Check for Updates…` menu item should now be enabled in builds generated from this repo.
@@ -71,7 +71,7 @@ The `Check for Updates…` menu item should now be enabled in builds generated f
 
 By default this script assumes release assets and release notes will be published under:
 
-- `https://raw.githubusercontent.com/fightingentropy/markdown/codex/publish/releases`
+- `https://raw.githubusercontent.com/fightingentropy/markdown/main/releases`
 
 If you host update archives somewhere else, pass explicit URL prefixes:
 

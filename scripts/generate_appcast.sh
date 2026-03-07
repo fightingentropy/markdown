@@ -8,8 +8,8 @@ fi
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ARCHIVES_DIR="$1"
-DOWNLOAD_URL_PREFIX="${2:-https://raw.githubusercontent.com/fightingentropy/markdown/codex/publish/releases}"
-RELEASE_NOTES_URL_PREFIX="${3:-https://raw.githubusercontent.com/fightingentropy/markdown/codex/publish/releases}"
+DOWNLOAD_URL_PREFIX="${2:-https://raw.githubusercontent.com/fightingentropy/markdown/main/releases}"
+RELEASE_NOTES_URL_PREFIX="${3:-https://raw.githubusercontent.com/fightingentropy/markdown/main/releases}"
 SPARKLE_BIN="$ROOT_DIR/.derived/SourcePackages/artifacts/sparkle/Sparkle/bin/generate_appcast"
 
 if [[ ! -x "$SPARKLE_BIN" ]]; then
