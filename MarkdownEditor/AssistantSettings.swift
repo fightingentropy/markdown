@@ -88,6 +88,12 @@ final class AssistantSettings {
         }
     }
 
+    var showsInlineImagePreviewsWhileEditing: Bool {
+        didSet {
+            userDefaults.set(showsInlineImagePreviewsWhileEditing, forKey: Self.inlineImagePreviewDefaultsKey)
+        }
+    }
+
     var isConfigured: Bool {
         !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -105,6 +111,7 @@ final class AssistantSettings {
     private static let launcherForegroundDefaultsKey = "assistant.launcher.foregroundLevel"
     private static let launcherBorderDefaultsKey = "assistant.launcher.borderLevel"
     private static let launcherBadgeDefaultsKey = "assistant.launcher.showsStatusBadge"
+    private static let inlineImagePreviewDefaultsKey = "editor.showsInlineImagePreviewsWhileEditing"
     private static let defaultModel = "glm-5"
     private static let defaultLauncherSymbol = "bubble.left.and.bubble.right.fill"
     private static let defaultLauncherSize = 58.0
@@ -113,6 +120,7 @@ final class AssistantSettings {
     private static let defaultLauncherForegroundLevel = 0.24
     private static let defaultLauncherBorderLevel = 0.20
     private static let defaultShowsLauncherStatusBadge = true
+    private static let defaultShowsInlineImagePreviewsWhileEditing = true
 
     init(
         userDefaults: UserDefaults = .standard,
@@ -147,6 +155,11 @@ final class AssistantSettings {
             self.showsLauncherStatusBadge = userDefaults.bool(forKey: Self.launcherBadgeDefaultsKey)
         } else {
             self.showsLauncherStatusBadge = Self.defaultShowsLauncherStatusBadge
+        }
+        if userDefaults.object(forKey: Self.inlineImagePreviewDefaultsKey) != nil {
+            self.showsInlineImagePreviewsWhileEditing = userDefaults.bool(forKey: Self.inlineImagePreviewDefaultsKey)
+        } else {
+            self.showsInlineImagePreviewsWhileEditing = Self.defaultShowsInlineImagePreviewsWhileEditing
         }
     }
 

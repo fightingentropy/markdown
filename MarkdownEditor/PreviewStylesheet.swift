@@ -19,18 +19,32 @@ enum PreviewStylesheet {
 
     :root { color-scheme: light dark; }
 
+    html {
+        background: #ffffff;
+    }
+
     body {
         font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
         font-size: 15px;
         line-height: 1.75;
         color: #1d1d1f;
-        background: #ffffff;
-        padding: 32px 40px;
+        background: transparent;
+        max-width: 920px;
+        margin: 0 auto;
+        padding: 48px 72px 120px;
         -webkit-font-smoothing: antialiased;
     }
 
     @media (prefers-color-scheme: dark) {
-        body { color: #f5f5f7; background: #1e1e1e; }
+        html { background: #1e1e1e; }
+        body { color: #f5f5f7; }
+    }
+
+    @media (max-width: 980px) {
+        body {
+            padding-left: 40px;
+            padding-right: 40px;
+        }
     }
 
     h1, h2, h3, h4, h5, h6 {
@@ -191,8 +205,12 @@ enum PreviewStylesheet {
         margin: 1em 0;
     }
 
-    img.mermaid {
-        border-radius: 12px;
+    .mermaid-diagram {
+        text-align: center;
+        margin: 1.2em 0;
+    }
+
+    .mermaid-diagram svg {
         max-width: 100%;
         height: auto;
     }

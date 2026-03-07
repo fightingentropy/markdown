@@ -2,7 +2,7 @@ name: MarkdownEditor
 options:
   bundleIdPrefix: com.md
   deploymentTarget:
-    macOS: "14.0"
+    macOS: "15.0"
   xcodeVersion: "16.0"
   createIntermediateGroups: true
   generateEmptyDirectories: false
@@ -15,6 +15,12 @@ packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: 2.9.0
+  DownGFM:
+    url: https://github.com/stackotter/Down-gfm
+    branch: main
+  Textual:
+    url: https://github.com/gonzalezreal/textual
+    from: 0.3.1
 
 targets:
   MarkdownEditor:
@@ -24,6 +30,11 @@ targets:
       - MarkdownEditor
     dependencies:
       - package: Sparkle
+        product: Sparkle
+      - package: DownGFM
+        product: Down
+      - package: Textual
+        product: Textual
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.md.MarkdownEditor
@@ -63,3 +74,26 @@ targets:
                 - md
                 - markdown
                 - mdown
+  MarkdownEditorTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - MarkdownEditorTests
+    dependencies:
+      - target: MarkdownEditor
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.md.MarkdownEditorTests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Markdown.app/Contents/MacOS/Markdown"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+schemes:
+  MarkdownEditor:
+    build:
+      targets:
+        MarkdownEditor: all
+        MarkdownEditorTests: [test]
+    test:
+      targets:
+        - name: MarkdownEditorTests

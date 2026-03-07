@@ -179,9 +179,14 @@ struct AssistantSettingsView: View {
     private var contextSection: some View {
         settingsCard(
             title: "Behavior",
-            description: "Current assistant behavior in the app."
+            description: "Control how markdown behaves while you work in the editor."
         ) {
             VStack(alignment: .leading, spacing: 10) {
+                Toggle("Render image embeds inline while editing", isOn: $settings.showsInlineImagePreviewsWhileEditing)
+
+                Divider()
+
+                Label("Inline image previews hide the markdown image syntax until you place the cursor on that line.", systemImage: "photo")
                 Label("The current note is sent as context with each assistant question.", systemImage: "doc.text")
                 Label("Messages reset automatically when you switch to another note.", systemImage: "arrow.triangle.2.circlepath")
                 Label("API keys are stored in Keychain, not in the document files.", systemImage: "key")

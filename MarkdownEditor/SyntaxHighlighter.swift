@@ -82,6 +82,9 @@ final class SyntaxHighlighter {
         apply(#"!\[.*?\]\(.+?\)"#, to: textStorage, in: text, range: range,
               attrs: [.foregroundColor: Theme.linkColor])
 
+        apply(#"!\[\[[^\]]+\]\]"#, to: textStorage, in: text, range: range,
+              attrs: [.foregroundColor: Theme.linkColor])
+
         applyBareLinks(to: textStorage, in: text, range: range)
 
         apply(#"^>.*$"#, to: textStorage, in: text, range: range,
@@ -118,14 +121,21 @@ final class SyntaxHighlighter {
         let nsText = text as NSString
         for match in regex.matches(in: text, range: range) {
             guard match.numberOfRanges >= 3 else { continue }
-            let urlString = nsText.substring(with: match.range(at: 2))
-            guard let url = URL(string: urlString) else { continue }
+            if match.range.location > 0, nsText.character(at: match.range.location - 1) == 33 {
+                continue
+            }
 
+            let urlString = nsText.substring(with: match.range(at: 2))
             storage.addAttributes([
                 .foregroundColor: Theme.linkColor,
-                .underlineStyle: NSUnderlineStyle.single.rawValue,
-                .link: url
+                .underlineStyle: NSUnderlineStyle.single.rawValue
             ], range: match.range)
+
+            guard let url = URL(string: urlString), url.scheme != nil else {
+                continue
+            }
+
+            storage.addAttribute(.link, value: url, range: match.range)
         }
     }
 

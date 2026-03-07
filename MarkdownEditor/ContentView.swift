@@ -4,7 +4,7 @@ import SwiftUI
 struct ContentView: View {
     @Bindable var workspace: Workspace
     @Bindable var assistant: NoteAssistant
-    let assistantSettings: AssistantSettings
+    @Bindable var assistantSettings: AssistantSettings
     @State private var controller = EditorController()
     @State private var showPreview = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
@@ -160,10 +160,15 @@ struct ContentView: View {
             if workspace.selectedFileIsImage, let selectedURL = workspace.selectedFileURL {
                 ImagePreview(url: selectedURL)
             } else if showPreview {
-                MarkdownPreview(markdown: workspace.text)
-                    .id(workspace.selectedFileURL)
+                previewView
             } else {
-                SourceEditorView(text: $workspace.text, controller: controller)
+                SourceEditorView(
+                    text: $workspace.text,
+                    controller: controller,
+                    documentURL: workspace.selectedFileURL,
+                    vaultURL: workspace.vaultURL,
+                    showsInlineImagePreviewsWhileEditing: assistantSettings.showsInlineImagePreviewsWhileEditing
+                )
             }
         } else {
             ContentUnavailableView(
@@ -172,6 +177,15 @@ struct ContentView: View {
                 description: Text("Select a file from the sidebar or create a new one.")
             )
         }
+    }
+
+    private var previewView: some View {
+        MarkdownPreview(
+            markdown: workspace.text,
+            documentURL: workspace.selectedFileURL,
+            vaultURL: workspace.vaultURL
+        )
+        .id(workspace.selectedFileURL)
     }
 }
 
