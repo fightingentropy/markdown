@@ -51,6 +51,8 @@ targets:
     info:
       path: MarkdownEditor/Info.plist
       properties:
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         SUFeedURL: https://raw.githubusercontent.com/fightingentropy/markdown/main/appcast.xml
         SUPublicEDKey: qk1d4lmZRxr+pXMwftRYWK7yyjARhSaqWyw024Cjycc=
         CFBundleDocumentTypes:
