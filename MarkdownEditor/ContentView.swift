@@ -46,16 +46,6 @@ struct ContentView: View {
                     .disabled(!workspace.selectedFileIsMarkdown)
                 }
             }
-
-            ToolbarItem(placement: .automatic) {
-                Button {
-                    toggleSidebar()
-                } label: {
-                    Image(systemName: "sidebar.left")
-                }
-                .keyboardShortcut("b")
-                .help(columnVisibility == .detailOnly ? "Show Sidebar" : "Hide Sidebar")
-            }
         }
         .frame(minWidth: 700, minHeight: 500)
         .background(WindowToolbarConfigurator())
@@ -159,7 +149,6 @@ struct ContentView: View {
             workspace.importDroppedFile(url)
             return true
         }
-        .toolbar(removing: .sidebarToggle)
     }
 
     // MARK: - Detail
@@ -730,11 +719,6 @@ private extension ContentView {
         return "sidebarExpandedFolders::" + vaultURL.standardizedFileURL.path
     }
 
-    func toggleSidebar() {
-        withAnimation(.easeInOut(duration: 0.2)) {
-            columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
-        }
-    }
 }
 
 private struct ImagePreview: View {
