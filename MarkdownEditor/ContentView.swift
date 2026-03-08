@@ -109,6 +109,7 @@ struct ContentView: View {
                     )
                 }
                 .listStyle(.sidebar)
+                .contentMargins(.top, 0, for: .scrollContent)
             }
 
             Divider()
@@ -364,7 +365,10 @@ private struct SidebarNodeList: View {
                     )
                 } label: {
                     HStack(spacing: 8) {
-                        Label(node.name, systemImage: "folder")
+                        Image(systemName: "folder")
+                            .foregroundStyle(.secondary)
+
+                        Text(node.name)
                             .lineLimit(1)
 
                         Spacer()
@@ -377,6 +381,7 @@ private struct SidebarNodeList: View {
                         }
                     }
                 }
+                .listRowInsets(sidebarRowInsets)
             } else if let file = workspace.fileItem(for: node.url) {
                 SidebarFileRow(file: file, workspace: workspace)
             } else {
@@ -408,7 +413,10 @@ private struct SidebarAssetRow: View {
             workspace.selectFile(node.url)
         } label: {
             HStack(spacing: 8) {
-                Label(node.name, systemImage: "photo")
+                Image(systemName: "photo")
+                    .foregroundStyle(.secondary)
+
+                Text(node.name)
                     .lineLimit(1)
 
                 Spacer()
@@ -419,6 +427,7 @@ private struct SidebarAssetRow: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
+        .listRowInsets(sidebarRowInsets)
         .listRowBackground(node.url == workspace.selectedFileURL ? Color.accentColor.opacity(0.14) : Color.clear)
     }
 }
@@ -432,7 +441,10 @@ private struct SidebarFileRow: View {
             workspace.selectFile(file.url)
         } label: {
             HStack(spacing: 8) {
-                Label(workspace.title(for: file), systemImage: file.url == workspace.selectedFileURL ? "doc.text.fill" : "doc.text")
+                Image(systemName: file.url == workspace.selectedFileURL ? "doc.text.fill" : "doc.text")
+                    .foregroundStyle(.secondary)
+
+                Text(workspace.title(for: file))
                     .lineLimit(1)
 
                 Spacer(minLength: 12)
@@ -447,6 +459,7 @@ private struct SidebarFileRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .listRowInsets(sidebarRowInsets)
         .contextMenu {
             Button("Delete", role: .destructive) {
                 workspace.deleteFile(file.url)
@@ -455,6 +468,8 @@ private struct SidebarFileRow: View {
         .listRowBackground(file.url == workspace.selectedFileURL ? Color.accentColor.opacity(0.14) : Color.clear)
     }
 }
+
+private let sidebarRowInsets = EdgeInsets(top: 2, leading: 6, bottom: 2, trailing: 10)
 
 private enum PaletteResult: Equatable {
     case file(URL)
