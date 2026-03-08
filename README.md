@@ -61,9 +61,28 @@ The `Check for Updates…` menu item should now be enabled in builds generated f
 
 ### Publishing a new update
 
-1. Build a release archive for the app and place it in a release directory such as `releases/`.
-2. Add matching release notes next to the archive using the same base filename with `.md`, `.txt`, or `.html`.
-3. Generate or update the appcast:
+1. Bump `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` in `project.yml`.
+2. Add release notes at `releases/Markdown-<version>.md`.
+3. Run the one-command release flow:
+
+```bash
+./scripts/cut_release.sh
+```
+
+That command:
+
+- builds the Release app into `.derived`
+- creates `releases/Markdown-<version>.zip`
+- regenerates `releases/appcast.xml`
+- syncs the root [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml) that the app actually uses
+
+If your notes live somewhere else, you can pass them in:
+
+```bash
+./scripts/cut_release.sh --notes-file /path/to/release-notes.md
+```
+
+If you only need to regenerate the appcast from existing archives, you can still run:
 
 ```bash
 ./scripts/generate_appcast.sh releases
@@ -79,7 +98,7 @@ If you host update archives somewhere else, pass explicit URL prefixes:
 ./scripts/generate_appcast.sh releases https://your-host/releases https://your-host/releases
 ```
 
-The appcast itself lives at:
+The appcast the app reads lives at:
 
 - [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml)
 
