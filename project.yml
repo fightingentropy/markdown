@@ -45,8 +45,8 @@ targets:
         PRODUCT_NAME: Markdown
         INFOPLIST_KEY_CFBundleDisplayName: Markdown
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
-        SPARKLE_FEED_URL: https://raw.githubusercontent.com/fightingentropy/markdown/main/appcast.xml
-        SPARKLE_PUBLIC_ED_KEY: qk1d4lmZRxr+pXMwftRYWK7yyjARhSaqWyw024Cjycc=
+        SPARKLE_FEED_URL: ""
+        SPARKLE_PUBLIC_ED_KEY: ""
         INFOPLIST_KEY_SUFeedURL: "$(SPARKLE_FEED_URL)"
         INFOPLIST_KEY_SUPublicEDKey: "$(SPARKLE_PUBLIC_ED_KEY)"
         SWIFT_STRICT_CONCURRENCY: complete

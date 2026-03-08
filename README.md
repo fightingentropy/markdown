@@ -251,7 +251,7 @@ releases/Markdown-1.0.3.md
 ### 3. Run The Release Script
 
 ```bash
-./scripts/cut_release.sh
+SPARKLE_PRIVATE_KEY=... ./scripts/cut_release.sh
 ```
 
 That command will:
@@ -266,13 +266,13 @@ That command will:
 If your notes file is somewhere else, run:
 
 ```bash
-./scripts/cut_release.sh --notes-file /path/to/release-notes.md
+SPARKLE_PRIVATE_KEY=... ./scripts/cut_release.sh --notes-file /path/to/release-notes.md
 ```
 
 If you only want to build locally and inspect the generated appcast without publishing an update:
 
 ```bash
-./scripts/cut_release.sh --skip-github-release
+SPARKLE_PRIVATE_KEY=... ./scripts/cut_release.sh --skip-github-release
 ```
 
 That local-only mode leaves the root [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml) unchanged.
@@ -310,15 +310,17 @@ If the archive URLs or notes URLs are hosted somewhere else:
 
 ## Notes On Keys And Signing
 
-- Sparkle public key is configured in [project.yml](/Users/erlinhoxha/Developer/Markdown/project.yml)
-- Sparkle private signing key is expected to live in your local macOS Keychain
+- Local builds intentionally leave Sparkle feed settings blank in [project.yml](/Users/erlinhoxha/Developer/Markdown/project.yml)
+- `./scripts/cut_release.sh` injects `SPARKLE_FEED_URL` and derives `SPARKLE_PUBLIC_ED_KEY` from `SPARKLE_PRIVATE_KEY` at release time
+- If you need a non-default feed URL, set `SPARKLE_FEED_URL` when invoking the release script
 - Do not commit private keys to the repo
+- Use the same `SPARKLE_PRIVATE_KEY` for future releases if you want existing users to keep receiving Sparkle updates without a manual reinstall
 - Local `/Applications/Markdown.app` installs should be signed with the local `Markdown` identity, not ad-hoc
 - Assistant API keys are stored in macOS Keychain, not in note files
 
 ## Current Update Feed
 
-The app is configured to use:
+Release builds should inject:
 
 - [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml)
 - feed URL: `https://raw.githubusercontent.com/fightingentropy/markdown/main/appcast.xml`

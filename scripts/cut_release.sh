@@ -8,6 +8,11 @@ Usage: ./scripts/cut_release.sh [options]
 Builds the current Release app, uploads Sparkle assets to GitHub Releases,
 regenerates the appcast, and syncs the root appcast feed used by the app.
 
+Environment:
+  SPARKLE_PRIVATE_KEY               Required. Private Sparkle signing key used for this release
+  SPARKLE_FEED_URL                  Optional. Feed URL embedded into the release app
+  SPARKLE_KEY_ACCOUNT               Optional. Keychain account name used to derive the public key
+
 Options:
   --notes-file <path>               Copy release notes from this file to releases/Markdown-<version>.md
   --archives-dir <path>             Local cache for archives and generated appcast (default: .release-assets)
@@ -26,6 +31,9 @@ REPO=""
 RELEASE_NOTES_URL_PREFIX=""
 NOTES_FILE=""
 PUBLISH_GITHUB_RELEASE=true
+SPARKLE_FEED_URL="${SPARKLE_FEED_URL:-}"
+SPARKLE_PRIVATE_KEY="${SPARKLE_PRIVATE_KEY:-}"
+SPARKLE_KEY_ACCOUNT="${SPARKLE_KEY_ACCOUNT:-}"
 
 function require_tool() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -136,6 +144,27 @@ if [[ -z "$RELEASE_NOTES_URL_PREFIX" ]]; then
   fi
 fi
 
+if [[ -z "$SPARKLE_FEED_URL" ]]; then
+  if [[ -n "$REPO" ]]; then
+    SPARKLE_FEED_URL="https://raw.githubusercontent.com/$REPO/main/appcast.xml"
+  else
+    SPARKLE_FEED_URL="https://example.invalid/appcast.xml"
+  fi
+fi
+
+if [[ -z "$SPARKLE_PRIVATE_KEY" ]]; then
+  echo "SPARKLE_PRIVATE_KEY must be set for release builds." >&2
+  exit 1
+fi
+
+if [[ -z "$SPARKLE_KEY_ACCOUNT" ]]; then
+  if [[ -n "$REPO" ]]; then
+    SPARKLE_KEY_ACCOUNT="${REPO##*/}-sparkle"
+  else
+    SPARKLE_KEY_ACCOUNT="markdown-sparkle"
+  fi
+fi
+
 mkdir -p "$ARCHIVES_DIR"
 sync_release_notes
 
@@ -145,11 +174,48 @@ fi
 
 cd "$ROOT_DIR"
 xcodegen
+
+if [[ -d "$DERIVED_DATA_PATH" ]]; then
+  SPARKLE_BIN_DIR="$(find "$DERIVED_DATA_PATH" -path '*/artifacts/sparkle/Sparkle/bin' -type d | head -1)"
+else
+  SPARKLE_BIN_DIR=""
+fi
+if [[ -z "$SPARKLE_BIN_DIR" ]]; then
+  xcodebuild \
+    -project MarkdownEditor.xcodeproj \
+    -scheme MarkdownEditor \
+    -resolvePackageDependencies \
+    -derivedDataPath "$DERIVED_DATA_PATH" >/dev/null
+  SPARKLE_BIN_DIR="$(find "$DERIVED_DATA_PATH" -path '*/artifacts/sparkle/Sparkle/bin' -type d | head -1)"
+fi
+
+if [[ -z "$SPARKLE_BIN_DIR" ]]; then
+  echo "Could not locate Sparkle binaries under $DERIVED_DATA_PATH" >&2
+  exit 1
+fi
+
+SPARKLE_PRIVATE_KEY_FILE="$(mktemp "${TMPDIR:-/tmp}/markdown-sparkle-key.XXXXXX")"
+cleanup() {
+  rm -f "$SPARKLE_PRIVATE_KEY_FILE"
+}
+trap cleanup EXIT
+printf '%s' "$SPARKLE_PRIVATE_KEY" > "$SPARKLE_PRIVATE_KEY_FILE"
+
+"$SPARKLE_BIN_DIR/generate_keys" --account "$SPARKLE_KEY_ACCOUNT" -f "$SPARKLE_PRIVATE_KEY_FILE" >/dev/null
+SPARKLE_PUBLIC_ED_KEY="$("$SPARKLE_BIN_DIR/generate_keys" --account "$SPARKLE_KEY_ACCOUNT" -p | tr -d '\n')"
+
+if [[ -z "$SPARKLE_PUBLIC_ED_KEY" ]]; then
+  echo "Could not derive Sparkle public key" >&2
+  exit 1
+fi
+
 xcodebuild \
   -project MarkdownEditor.xcodeproj \
   -scheme MarkdownEditor \
   -configuration Release \
   -derivedDataPath "$DERIVED_DATA_PATH" \
+  SPARKLE_FEED_URL="$SPARKLE_FEED_URL" \
+  SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY" \
   build
 
 APP_PATH="$DERIVED_DATA_PATH/Build/Products/Release/Markdown.app"
@@ -183,10 +249,12 @@ if [[ "$PUBLISH_GITHUB_RELEASE" == true ]]; then
   upload_current_release_assets
 fi
 
+SPARKLE_BIN="$SPARKLE_BIN_DIR/generate_appcast" \
 "$ROOT_DIR/scripts/generate_appcast.sh" \
   "$ARCHIVES_DIR" \
   "https://example.invalid/releases" \
-  "$RELEASE_NOTES_URL_PREFIX"
+  "$RELEASE_NOTES_URL_PREFIX" \
+  "$SPARKLE_PRIVATE_KEY_FILE"
 
 if [[ "$PUBLISH_GITHUB_RELEASE" == true ]]; then
   python3 "$ROOT_DIR/scripts/rewrite_appcast_for_github_releases.py" "$ARCHIVES_DIR/appcast.xml" "$REPO"

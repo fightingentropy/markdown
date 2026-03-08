@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <archives-dir> [download-url-prefix] [release-notes-url-prefix]" >&2
+  echo "Usage: $0 <archives-dir> [download-url-prefix] [release-notes-url-prefix] [ed-key-file]" >&2
   exit 1
 fi
 
@@ -10,7 +10,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ARCHIVES_DIR="$1"
 DOWNLOAD_URL_PREFIX="${2:-https://raw.githubusercontent.com/fightingentropy/markdown/main/releases}"
 RELEASE_NOTES_URL_PREFIX="${3:-https://raw.githubusercontent.com/fightingentropy/markdown/main/releases}"
-SPARKLE_BIN="$ROOT_DIR/.derived/SourcePackages/artifacts/sparkle/Sparkle/bin/generate_appcast"
+ED_KEY_FILE="${4:-${SPARKLE_PRIVATE_KEY_FILE:-}}"
+SPARKLE_BIN="${SPARKLE_BIN:-$ROOT_DIR/.derived/SourcePackages/artifacts/sparkle/Sparkle/bin/generate_appcast}"
 OUTPUT_APPCAST="$ARCHIVES_DIR/appcast.xml"
 
 if [[ ! -x "$SPARKLE_BIN" ]]; then
@@ -18,11 +19,20 @@ if [[ ! -x "$SPARKLE_BIN" ]]; then
   exit 1
 fi
 
-"$SPARKLE_BIN" \
-  --download-url-prefix "$DOWNLOAD_URL_PREFIX" \
-  --release-notes-url-prefix "$RELEASE_NOTES_URL_PREFIX" \
-  --link "https://github.com/fightingentropy/markdown" \
-  "$ARCHIVES_DIR"
+cmd=(
+  "$SPARKLE_BIN"
+  --download-url-prefix "$DOWNLOAD_URL_PREFIX"
+  --release-notes-url-prefix "$RELEASE_NOTES_URL_PREFIX"
+  --link "https://github.com/fightingentropy/markdown"
+)
+
+if [[ -n "$ED_KEY_FILE" ]]; then
+  cmd+=(--ed-key-file "$ED_KEY_FILE")
+fi
+
+cmd+=("$ARCHIVES_DIR")
+
+"${cmd[@]}"
 
 if [[ "${ARCHIVES_DIR:A}" == "${ROOT_DIR:A}/releases" && -f "$OUTPUT_APPCAST" ]]; then
   cp "$OUTPUT_APPCAST" "$ROOT_DIR/appcast.xml"
