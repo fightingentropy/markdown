@@ -80,6 +80,7 @@ It is designed for working in a folder of notes with a plain-text editor, a rend
 - Built-in Sparkle updater
 - `Check for Updates…` menu item in the app
 - App reads the update feed from the root [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml)
+- Sparkle archives are intended to be hosted in GitHub Releases, not committed into the repo
 
 ## Keyboard Shortcuts
 
@@ -99,6 +100,7 @@ It is designed for working in a folder of notes with a plain-text editor, a rend
 - macOS 15 or newer
 - Xcode 16 or newer
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)
+- [GitHub CLI](https://cli.github.com/) for publishing updates with the release script
 
 ## Project Structure
 
@@ -106,7 +108,7 @@ It is designed for working in a folder of notes with a plain-text editor, a rend
 - [MarkdownEditorTests](/Users/erlinhoxha/Developer/Markdown/MarkdownEditorTests): unit tests
 - [project.yml](/Users/erlinhoxha/Developer/Markdown/project.yml): XcodeGen project definition
 - [scripts](/Users/erlinhoxha/Developer/Markdown/scripts): helper scripts, including release tooling
-- [releases](/Users/erlinhoxha/Developer/Markdown/releases): release archives and release notes
+- [releases](/Users/erlinhoxha/Developer/Markdown/releases): tracked release notes
 - [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml): Sparkle feed used by the app
 
 ## Run Locally
@@ -194,8 +196,9 @@ For users, updates come from the root [appcast.xml](/Users/erlinhoxha/Developer/
 For developers, the important rule is:
 
 - the app checks the root `appcast.xml`
-- release archives and release notes live in `releases/`
-- the release script keeps those in sync
+- release notes live in `releases/`
+- heavy Sparkle archives live in GitHub Releases
+- the release script keeps the root appcast in sync with those GitHub Release assets
 
 ## Very Simple Release Flow
 
@@ -232,8 +235,9 @@ That command will:
 
 - generate the Xcode project
 - build the Release app
-- create `releases/Markdown-<version>.zip`
-- generate `releases/appcast.xml`
+- create a local archive cache in `.release-assets/`
+- upload `Markdown-<version>.zip` and any new delta files to the matching GitHub Release
+- generate a local appcast from that archive cache
 - sync the root [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml) that Sparkle actually reads
 
 If your notes file is somewhere else, run:
@@ -242,35 +246,43 @@ If your notes file is somewhere else, run:
 ./scripts/cut_release.sh --notes-file /path/to/release-notes.md
 ```
 
+If you only want to build locally and inspect the generated appcast without publishing an update:
+
+```bash
+./scripts/cut_release.sh --skip-github-release
+```
+
+That local-only mode leaves the root [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml) unchanged.
+
 ### 4. Commit And Push
 
 ```bash
-git add project.yml releases appcast.xml
+git add project.yml releases/*.md appcast.xml
 git commit -m "Release <version>"
 git push origin main
 ```
 
-Once `main` contains the new archive, release notes, and updated appcast, Sparkle can offer the update.
+Once `main` contains the new release notes and updated appcast, Sparkle can offer the update. The heavy archive files stay out of Git and live in GitHub Releases.
 
 ## Release Files Produced
 
 After a release, you should expect:
 
-- `releases/Markdown-<version>.zip`
 - `releases/Markdown-<version>.md`
-- `releases/appcast.xml`
 - root [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml)
+- local `.release-assets/Markdown-<version>.zip`
+- GitHub Release assets for that version
 
 ## If You Only Need To Regenerate The Appcast
 
 ```bash
-./scripts/generate_appcast.sh releases
+./scripts/generate_appcast.sh /path/to/local/archive-cache
 ```
 
 If the archive URLs or notes URLs are hosted somewhere else:
 
 ```bash
-./scripts/generate_appcast.sh releases https://your-host/releases https://your-host/releases
+./scripts/generate_appcast.sh /path/to/local/archive-cache https://your-host/releases https://your-host/releases
 ```
 
 ## Notes On Keys And Signing
@@ -286,4 +298,3 @@ The app is configured to use:
 
 - [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml)
 - feed URL: `https://raw.githubusercontent.com/fightingentropy/markdown/main/appcast.xml`
-

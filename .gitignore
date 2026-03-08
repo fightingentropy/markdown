@@ -1,6 +1,14 @@
 .DS_Store
+__pycache__/
 .derived/
+.release-assets/
+.release-build*/
 MarkdownEditor.xcodeproj/
+
+# Sparkle release artifacts are hosted via GitHub Releases, not kept in git
+/releases/*.zip
+/releases/*.delta
+/releases/appcast.xml
 
 # Local notes created while testing the app
 /Untitled.md
