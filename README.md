@@ -1,105 +1,289 @@
 # Markdown
 
-Markdown is a native macOS Markdown editor built with SwiftUI and AppKit. It focuses on fast note-taking with a plain text editor, a live preview, Mermaid diagram rendering, keyboard-first navigation, and a lightweight vault-based file browser.
+Markdown is a native macOS Markdown notes app built with SwiftUI and AppKit.
 
-## Features
+It is designed for working in a folder of notes with a plain-text editor, a rendered preview, fast note switching, inline image handling, Mermaid support, and an optional in-app note assistant.
 
-- Open a folder of Markdown notes and browse them in a sidebar
-- Create notes and folders from the File menu
-- Edit notes in a monospaced source editor with basic Markdown syntax highlighting
-- Preview rendered Markdown, including Mermaid diagrams
-- Search notes with `Command-K`
-- Toggle the sidebar with `Command-B`
-- Check for updates with Sparkle once an appcast feed is configured
+## What The App Does
 
-## Project Structure
+- Opens a notes folder as a vault
+- Shows notes and folders in a sidebar
+- Lets you create, edit, save, search, and delete notes
+- Renders Markdown in a native preview
+- Renders Mermaid diagrams
+- Shows image files and inline image embeds
+- Includes Sparkle-based app updates
+- Includes an optional note assistant that uses the current note as context
 
-- `MarkdownEditor/`
-  App source files, entitlements, and plist resources
-- `project.yml`
-  XcodeGen specification for the Xcode project
-- `MarkdownEditor.xcodeproj`
-  Generated Xcode project
+## Main Features
 
-## Development
+### Notes And Vaults
 
-This project uses [XcodeGen](https://github.com/yonaskolb/XcodeGen) to manage the Xcode project.
+- Open a folder and use it as your notes vault
+- Automatically restore the last opened vault on launch
+- Automatically restore the last selected file in that vault
+- Browse nested folders and notes in a sidebar
+- Sort notes by date modified or by name
+- Collapse all expanded folders from the sidebar footer
+- Create new notes and folders from the app
+- Delete notes from the sidebar
+- Drag and drop a Markdown file onto the app to open/import it
 
-Generate or refresh the project:
+### Editing
 
-```bash
-xcodegen
-```
+- Plain-text Markdown editor with syntax highlighting
+- Autosave while typing
+- Formatting commands for:
+  - bold
+  - italic
+  - inline code
+  - links
+  - headings
+  - blockquotes
+  - bullet lists
+  - numbered lists
+  - code blocks
+- If a note has no Markdown heading at the top, the app can normalize it by adding a `# Title` based on the file name
+- Sidebar titles use the first heading when available
 
-Build the app:
+### Preview
 
-```bash
-xcodebuild -project MarkdownEditor.xcodeproj -scheme MarkdownEditor -configuration Debug build
-```
+- Toggle between source editing and rendered preview
+- Native Markdown preview for normal notes
+- HTML fallback preview when needed
+- Mermaid diagram rendering
+- Clickable links in preview
+- Image attachment loading relative to the current note or vault
+- Direct preview for image files selected in the sidebar
+
+### Inline Image Editing
+
+- Optional inline image previews while editing
+- Hides the raw image embed syntax until the caret moves onto that line
+- Lets you click and edit around inline image previews in the source editor
+
+### Search
+
+- Command palette for searching notes by title, file name, or relative path
+
+### Assistant
+
+- Optional in-app note assistant
+- Uses the current note as the primary context
+- Resets chat automatically when switching notes
+- Stores the API key in macOS Keychain
+- Lets you choose the assistant model
+- Lets you customize the floating launcher button
+
+### Updates
+
+- Built-in Sparkle updater
+- `Check for Updates…` menu item in the app
+- App reads the update feed from the root [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml)
 
 ## Keyboard Shortcuts
 
 - `Command-N`: New file
 - `Shift-Command-N`: New folder
 - `Command-O`: Choose folder
-- `Command-S`: Save current file
-- `Command-B`: Toggle sidebar
-- `Command-K`: Open note search
+- `Command-S`: Save
+- `Command-B`: Show or hide sidebar
+- `Command-K`: Search notes
 - `Shift-Command-B`: Bold
 - `Command-I`: Italic
 - `Command-E`: Inline code
 - `Shift-Command-K`: Link
 
-## Sparkle Updates
+## Requirements
 
-Sparkle is integrated and the app is configured with:
+- macOS 15 or newer
+- Xcode 16 or newer
+- [XcodeGen](https://github.com/yonaskolb/XcodeGen)
 
-- `SUFeedURL`: `https://raw.githubusercontent.com/fightingentropy/markdown/main/appcast.xml`
-- `SUPublicEDKey`: configured via `project.yml`
+## Project Structure
 
-The `Check for Updates…` menu item should now be enabled in builds generated from this repo.
+- [MarkdownEditor](/Users/erlinhoxha/Developer/Markdown/MarkdownEditor): app source code
+- [MarkdownEditorTests](/Users/erlinhoxha/Developer/Markdown/MarkdownEditorTests): unit tests
+- [project.yml](/Users/erlinhoxha/Developer/Markdown/project.yml): XcodeGen project definition
+- [scripts](/Users/erlinhoxha/Developer/Markdown/scripts): helper scripts, including release tooling
+- [releases](/Users/erlinhoxha/Developer/Markdown/releases): release archives and release notes
+- [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml): Sparkle feed used by the app
 
-### Publishing a new update
+## Run Locally
 
-1. Bump `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` in `project.yml`.
-2. Add release notes at `releases/Markdown-<version>.md`.
-3. Run the one-command release flow:
+### 1. Generate The Xcode Project
+
+```bash
+xcodegen
+```
+
+### 2. Build The App
+
+Debug build:
+
+```bash
+xcodebuild -project MarkdownEditor.xcodeproj -scheme MarkdownEditor -configuration Debug build
+```
+
+Release build:
+
+```bash
+xcodebuild -project MarkdownEditor.xcodeproj -scheme MarkdownEditor -configuration Release build
+```
+
+### 3. Launch The Built App
+
+The built app bundle is usually here:
+
+```bash
+~/Library/Developer/Xcode/DerivedData/MarkdownEditor-*/Build/Products/Debug/Markdown.app
+```
+
+or for Release:
+
+```bash
+~/Library/Developer/Xcode/DerivedData/MarkdownEditor-*/Build/Products/Release/Markdown.app
+```
+
+## How To Use The App
+
+### Open Your Notes
+
+1. Launch the app.
+2. Click `Open Folder…` or press `Command-O`.
+3. Choose the folder that contains your notes.
+
+### Create A Note
+
+1. Press `Command-N`.
+2. Start typing.
+3. The note autosaves while you work.
+
+### Create A Folder
+
+1. Press `Shift-Command-N`.
+
+### Search Notes
+
+1. Press `Command-K`.
+2. Start typing the note name or path.
+3. Press Return to open the top result.
+
+### Preview A Note
+
+1. Open a note.
+2. Click the eye button in the toolbar to switch to preview.
+
+### Ask The Assistant
+
+1. Open Settings.
+2. Add or load your API key.
+3. Choose a model.
+4. Open a note.
+5. Use the floating assistant button to ask questions about that note.
+
+### Check For Updates
+
+1. Open the app menu.
+2. Click `Check for Updates…`.
+
+## Sparkle Update Flow
+
+For users, updates come from the root [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml).
+
+For developers, the important rule is:
+
+- the app checks the root `appcast.xml`
+- release archives and release notes live in `releases/`
+- the release script keeps those in sync
+
+## Very Simple Release Flow
+
+If you want to publish a new app update, do this:
+
+### 1. Bump The Version
+
+Edit [project.yml](/Users/erlinhoxha/Developer/Markdown/project.yml):
+
+- update `MARKETING_VERSION`
+- update `CURRENT_PROJECT_VERSION`
+
+### 2. Add Release Notes
+
+Create this file:
+
+```bash
+releases/Markdown-<version>.md
+```
+
+Example:
+
+```bash
+releases/Markdown-1.0.3.md
+```
+
+### 3. Run The Release Script
 
 ```bash
 ./scripts/cut_release.sh
 ```
 
-That command:
+That command will:
 
-- builds the Release app into `.derived`
-- creates `releases/Markdown-<version>.zip`
-- regenerates `releases/appcast.xml`
-- syncs the root [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml) that the app actually uses
+- generate the Xcode project
+- build the Release app
+- create `releases/Markdown-<version>.zip`
+- generate `releases/appcast.xml`
+- sync the root [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml) that Sparkle actually reads
 
-If your notes live somewhere else, you can pass them in:
+If your notes file is somewhere else, run:
 
 ```bash
 ./scripts/cut_release.sh --notes-file /path/to/release-notes.md
 ```
 
-If you only need to regenerate the appcast from existing archives, you can still run:
+### 4. Commit And Push
+
+```bash
+git add project.yml releases appcast.xml
+git commit -m "Release <version>"
+git push origin main
+```
+
+Once `main` contains the new archive, release notes, and updated appcast, Sparkle can offer the update.
+
+## Release Files Produced
+
+After a release, you should expect:
+
+- `releases/Markdown-<version>.zip`
+- `releases/Markdown-<version>.md`
+- `releases/appcast.xml`
+- root [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml)
+
+## If You Only Need To Regenerate The Appcast
 
 ```bash
 ./scripts/generate_appcast.sh releases
 ```
 
-By default this script assumes release assets and release notes will be published under:
-
-- `https://raw.githubusercontent.com/fightingentropy/markdown/main/releases`
-
-If you host update archives somewhere else, pass explicit URL prefixes:
+If the archive URLs or notes URLs are hosted somewhere else:
 
 ```bash
 ./scripts/generate_appcast.sh releases https://your-host/releases https://your-host/releases
 ```
 
-The appcast the app reads lives at:
+## Notes On Keys And Signing
+
+- Sparkle public key is configured in [project.yml](/Users/erlinhoxha/Developer/Markdown/project.yml)
+- Sparkle private signing key is expected to live in your local macOS Keychain
+- Do not commit private keys to the repo
+- Assistant API keys are stored in macOS Keychain, not in note files
+
+## Current Update Feed
+
+The app is configured to use:
 
 - [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml)
+- feed URL: `https://raw.githubusercontent.com/fightingentropy/markdown/main/appcast.xml`
 
-The Sparkle private signing key is stored in the local macOS Keychain. Do not commit exported private keys to the repository.
