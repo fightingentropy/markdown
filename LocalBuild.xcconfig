@@ -1,0 +1,11 @@
+// Build configuration for local installs to /Applications.
+// Used by scripts/install_local_app.sh.
+
+CODE_SIGN_IDENTITY = Markdown
+CODE_SIGN_STYLE = Manual
+DEVELOPMENT_TEAM =
+PROVISIONING_PROFILE_SPECIFIER =
+
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) LOCAL_BUILD
+SPARKLE_FEED_URL =
+SPARKLE_PUBLIC_ED_KEY =

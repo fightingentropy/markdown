@@ -40,9 +40,9 @@
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>SUFeedURL</key>
-	<string>https://raw.githubusercontent.com/fightingentropy/markdown/main/appcast.xml</string>
+	<string>$(SPARKLE_FEED_URL)</string>
 	<key>SUPublicEDKey</key>
-	<string>qk1d4lmZRxr+pXMwftRYWK7yyjARhSaqWyw024Cjycc=</string>
+	<string>$(SPARKLE_PUBLIC_ED_KEY)</string>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
 		<dict>

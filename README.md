@@ -12,7 +12,7 @@ It is designed for working in a folder of notes with a plain-text editor, a rend
 - Renders Markdown in a native preview
 - Renders Mermaid diagrams
 - Shows image files and inline image embeds
-- Includes Sparkle-based app updates
+- Includes Sparkle-based app updates for shipped builds
 - Includes an optional note assistant that uses the current note as context
 
 ## Main Features
@@ -77,10 +77,11 @@ It is designed for working in a folder of notes with a plain-text editor, a rend
 
 ### Updates
 
-- Built-in Sparkle updater
+- Built-in Sparkle updater for shipped builds
 - `Check for Updates…` menu item in the app
 - App reads the update feed from the root [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml)
 - Sparkle archives are intended to be hosted in GitHub Releases, not committed into the repo
+- Local installs intentionally disable Sparkle so `/Applications/Markdown.app` does not drift from the published feed
 
 ## Keyboard Shortcuts
 
@@ -112,6 +113,25 @@ It is designed for working in a folder of notes with a plain-text editor, a rend
 - [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml): Sparkle feed used by the app
 
 ## Run Locally
+
+### Preferred Local Install
+
+Use the local install script if you want the app in `/Applications` with stable local signing and Sparkle disabled:
+
+```bash
+./scripts/install_local_app.sh
+```
+
+That script will:
+
+- create a local `Markdown` code-signing identity if needed
+- generate the Xcode project
+- build a local app
+- install a clean `/Applications/Markdown.app`
+- launch it
+- blank the Sparkle feed and public key for that local build
+
+### Manual Builds
 
 ### 1. Generate The Xcode Project
 
@@ -189,6 +209,8 @@ or for Release:
 1. Open the app menu.
 2. Click `Check for Updates…`.
 
+Local installs created by `./scripts/install_local_app.sh` intentionally omit this updater entry.
+
 ## Sparkle Update Flow
 
 For users, updates come from the root [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml).
@@ -199,6 +221,7 @@ For developers, the important rule is:
 - release notes live in `releases/`
 - heavy Sparkle archives live in GitHub Releases
 - the release script keeps the root appcast in sync with those GitHub Release assets
+- local `/Applications` installs should not participate in Sparkle updates
 
 ## Very Simple Release Flow
 
@@ -290,6 +313,7 @@ If the archive URLs or notes URLs are hosted somewhere else:
 - Sparkle public key is configured in [project.yml](/Users/erlinhoxha/Developer/Markdown/project.yml)
 - Sparkle private signing key is expected to live in your local macOS Keychain
 - Do not commit private keys to the repo
+- Local `/Applications/Markdown.app` installs should be signed with the local `Markdown` identity, not ad-hoc
 - Assistant API keys are stored in macOS Keychain, not in note files
 
 ## Current Update Feed

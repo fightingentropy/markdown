@@ -45,16 +45,18 @@ targets:
         PRODUCT_NAME: Markdown
         INFOPLIST_KEY_CFBundleDisplayName: Markdown
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
-        INFOPLIST_KEY_SUFeedURL: https://raw.githubusercontent.com/fightingentropy/markdown/main/appcast.xml
-        INFOPLIST_KEY_SUPublicEDKey: qk1d4lmZRxr+pXMwftRYWK7yyjARhSaqWyw024Cjycc=
+        SPARKLE_FEED_URL: https://raw.githubusercontent.com/fightingentropy/markdown/main/appcast.xml
+        SPARKLE_PUBLIC_ED_KEY: qk1d4lmZRxr+pXMwftRYWK7yyjARhSaqWyw024Cjycc=
+        INFOPLIST_KEY_SUFeedURL: "$(SPARKLE_FEED_URL)"
+        INFOPLIST_KEY_SUPublicEDKey: "$(SPARKLE_PUBLIC_ED_KEY)"
         SWIFT_STRICT_CONCURRENCY: complete
     info:
       path: MarkdownEditor/Info.plist
       properties:
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
-        SUFeedURL: https://raw.githubusercontent.com/fightingentropy/markdown/main/appcast.xml
-        SUPublicEDKey: qk1d4lmZRxr+pXMwftRYWK7yyjARhSaqWyw024Cjycc=
+        SUFeedURL: "$(SPARKLE_FEED_URL)"
+        SUPublicEDKey: "$(SPARKLE_PUBLIC_ED_KEY)"
         CFBundleDocumentTypes:
           - CFBundleTypeExtensions:
               - md

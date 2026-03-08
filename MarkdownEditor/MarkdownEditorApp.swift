@@ -53,9 +53,11 @@ struct MarkdownEditorApp: App {
                     .disabled(!workspace.hasVault)
             }
             CommandGroup(after: .help) {
-                Divider()
-                Button("Check for Updates…") { appUpdater.checkForUpdates() }
-                    .disabled(!appUpdater.canCheckForUpdates)
+                if appUpdater.isConfigured {
+                    Divider()
+                    Button("Check for Updates…") { appUpdater.checkForUpdates() }
+                        .disabled(!appUpdater.canCheckForUpdates)
+                }
             }
             formatMenu
         }
