@@ -40,6 +40,23 @@ enum SortOrder: String {
     case byDate
 }
 
+enum FileRenameError: LocalizedError, Equatable {
+    case emptyName
+    case invalidName
+    case nameAlreadyExists
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyName:
+            "Enter a file name."
+        case .invalidName:
+            "File names can't contain slashes, colons, or line breaks."
+        case .nameAlreadyExists:
+            "A file with that name already exists."
+        }
+    }
+}
+
 @Observable
 @MainActor
 final class Workspace {
@@ -123,8 +140,8 @@ final class Workspace {
         vaultURL = url
         restoreSortOrder()
         refreshFiles()
-        if let restoredURL = restoreSelectedFileURL(), files.contains(where: { $0.url == restoredURL }) {
-            selectFile(restoredURL)
+        if let restoredURL = restoreSelectedFileURL(), let matchingURL = matchingFileURL(for: restoredURL) {
+            selectFile(matchingURL)
         } else if let first = sortedFiles.first {
             selectFile(first.url)
         } else {
@@ -156,8 +173,8 @@ final class Workspace {
 
         refreshFiles()
 
-        if let restoredURL = restoreSelectedFileURL(), files.contains(where: { $0.url == restoredURL }) {
-            selectFile(restoredURL)
+        if let restoredURL = restoreSelectedFileURL(), let matchingURL = matchingFileURL(for: restoredURL) {
+            selectFile(matchingURL)
         }
     }
 
@@ -174,26 +191,33 @@ final class Workspace {
         files = snapshot.files
         sidebarNodes = snapshot.nodes
 
-        if let selectedFileURL, !files.contains(where: { $0.url == selectedFileURL }) {
-            self.selectedFileURL = nil
-            text = ""
-            clearStoredSelectedFileURL()
+        if let selectedFileURL {
+            if let matchingURL = matchingFileURL(for: selectedFileURL) {
+                self.selectedFileURL = matchingURL
+            } else {
+                self.selectedFileURL = nil
+                text = ""
+                clearStoredSelectedFileURL()
+            }
         }
     }
 
     func selectFile(_ url: URL) {
-        guard selectedFileURL != url else { return }
+        let canonicalURL = matchingFileURL(for: url) ?? url
+        if let selectedFileURL, Self.urlsMatch(selectedFileURL, canonicalURL) {
+            return
+        }
 
         saveCurrentFile()
-        if Self.isMarkdownFile(url), let content = readFile(url) {
-            let normalizedContent = normalizedContent(for: url, content: content)
-            selectedFileURL = url
+        if Self.isMarkdownFile(canonicalURL), let content = readFile(canonicalURL) {
+            let normalizedContent = normalizedContent(for: canonicalURL, content: content)
+            selectedFileURL = canonicalURL
             text = normalizedContent
-            persistSelectedFileURL(url)
+            persistSelectedFileURL(canonicalURL)
         } else {
-            selectedFileURL = url
+            selectedFileURL = canonicalURL
             text = ""
-            persistSelectedFileURL(url)
+            persistSelectedFileURL(canonicalURL)
         }
     }
 
@@ -221,7 +245,7 @@ final class Workspace {
         autosaveTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled else { return }
-            await self?.saveCurrentFile()
+            self?.saveCurrentFile()
         }
     }
 
@@ -255,9 +279,9 @@ final class Workspace {
 
     func deleteFile(_ url: URL) {
         try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
-        if selectedFileURL == url {
+        if let selectedFileURL, Self.urlsMatch(selectedFileURL, url) {
             text = ""
-            selectedFileURL = nil
+            self.selectedFileURL = nil
             clearStoredSelectedFileURL()
         }
         refreshFiles()
@@ -334,17 +358,49 @@ final class Workspace {
         refreshFiles()
     }
 
-    func renameFile(_ url: URL, to newName: String) {
-        let newURL = url.deletingLastPathComponent().appendingPathComponent(newName + ".md")
-        try? FileManager.default.moveItem(at: url, to: newURL)
-        if selectedFileURL == url {
-            selectedFileURL = newURL
+    @discardableResult
+    func renameFile(_ url: URL, to newName: String) throws -> URL {
+        let newURL = try validatedRenamedURL(for: url, proposedName: newName)
+        guard newURL != url else { return url }
+
+        let isSelectedFile = selectedFileURL.map { Self.urlsMatch($0, url) } ?? false
+        let existingContent = Self.isMarkdownFile(url)
+            ? (isSelectedFile ? text : readFile(url))
+            : nil
+
+        if isSelectedFile {
+            saveCurrentFile()
         }
+
+        try moveItemForRename(at: url, to: newURL)
+
+        if let existingContent {
+            let updatedContent = contentAfterRename(
+                oldURL: url,
+                newURL: newURL,
+                existingContent: existingContent
+            )
+
+            if updatedContent != existingContent {
+                try Data(updatedContent.utf8).write(to: newURL, options: .atomic)
+            }
+
+            if isSelectedFile {
+                text = updatedContent
+            }
+        }
+
+        if isSelectedFile {
+            selectedFileURL = newURL
+            persistSelectedFileURL(newURL)
+        }
+
         refreshFiles()
+        return newURL
     }
 
     func title(for file: FileItem) -> String {
-        if file.url == selectedFileURL,
+        if let selectedFileURL, Self.urlsMatch(file.url, selectedFileURL),
            let liveTitle = Self.extractTitle(from: text) {
             return liveTitle
         }
@@ -352,7 +408,7 @@ final class Workspace {
     }
 
     func fileItem(for url: URL) -> FileItem? {
-        files.first(where: { $0.url == url })
+        files.first(where: { Self.urlsMatch($0.url, url) })
     }
 
     func relativePath(for file: FileItem) -> String? {
@@ -386,6 +442,138 @@ final class Workspace {
         }
 
         return nil
+    }
+
+    private func validatedRenamedURL(for url: URL, proposedName: String) throws -> URL {
+        let trimmedName = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            throw FileRenameError.emptyName
+        }
+
+        guard trimmedName.rangeOfCharacter(from: CharacterSet(charactersIn: "/:\n\r")) == nil else {
+            throw FileRenameError.invalidName
+        }
+
+        let pathExtension = url.pathExtension
+        var sanitizedName = trimmedName
+
+        if !pathExtension.isEmpty {
+            let extensionSuffix = "." + pathExtension
+            if sanitizedName.lowercased().hasSuffix(extensionSuffix.lowercased()) {
+                sanitizedName.removeLast(extensionSuffix.count)
+                sanitizedName = sanitizedName.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
+        guard !sanitizedName.isEmpty else {
+            throw FileRenameError.emptyName
+        }
+
+        let parentURL = url.deletingLastPathComponent()
+        let newURL: URL
+
+        if pathExtension.isEmpty {
+            newURL = parentURL.appendingPathComponent(sanitizedName)
+        } else {
+            newURL = parentURL
+                .appendingPathComponent(sanitizedName)
+                .appendingPathExtension(pathExtension)
+        }
+
+        if newURL.standardizedFileURL == url.standardizedFileURL {
+            return url
+        }
+
+        let isCaseOnlyRename = newURL.standardizedFileURL.path.caseInsensitiveCompare(url.standardizedFileURL.path) == .orderedSame
+        if FileManager.default.fileExists(atPath: newURL.path), !isCaseOnlyRename {
+            throw FileRenameError.nameAlreadyExists
+        }
+
+        return newURL
+    }
+
+    private func contentAfterRename(oldURL: URL, newURL: URL, existingContent: String) -> String {
+        let oldDisplayName = oldURL.deletingPathExtension().lastPathComponent
+        let newDisplayName = newURL.deletingPathExtension().lastPathComponent
+        guard let currentTitle = Self.extractTitle(from: existingContent), currentTitle == oldDisplayName else {
+            return existingContent
+        }
+
+        return Self.replacingLeadingTitle(in: existingContent, with: newDisplayName)
+    }
+
+    private func moveItemForRename(at url: URL, to newURL: URL) throws {
+        let standardizedSourceURL = url.standardizedFileURL
+        let standardizedDestinationURL = newURL.standardizedFileURL
+        let isCaseOnlyRename = standardizedSourceURL.path.caseInsensitiveCompare(standardizedDestinationURL.path) == .orderedSame
+
+        if isCaseOnlyRename, standardizedSourceURL.path != standardizedDestinationURL.path {
+            let temporaryURL = uniqueIntermediateRenameURL(for: url)
+            try FileManager.default.moveItem(at: url, to: temporaryURL)
+
+            do {
+                try FileManager.default.moveItem(at: temporaryURL, to: newURL)
+            } catch {
+                try? FileManager.default.moveItem(at: temporaryURL, to: url)
+                throw error
+            }
+
+            return
+        }
+
+        try FileManager.default.moveItem(at: url, to: newURL)
+    }
+
+    private func uniqueIntermediateRenameURL(for url: URL) -> URL {
+        let folderURL = url.deletingLastPathComponent()
+        let token = UUID().uuidString
+        let baseName = "." + url.deletingPathExtension().lastPathComponent + "-" + token
+        let pathExtension = url.pathExtension
+
+        if pathExtension.isEmpty {
+            return folderURL.appendingPathComponent(baseName)
+        }
+
+        return folderURL
+            .appendingPathComponent(baseName)
+            .appendingPathExtension(pathExtension)
+    }
+
+    private static func replacingLeadingTitle(in content: String, with title: String) -> String {
+        var lineStart = content.startIndex
+
+        while lineStart < content.endIndex {
+            let lineEnd = content[lineStart...].firstIndex(where: \.isNewline) ?? content.endIndex
+            let line = content[lineStart..<lineEnd]
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if trimmed.isEmpty {
+                guard lineEnd < content.endIndex else { return content }
+                lineStart = content.index(after: lineEnd)
+                continue
+            }
+
+            guard trimmed.hasPrefix("#") else {
+                return content
+            }
+
+            var titleStart = line.startIndex
+            while titleStart < line.endIndex, line[titleStart].isWhitespace {
+                titleStart = line.index(after: titleStart)
+            }
+            while titleStart < line.endIndex, line[titleStart] == "#" {
+                titleStart = line.index(after: titleStart)
+            }
+            while titleStart < line.endIndex, line[titleStart].isWhitespace {
+                titleStart = line.index(after: titleStart)
+            }
+
+            var updatedContent = content
+            updatedContent.replaceSubrange(titleStart..<lineEnd, with: title)
+            return updatedContent
+        }
+
+        return content
     }
 
     private func updateCachedMetadata(for url: URL, content: String) {
@@ -518,6 +706,14 @@ final class Workspace {
 
     static func isImageFile(_ url: URL) -> Bool {
         imageExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    private func matchingFileURL(for url: URL) -> URL? {
+        files.first(where: { Self.urlsMatch($0.url, url) })?.url
+    }
+
+    private static func urlsMatch(_ lhs: URL, _ rhs: URL) -> Bool {
+        lhs.resolvingSymlinksInPath().standardizedFileURL == rhs.resolvingSymlinksInPath().standardizedFileURL
     }
 
     private func persistSelectedFileURL(_ url: URL) {

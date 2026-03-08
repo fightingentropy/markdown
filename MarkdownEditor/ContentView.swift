@@ -6,6 +6,7 @@ struct ContentView: View {
     @Bindable var assistant: NoteAssistant
     @Bindable var assistantSettings: AssistantSettings
     @State private var controller = EditorController()
+    @State private var renameRequest: RenameRequest?
     @State private var showPreview = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var expandedFolderURLs: Set<URL> = []
@@ -87,6 +88,11 @@ struct ContentView: View {
         .onChange(of: workspace.selectedFileURL) { _, _ in
             synchronizeAssistantContext()
         }
+        .sheet(item: $renameRequest) { request in
+            RenameFileSheet(target: request) { proposedName in
+                try workspace.renameFile(request.url, to: proposedName)
+            }
+        }
     }
 
     // MARK: - Sidebar
@@ -105,7 +111,10 @@ struct ContentView: View {
                     SidebarNodeList(
                         nodes: workspace.sidebarNodes,
                         workspace: workspace,
-                        expandedFolderURLs: $expandedFolderURLs
+                        expandedFolderURLs: $expandedFolderURLs,
+                        onRenameRequested: { file in
+                            renameRequest = RenameRequest(file: file)
+                        }
                     )
                 }
                 .listStyle(.sidebar)
@@ -353,6 +362,7 @@ private struct SidebarNodeList: View {
     let nodes: [SidebarNode]
     let workspace: Workspace
     @Binding var expandedFolderURLs: Set<URL>
+    let onRenameRequested: (FileItem) -> Void
 
     var body: some View {
         ForEach(nodes) { node in
@@ -361,7 +371,8 @@ private struct SidebarNodeList: View {
                     SidebarNodeList(
                         nodes: node.children,
                         workspace: workspace,
-                        expandedFolderURLs: $expandedFolderURLs
+                        expandedFolderURLs: $expandedFolderURLs,
+                        onRenameRequested: onRenameRequested
                     )
                 } label: {
                     HStack(spacing: 8) {
@@ -383,7 +394,13 @@ private struct SidebarNodeList: View {
                 }
                 .listRowInsets(sidebarRowInsets)
             } else if let file = workspace.fileItem(for: node.url) {
-                SidebarFileRow(file: file, workspace: workspace)
+                SidebarFileRow(
+                    file: file,
+                    workspace: workspace,
+                    onRenameRequested: {
+                        onRenameRequested(file)
+                    }
+                )
             } else {
                 SidebarAssetRow(node: node, workspace: workspace)
             }
@@ -435,6 +452,7 @@ private struct SidebarAssetRow: View {
 private struct SidebarFileRow: View {
     let file: FileItem
     let workspace: Workspace
+    let onRenameRequested: () -> Void
 
     var body: some View {
         Button {
@@ -461,8 +479,28 @@ private struct SidebarFileRow: View {
         .buttonStyle(.plain)
         .listRowInsets(sidebarRowInsets)
         .contextMenu {
+            Button {
+                onRenameRequested()
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+
             Button("Delete", role: .destructive) {
                 workspace.deleteFile(file.url)
+            }
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button {
+                onRenameRequested()
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+            .tint(.accentColor)
+
+            Button(role: .destructive) {
+                workspace.deleteFile(file.url)
+            } label: {
+                Label("Delete", systemImage: "trash")
             }
         }
         .listRowBackground(file.url == workspace.selectedFileURL ? Color.accentColor.opacity(0.14) : Color.clear)
@@ -473,6 +511,105 @@ private let sidebarRowInsets = EdgeInsets(top: 2, leading: 6, bottom: 2, trailin
 
 private enum PaletteResult: Equatable {
     case file(URL)
+}
+
+private struct RenameRequest: Identifiable {
+    let url: URL
+    let displayName: String
+
+    var id: URL { url }
+    var pathExtension: String { url.pathExtension }
+
+    init(file: FileItem) {
+        self.url = file.url
+        self.displayName = file.displayName
+    }
+}
+
+private struct RenameFileSheet: View {
+    let target: RenameRequest
+    let onSave: (String) throws -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @FocusState private var isNameFieldFocused: Bool
+    @State private var proposedName: String
+    @State private var errorMessage: String?
+
+    init(target: RenameRequest, onSave: @escaping (String) throws -> Void) {
+        self.target = target
+        self.onSave = onSave
+        _proposedName = State(initialValue: target.displayName)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Rename File")
+                    .font(.title3.weight(.semibold))
+
+                Text("Choose a new name for this file.")
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Name")
+                    .font(.subheadline.weight(.medium))
+
+                HStack(spacing: 8) {
+                    TextField("File name", text: $proposedName)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($isNameFieldFocused)
+                        .onSubmit {
+                            submit()
+                        }
+
+                    if !target.pathExtension.isEmpty {
+                        Text(".\(target.pathExtension)")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+
+            HStack {
+                Spacer()
+
+                Button("Cancel") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button("Rename") {
+                    submit()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(trimmedProposedName.isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 380)
+        .onAppear {
+            isNameFieldFocused = true
+        }
+    }
+
+    private var trimmedProposedName: String {
+        proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func submit() {
+        do {
+            try onSave(proposedName)
+            dismiss()
+        } catch {
+            errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
 }
 
 // MARK: - Welcome View
