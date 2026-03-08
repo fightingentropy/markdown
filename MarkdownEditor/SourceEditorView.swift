@@ -150,6 +150,16 @@ struct SourceEditorView: NSViewRepresentable {
 
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate, NSLayoutManagerDelegate, InlinePreviewTextViewDelegate {
+        private enum HiddenInlineClickTarget {
+            case textInsertion(location: Int)
+            case editSource(lineLocation: Int)
+        }
+
+        private struct HiddenInlineClickArea {
+            let rect: CGRect
+            let target: HiddenInlineClickTarget
+        }
+
         private struct TextSelectionAppearance {
             let insertionPointColor: NSColor
             let selectedTextAttributes: [NSAttributedString.Key: Any]
@@ -159,6 +169,7 @@ struct SourceEditorView: NSViewRepresentable {
             let lineRange: NSRange
             let sourceText: String
             let showsSource: Bool
+            let isEditingSource: Bool
             let image: NSImage
             let displaySize: NSSize
             let reservedHeight: CGFloat
@@ -178,6 +189,7 @@ struct SourceEditorView: NSViewRepresentable {
         private var storedTextSelectionAppearance: TextSelectionAppearance?
         private var isSelectingInlineImage = false
         nonisolated(unsafe) private var inlineImagePreviewByGlyphLocation: [Int: InlineImagePreview] = [:]
+        private var inlineImagePreviewByLineLocation: [Int: InlineImagePreview] = [:]
         private let imageCache = NSCache<NSURL, NSImage>()
 
         init(_ parent: SourceEditorView) {
@@ -221,32 +233,96 @@ struct SourceEditorView: NSViewRepresentable {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
-            if isSelectingInlineImage || textView.window?.firstResponder === selectedInlineImageView {
+            if isSelectingInlineImage {
                 return
             }
-            clearInlineImageSelection()
+            if textView.window?.firstResponder !== selectedInlineImageView {
+                clearInlineImageSelection()
+            }
             refreshInlineImagePreviews(in: textView)
         }
 
         func inlinePreviewTextView(_ textView: NSTextView, handleInlinePreviewClickAt point: CGPoint) -> Bool {
-            guard let view = inlineImageViews
-                .compactMap({ $0 as? InlineImageBlockView })
-                .reversed()
-                .first(where: { $0.frame.contains(point) }) else {
-                return false
-            }
-
-            let localPoint = view.convert(point, from: textView)
-            if view.isToggleHit(at: localPoint) {
-                view.performToggleAction()
+            if let visibleLineSelection = selectionForVisibleLineClick(at: point, in: textView) {
+                placeCaret(at: visibleLineSelection.location, in: textView)
                 return true
             }
 
-            guard let lineLocation = view.lineLocation else {
+            if let blankLineSelection = selectionForBlankLineClick(at: point, in: textView) {
+                placeCaret(at: blankLineSelection.location, in: textView)
+                return true
+            }
+
+            for view in inlineImageViews.compactMap({ $0 as? InlineImageBlockView }).reversed() {
+                guard let lineLocation = view.lineLocation else {
+                    continue
+                }
+
+                if let clickTarget = hiddenInlineTextClickTarget(
+                    forLineAt: lineLocation,
+                    point: point,
+                    in: textView
+                ) {
+                    switch clickTarget {
+                    case .textInsertion(let location):
+                        placeCaret(at: location, in: textView)
+                    case .editSource:
+                        beginEditingInlineSource(atLine: lineLocation, in: textView)
+                    }
+                    return true
+                }
+
+                let localPoint = view.convert(point, from: textView)
+                switch view.clickAction(at: localPoint) {
+                case .toggle:
+                    view.performToggleAction()
+                    return true
+                case .editSource:
+                    beginEditingInlineSource(atLine: lineLocation, in: textView)
+                    return true
+                case .selectImage:
+                    selectInlineImage(atLine: lineLocation, view: view, in: textView)
+                    return true
+                case .none:
+                    continue
+                }
+            }
+
+            return false
+        }
+
+        func inlinePreviewTextViewDidCompleteMouseSelection(_ textView: NSTextView) {
+            if correctSelectionForVisibleLineClickIfNeeded(in: textView) {
+                return
+            }
+
+            guard textView.window?.firstResponder === textView,
+                  selectedInlineImageView != nil else {
+                return
+            }
+
+            clearInlineImageSelection()
+            refreshInlineImagePreviews(in: textView, resettingTextAttributes: false)
+        }
+
+        func inlinePreviewTextViewHandlePlainTextClickIfNeeded(_ textView: NSTextView, at point: CGPoint) -> Bool {
+            guard textView.window?.firstResponder === selectedInlineImageView else {
                 return false
             }
 
-            selectInlineImage(atLine: lineLocation, view: view, in: textView)
+            let clickedInlineImage = inlineImageViews
+                .compactMap { $0 as? InlineImageBlockView }
+                .contains { inlineImageView in
+                    inlineImageView.frame.contains(point)
+                }
+            guard !clickedInlineImage else {
+                return false
+            }
+
+            guard let insertionLocation = insertionLocation(for: point, in: textView) else {
+                return false
+            }
+            placeCaret(at: insertionLocation, in: textView)
             return true
         }
 
@@ -255,12 +331,42 @@ struct SourceEditorView: NSViewRepresentable {
             willChangeSelectionFromCharacterRange oldSelectedCharRange: NSRange,
             toCharacterRange newSelectedCharRange: NSRange
         ) -> NSRange {
-            adjustedSelectionAwayFromHiddenInlinePreviews(
-                newSelectedCharRange,
-                previousSelection: oldSelectedCharRange,
-                hiddenRanges: hiddenInlinePreviewRanges,
-                textLength: (textView.string as NSString).length
-            )
+            if let visibleLineSelection = selectionForMouseClickOnVisibleLine(in: textView) {
+                return visibleLineSelection
+            }
+
+            if let blankLineSelection = selectionForMouseClickOnBlankLine(in: textView) {
+                return blankLineSelection
+            }
+
+            if let explicitMouseSelection = selectionForMouseClickInHiddenInlinePreview(in: textView) {
+                return explicitMouseSelection
+            }
+
+            guard let inlinePreviewTextView = textView as? InlinePreviewTextView,
+                  inlinePreviewTextView.activeMouseDownPoint != nil else {
+                return newSelectedCharRange
+            }
+
+            if let hiddenRange = hiddenInlinePreviewRanges.first(where: {
+                selectionIntersectsHiddenPreview(newSelectedCharRange, lineRange: $0)
+            }) {
+                if let redirectedSelection = redirectedSelectionForMouseClickAboveHiddenPreview(
+                    hiddenRange,
+                    in: textView
+                ) {
+                    return redirectedSelection
+                }
+
+                return adjustedSelectionAwayFromHiddenInlinePreviews(
+                    newSelectedCharRange,
+                    previousSelection: oldSelectedCharRange,
+                    hiddenRanges: hiddenInlinePreviewRanges,
+                    textLength: (textView.string as NSString).length
+                )
+            }
+
+            return newSelectedCharRange
         }
 
         func refreshInlineImagePreviews(in textView: NSTextView, resettingTextAttributes: Bool = true) {
@@ -291,43 +397,40 @@ struct SourceEditorView: NSViewRepresentable {
                 clearInlineImageSelection()
             }
 
-            hiddenInlinePreviewRanges = previews.map(\.lineRange)
-            moveSelectionOutOfHiddenInlinePreviewIfNeeded(in: textView)
+            hiddenInlinePreviewRanges.removeAll()
+            inlineImagePreviewByLineLocation.removeAll()
 
             for preview in previews {
-                layoutManager.addTemporaryAttribute(.foregroundColor, value: NSColor.clear, forCharacterRange: preview.lineRange)
-                layoutManager.addTemporaryAttribute(.underlineStyle, value: 0, forCharacterRange: preview.lineRange)
-                layoutManager.addTemporaryAttribute(.underlineColor, value: NSColor.clear, forCharacterRange: preview.lineRange)
+                if !preview.isEditingSource {
+                    hiddenInlinePreviewRanges.append(preview.lineRange)
+                    layoutManager.addTemporaryAttribute(.foregroundColor, value: NSColor.clear, forCharacterRange: preview.lineRange)
+                    layoutManager.addTemporaryAttribute(.underlineStyle, value: 0, forCharacterRange: preview.lineRange)
+                    layoutManager.addTemporaryAttribute(.underlineColor, value: NSColor.clear, forCharacterRange: preview.lineRange)
+                }
 
                 let glyphRange = layoutManager.glyphRange(forCharacterRange: preview.lineRange, actualCharacterRange: nil)
                 guard glyphRange.length > 0 else { continue }
                 inlineImagePreviewByGlyphLocation[glyphRange.location] = preview
+                inlineImagePreviewByLineLocation[preview.lineRange.location] = preview
             }
 
             let invalidationRange = NSRange(location: 0, length: (textView.string as NSString).length)
             layoutManager.invalidateLayout(forCharacterRange: invalidationRange, actualCharacterRange: nil)
             layoutManager.ensureLayout(for: textContainer)
 
-            let containerOrigin = textView.textContainerOrigin
             var restoredSelectedInlineImageResponder = false
             for preview in previews {
                 let glyphRange = layoutManager.glyphRange(forCharacterRange: preview.lineRange, actualCharacterRange: nil)
                 guard glyphRange.length > 0 else { continue }
+                guard let previewBlockRect = inlinePreviewBlockRect(
+                    for: preview,
+                    layoutManager: layoutManager,
+                    in: textView
+                ) else {
+                    continue
+                }
 
-                let lineRect = layoutManager.lineFragmentRect(
-                    forGlyphAt: glyphRange.location,
-                    effectiveRange: nil,
-                    withoutAdditionalLayout: true
-                )
-                let blockY = containerOrigin.y + lineRect.minY + (parent.inlineImageSpacing / 2)
-                let blockHeight = preview.displaySize.height + preview.sourceHeaderHeight
-
-                let imageView = InlineImageBlockView(frame: CGRect(
-                    x: containerOrigin.x,
-                    y: blockY,
-                    width: preview.displaySize.width,
-                    height: blockHeight
-                ))
+                let imageView = InlineImageBlockView(frame: previewBlockRect)
                 imageView.lineLocation = preview.lineRange.location
                 let isSelected = selectedInlineImageLine == preview.lineRange.location
                 imageView.configure(
@@ -341,6 +444,10 @@ struct SourceEditorView: NSViewRepresentable {
                     onSelect: { [weak self, weak imageView, weak textView] in
                         guard let self, let imageView, let textView else { return }
                         self.selectInlineImage(atLine: preview.lineRange.location, view: imageView, in: textView)
+                    },
+                    onEditSource: { [weak self, weak textView] in
+                        guard let self, let textView else { return }
+                        self.beginEditingInlineSource(atLine: preview.lineRange.location, in: textView)
                     },
                     onDidResignFirstResponder: { [weak self, weak imageView] in
                         guard let self else { return }
@@ -446,12 +553,13 @@ struct SourceEditorView: NSViewRepresentable {
                     continue
                 }
 
+                let isEditingSource = isEditingInlinePreviewLine(lineRange, in: textView)
                 let displaySize = scaledSize(
                     for: image,
                     maxWidth: maxImageWidth,
                     maxHeight: parent.maximumInlineImageHeight
                 )
-                let showsSource = expandedInlineSourceLines.contains(lineRange.location)
+                let showsSource = expandedInlineSourceLines.contains(lineRange.location) && !isEditingSource
                 let sourceHeaderHeight = showsSource ? parent.inlineImageSourceHeaderHeight : 0
                 let reservedHeight = displaySize.height + parent.inlineImageSpacing + sourceHeaderHeight
                 previews.append(
@@ -459,6 +567,7 @@ struct SourceEditorView: NSViewRepresentable {
                         lineRange: lineRange,
                         sourceText: normalizedEmbedSource(for: fileURL),
                         showsSource: showsSource,
+                        isEditingSource: isEditingSource,
                         image: image,
                         displaySize: displaySize,
                         reservedHeight: reservedHeight,
@@ -477,6 +586,7 @@ struct SourceEditorView: NSViewRepresentable {
 
             hiddenInlinePreviewRanges.removeAll()
             inlineImagePreviewByGlyphLocation.removeAll()
+            inlineImagePreviewByLineLocation.removeAll()
 
             guard let layoutManager = textView.layoutManager else { return }
             let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
@@ -515,6 +625,200 @@ struct SourceEditorView: NSViewRepresentable {
             )
         }
 
+        private func hiddenInlineTextClickTarget(
+            forLineAt location: Int,
+            point: CGPoint,
+            in textView: NSTextView
+        ) -> HiddenInlineClickTarget? {
+            hiddenInlineClickAreas(forLineAt: location, in: textView)
+                .first(where: { $0.rect.contains(point) })?
+                .target
+        }
+
+        private func contiguousBlankLineLocations(
+            immediatelyBeforeLineAt location: Int,
+            in textView: NSTextView
+        ) -> [Int] {
+            let text = textView.string as NSString
+            var locations: [Int] = []
+            var cursor = location
+
+            while cursor > 0 {
+                let previousLineRange = text.lineRange(for: NSRange(location: cursor - 1, length: 0))
+                let previousLine = text.substring(with: previousLineRange)
+                guard previousLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    break
+                }
+
+                locations.append(previousLineRange.location)
+                cursor = previousLineRange.location
+            }
+
+            return locations.reversed()
+        }
+
+        private func hiddenInlineClickAreas(
+            forLineAt location: Int,
+            in textView: NSTextView
+        ) -> [HiddenInlineClickArea] {
+            guard hiddenInlinePreviewRanges.contains(where: { $0.location == location }),
+                  let preview = inlineImagePreviewByLineLocation[location],
+                  let layoutManager = textView.layoutManager else {
+                return []
+            }
+
+            let text = textView.string as NSString
+            let textColumnWidth = textView.textContainer?.containerSize.width ?? viewWidthFallback(in: textView)
+            var areas = contiguousBlankLineLocations(
+                immediatelyBeforeLineAt: location,
+                in: textView
+            ).compactMap { blankLineLocation -> HiddenInlineClickArea? in
+                guard let rect = textLineActivationRect(
+                    forLineAt: blankLineLocation,
+                    width: textColumnWidth,
+                    text: text,
+                    layoutManager: layoutManager,
+                    in: textView
+                ) else {
+                    return nil
+                }
+
+                return HiddenInlineClickArea(
+                    rect: rect,
+                    target: .textInsertion(location: blankLineLocation)
+                )
+            }
+
+            if let sourceRect = hiddenInlineSourceActivationRect(
+                for: preview,
+                width: textColumnWidth,
+                layoutManager: layoutManager,
+                in: textView
+            ) {
+                areas.append(
+                    HiddenInlineClickArea(
+                        rect: sourceRect,
+                        target: .editSource(lineLocation: location)
+                    )
+                )
+            }
+
+            return areas.sorted { $0.rect.minY < $1.rect.minY }
+        }
+
+        private func textLineActivationRect(
+            forLineAt location: Int,
+            width: CGFloat,
+            text: NSString,
+            layoutManager: NSLayoutManager,
+            in textView: NSTextView
+        ) -> CGRect? {
+            let lineRange = text.lineRange(for: NSRange(location: location, length: 0))
+            let glyphRange = layoutManager.glyphRange(
+                forCharacterRange: lineRange,
+                actualCharacterRange: nil
+            )
+            guard glyphRange.length > 0 else {
+                return nil
+            }
+
+            let lineRect = layoutManager.lineFragmentRect(
+                forGlyphAt: glyphRange.location,
+                effectiveRange: nil,
+                withoutAdditionalLayout: true
+            )
+            let containerOrigin = textView.textContainerOrigin
+            return CGRect(
+                x: containerOrigin.x,
+                y: containerOrigin.y + lineRect.minY,
+                width: width,
+                height: lineRect.height
+            )
+        }
+
+        private func hiddenInlineSourceActivationRect(
+            for preview: InlineImagePreview,
+            width: CGFloat,
+            layoutManager: NSLayoutManager,
+            in textView: NSTextView
+        ) -> CGRect? {
+            let glyphRange = layoutManager.glyphRange(
+                forCharacterRange: preview.lineRange,
+                actualCharacterRange: nil
+            )
+            guard glyphRange.length > 0 else {
+                return nil
+            }
+
+            let lineRect = layoutManager.lineFragmentRect(
+                forGlyphAt: glyphRange.location,
+                effectiveRange: nil,
+                withoutAdditionalLayout: true
+            )
+            guard let previewBlockRect = inlinePreviewBlockRect(
+                for: preview,
+                layoutManager: layoutManager,
+                in: textView
+            ) else {
+                return nil
+            }
+
+            let containerOrigin = textView.textContainerOrigin
+            let sourceTop = containerOrigin.y + lineRect.minY
+            return CGRect(
+                x: containerOrigin.x,
+                y: sourceTop,
+                width: width,
+                height: max(lineRect.height, previewBlockRect.minY - sourceTop)
+            )
+        }
+
+        private func inlinePreviewBlockRect(
+            for preview: InlineImagePreview,
+            layoutManager: NSLayoutManager,
+            in textView: NSTextView
+        ) -> CGRect? {
+            let glyphRange = layoutManager.glyphRange(
+                forCharacterRange: preview.lineRange,
+                actualCharacterRange: nil
+            )
+            guard glyphRange.length > 0 else {
+                return nil
+            }
+
+            let lineRect = layoutManager.lineFragmentRect(
+                forGlyphAt: glyphRange.location,
+                effectiveRange: nil,
+                withoutAdditionalLayout: true
+            )
+            let containerOrigin = textView.textContainerOrigin
+            let blockY = containerOrigin.y
+                + lineRect.minY
+                + (parent.inlineImageSpacing / 2)
+            return CGRect(
+                x: containerOrigin.x,
+                y: blockY,
+                width: preview.displaySize.width,
+                height: preview.displaySize.height + preview.sourceHeaderHeight
+            )
+        }
+
+        private func placeCaret(at location: Int, in textView: NSTextView) {
+            clearInlineImageSelection()
+
+            if textView.window?.firstResponder !== textView {
+                textView.window?.makeFirstResponder(textView)
+            }
+
+            textView.setSelectedRange(NSRange(location: location, length: 0))
+            refreshInlineImagePreviews(in: textView, resettingTextAttributes: true)
+            textView.scrollRangeToVisible(textView.selectedRange())
+        }
+
+        private func viewWidthFallback(in textView: NSTextView) -> CGFloat {
+            max(parent.maximumReadableWidth, textView.bounds.width - (textView.textContainerInset.width * 2))
+        }
+
         private func normalizedEmbedSource(for fileURL: URL) -> String {
             "![[\(fileURL.lastPathComponent)]]"
         }
@@ -522,13 +826,13 @@ struct SourceEditorView: NSViewRepresentable {
         private func toggleInlineSourcePreview(forLineAt location: Int, in textView: NSTextView) {
             if expandedInlineSourceLines.contains(location) {
                 expandedInlineSourceLines.remove(location)
-            } else {
-                expandedInlineSourceLines.insert(location)
+                withPreservedViewport(for: textView, revealSelectionAfterUpdate: false) {
+                    refreshInlineImagePreviews(in: textView, resettingTextAttributes: true)
+                }
+                return
             }
 
-            withPreservedViewport(for: textView, revealSelectionAfterUpdate: false) {
-                refreshInlineImagePreviews(in: textView, resettingTextAttributes: true)
-            }
+            beginEditingInlineSource(atLine: location, in: textView)
         }
 
         private func selectInlineImage(atLine location: Int, view: InlineImageBlockView, in textView: NSTextView) {
@@ -544,6 +848,7 @@ struct SourceEditorView: NSViewRepresentable {
             }
 
             suppressTextSelectionAppearance(in: textView)
+            textView.setSelectedRange(NSRange(location: location, length: 0))
             selectedInlineImageLine = location
             selectedInlineImageView = view
             view.setSelected(true)
@@ -551,6 +856,19 @@ struct SourceEditorView: NSViewRepresentable {
             if textView.window?.firstResponder !== view {
                 textView.window?.makeFirstResponder(view)
             }
+        }
+
+        private func beginEditingInlineSource(atLine location: Int, in textView: NSTextView) {
+            expandedInlineSourceLines.remove(location)
+            clearInlineImageSelection()
+
+            if textView.window?.firstResponder !== textView {
+                textView.window?.makeFirstResponder(textView)
+            }
+
+            textView.setSelectedRange(NSRange(location: location, length: 0))
+            refreshInlineImagePreviews(in: textView, resettingTextAttributes: true)
+            textView.scrollRangeToVisible(textView.selectedRange())
         }
 
         private func inlineImageSelectionDidResign(atLine location: Int, view: InlineImageBlockView?) {
@@ -625,6 +943,230 @@ struct SourceEditorView: NSViewRepresentable {
             textView.setSelectedRange(adjustedSelection)
         }
 
+        private func redirectedSelectionForMouseClickAboveHiddenPreview(
+            _ hiddenRange: NSRange,
+            in textView: NSTextView
+        ) -> NSRange? {
+            guard let inlinePreviewTextView = textView as? InlinePreviewTextView,
+                  let mouseDownPoint = inlinePreviewTextView.activeMouseDownPoint,
+                  let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer else {
+                return nil
+            }
+
+            let glyphRange = layoutManager.glyphRange(
+                forCharacterRange: hiddenRange,
+                actualCharacterRange: nil
+            )
+            guard glyphRange.length > 0 else {
+                return nil
+            }
+
+            let lineRect = layoutManager.lineFragmentRect(
+                forGlyphAt: glyphRange.location,
+                effectiveRange: nil,
+                withoutAdditionalLayout: true
+            )
+            let containerOrigin = textView.textContainerOrigin
+            let lineTop = containerOrigin.y + lineRect.minY
+            guard mouseDownPoint.y < lineTop else {
+                return nil
+            }
+
+            let adjustedPoint = CGPoint(
+                x: max(0, mouseDownPoint.x - containerOrigin.x),
+                y: max(0, min(mouseDownPoint.y - containerOrigin.y, lineRect.minY - 1))
+            )
+            let targetLocation = layoutManager.characterIndex(
+                for: adjustedPoint,
+                in: textContainer,
+                fractionOfDistanceBetweenInsertionPoints: nil
+            )
+            let textLength = (textView.string as NSString).length
+            return NSRange(location: min(textLength, targetLocation), length: 0)
+        }
+
+        private func selectionForMouseClickInHiddenInlinePreview(in textView: NSTextView) -> NSRange? {
+            guard let inlinePreviewTextView = textView as? InlinePreviewTextView,
+                  let mouseDownPoint = inlinePreviewTextView.activeMouseDownPoint else {
+                return nil
+            }
+
+            for hiddenRange in hiddenInlinePreviewRanges {
+                guard let clickTarget = hiddenInlineTextClickTarget(
+                    forLineAt: hiddenRange.location,
+                    point: mouseDownPoint,
+                    in: textView
+                ) else {
+                    continue
+                }
+
+                switch clickTarget {
+                case .textInsertion(let location):
+                    return NSRange(location: location, length: 0)
+                case .editSource(let lineLocation):
+                    return NSRange(location: lineLocation, length: 0)
+                }
+            }
+
+            return nil
+        }
+
+        private func selectionForMouseClickOnBlankLine(in textView: NSTextView) -> NSRange? {
+            guard let inlinePreviewTextView = textView as? InlinePreviewTextView,
+                  let mouseDownPoint = inlinePreviewTextView.activeMouseDownPoint else {
+                return nil
+            }
+
+            return selectionForBlankLineClick(at: mouseDownPoint, in: textView)
+        }
+
+        private func selectionForMouseClickOnVisibleLine(in textView: NSTextView) -> NSRange? {
+            guard let inlinePreviewTextView = textView as? InlinePreviewTextView,
+                  let mouseDownPoint = inlinePreviewTextView.activeMouseDownPoint else {
+                return nil
+            }
+
+            return selectionForVisibleLineClick(at: mouseDownPoint, in: textView)
+        }
+
+        private func selectionForVisibleLineClick(at point: CGPoint, in textView: NSTextView) -> NSRange? {
+            guard let layoutManager = textView.layoutManager else {
+                return nil
+            }
+
+            let text = textView.string as NSString
+            let textColumnWidth = textView.textContainer?.containerSize.width ?? viewWidthFallback(in: textView)
+            var location = 0
+
+            while location < text.length {
+                let lineRange = text.lineRange(for: NSRange(location: location, length: 0))
+                defer { location = NSMaxRange(lineRange) }
+
+                let line = text.substring(with: lineRange)
+                guard !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      !hiddenInlinePreviewRanges.contains(where: { $0.location == lineRange.location }),
+                      let rect = textLineActivationRect(
+                        forLineAt: lineRange.location,
+                        width: textColumnWidth,
+                        text: text,
+                        layoutManager: layoutManager,
+                        in: textView
+                      ),
+                      rect.contains(point) else {
+                    continue
+                }
+
+                guard let insertionLocation = insertionLocation(
+                    for: point,
+                    in: textView,
+                    constrainedTo: lineRange
+                ) else {
+                    return nil
+                }
+                return NSRange(location: insertionLocation, length: 0)
+            }
+
+            return nil
+        }
+
+        private func correctSelectionForVisibleLineClickIfNeeded(in textView: NSTextView) -> Bool {
+            guard let inlinePreviewTextView = textView as? InlinePreviewTextView,
+                  let mouseDownPoint = inlinePreviewTextView.activeMouseDownPoint,
+                  textView.window?.firstResponder === textView else {
+                return false
+            }
+
+            let selection = textView.selectedRange()
+            guard selection.length == 0,
+                  let targetSelection = selectionForVisibleLineClick(at: mouseDownPoint, in: textView),
+                  targetSelection.location != selection.location else {
+                return false
+            }
+
+            placeCaret(at: targetSelection.location, in: textView)
+            return true
+        }
+
+        private func selectionForBlankLineClick(at point: CGPoint, in textView: NSTextView) -> NSRange? {
+            guard let layoutManager = textView.layoutManager else {
+                return nil
+            }
+
+            let text = textView.string as NSString
+            let textColumnWidth = textView.textContainer?.containerSize.width ?? viewWidthFallback(in: textView)
+            var location = 0
+
+            while location < text.length {
+                let lineRange = text.lineRange(for: NSRange(location: location, length: 0))
+                defer { location = NSMaxRange(lineRange) }
+
+                let line = text.substring(with: lineRange)
+                guard line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      let rect = textLineActivationRect(
+                        forLineAt: lineRange.location,
+                        width: textColumnWidth,
+                        text: text,
+                        layoutManager: layoutManager,
+                        in: textView
+                      ),
+                      rect.contains(point) else {
+                    continue
+                }
+
+                return NSRange(location: lineRange.location, length: 0)
+            }
+
+            return nil
+        }
+
+        private func insertionLocation(
+            for point: CGPoint,
+            in textView: NSTextView,
+            constrainedTo lineRange: NSRange? = nil
+        ) -> Int? {
+            guard let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer else {
+                return nil
+            }
+
+            let text = textView.string as NSString
+            let containerOrigin = textView.textContainerOrigin
+            let containerPoint = CGPoint(
+                x: max(0, point.x - containerOrigin.x),
+                y: max(0, point.y - containerOrigin.y)
+            )
+            let rawLocation = layoutManager.characterIndex(
+                for: containerPoint,
+                in: textContainer,
+                fractionOfDistanceBetweenInsertionPoints: nil
+            )
+            let textLength = text.length
+            var location = min(rawLocation, textLength)
+
+            if let lineRange {
+                let lowerBound = lineRange.location
+                let upperBound = insertionUpperBound(for: lineRange, text: text)
+                location = min(max(location, lowerBound), upperBound)
+            }
+
+            return location
+        }
+
+        private func insertionUpperBound(for lineRange: NSRange, text: NSString) -> Int {
+            var upperBound = NSMaxRange(lineRange)
+
+            while upperBound > lineRange.location {
+                let character = text.character(at: upperBound - 1)
+                guard character == 10 || character == 13 else {
+                    break
+                }
+                upperBound -= 1
+            }
+
+            return upperBound
+        }
+
         private func adjustedSelectionAwayFromHiddenInlinePreviews(
             _ selection: NSRange,
             previousSelection: NSRange?,
@@ -692,6 +1234,14 @@ struct SourceEditorView: NSViewRepresentable {
             return selection.location > lineRange.location && selection.location < upperBound
         }
 
+        private func isEditingInlinePreviewLine(_ lineRange: NSRange, in textView: NSTextView) -> Bool {
+            guard textView.window?.firstResponder === textView else {
+                return false
+            }
+
+            return selectionIntersectsHiddenPreview(textView.selectedRange(), lineRange: lineRange)
+        }
+
         nonisolated func layoutManager(
             _ layoutManager: NSLayoutManager,
             shouldSetLineFragmentRect lineFragmentRect: UnsafeMutablePointer<NSRect>,
@@ -715,10 +1265,13 @@ struct SourceEditorView: NSViewRepresentable {
 @MainActor
 private protocol InlinePreviewTextViewDelegate: AnyObject {
     func inlinePreviewTextView(_ textView: NSTextView, handleInlinePreviewClickAt point: CGPoint) -> Bool
+    func inlinePreviewTextViewHandlePlainTextClickIfNeeded(_ textView: NSTextView, at point: CGPoint) -> Bool
+    func inlinePreviewTextViewDidCompleteMouseSelection(_ textView: NSTextView)
 }
 
 private final class InlinePreviewTextView: NSTextView {
     weak var inlinePreviewDelegate: InlinePreviewTextViewDelegate?
+    private(set) var activeMouseDownPoint: CGPoint?
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
@@ -726,17 +1279,31 @@ private final class InlinePreviewTextView: NSTextView {
             return
         }
 
+        if inlinePreviewDelegate?.inlinePreviewTextViewHandlePlainTextClickIfNeeded(self, at: point) == true {
+            return
+        }
+        activeMouseDownPoint = point
+        defer { activeMouseDownPoint = nil }
         super.mouseDown(with: event)
+        inlinePreviewDelegate?.inlinePreviewTextViewDidCompleteMouseSelection(self)
     }
 }
 
 private final class InlineImageBlockView: NSView {
+    enum ClickAction {
+        case none
+        case toggle
+        case selectImage
+        case editSource
+    }
+
     private let imageView = NSImageView()
     private let sourceLabel = NSTextField(labelWithString: "")
     private let selectionHandleView = NSView()
     private let toggleButton = NSButton()
     private weak var hostTextView: NSTextView?
     private var onSelect: (() -> Void)?
+    private var onEditSource: (() -> Void)?
     private var onDidResignFirstResponder: (() -> Void)?
     private var onToggle: (() -> Void)?
     private var isSelected = false
@@ -814,11 +1381,13 @@ private final class InlineImageBlockView: NSView {
         isSelected: Bool,
         hostTextView: NSTextView,
         onSelect: @escaping () -> Void,
+        onEditSource: @escaping () -> Void,
         onDidResignFirstResponder: @escaping () -> Void,
         onToggle: @escaping () -> Void
     ) {
         self.hostTextView = hostTextView
         self.onSelect = onSelect
+        self.onEditSource = onEditSource
         self.onDidResignFirstResponder = onDidResignFirstResponder
         self.onToggle = onToggle
         self.sourceHeaderHeight = sourceHeaderHeight
@@ -873,17 +1442,24 @@ private final class InlineImageBlockView: NSView {
 
     override func resetCursorRects() {
         addCursorRect(imageView.frame, cursor: .arrow)
+        if sourceHeaderHeight > 0 {
+            addCursorRect(sourceHeaderFrame, cursor: .iBeam)
+        }
         addCursorRect(toggleButton.frame, cursor: .pointingHand)
     }
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        guard bounds.contains(point), !toggleButton.frame.contains(point) else {
+        switch clickAction(at: point) {
+        case .toggle:
             super.mouseDown(with: event)
-            return
+        case .editSource:
+            onEditSource?()
+        case .selectImage:
+            onSelect?()
+        case .none:
+            super.mouseDown(with: event)
         }
-
-        onSelect?()
     }
 
     override func keyDown(with event: NSEvent) {
@@ -912,15 +1488,15 @@ private final class InlineImageBlockView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard bounds.contains(point) else {
+        switch clickAction(at: point) {
+        case .none:
             return nil
+        case .toggle:
+            let converted = convert(point, to: toggleButton)
+            return toggleButton.hitTest(converted)
+        case .editSource, .selectImage:
+            return self
         }
-
-        let converted = convert(point, to: toggleButton)
-        if let hitView = toggleButton.hitTest(converted) {
-            return hitView
-        }
-        return self
     }
 
     func isToggleHit(at point: CGPoint) -> Bool {
@@ -936,5 +1512,33 @@ private final class InlineImageBlockView: NSView {
         layer?.borderColor = selectionColor.cgColor
         layer?.borderWidth = isSelected ? 2 : 0
         selectionHandleView.isHidden = !isSelected
+    }
+
+    func clickAction(at point: CGPoint) -> ClickAction {
+        guard bounds.contains(point) else {
+            return .none
+        }
+
+        if toggleButton.frame.contains(point) {
+            return .toggle
+        }
+
+        if sourceHeaderFrame.contains(point) {
+            return .editSource
+        }
+
+        if imageView.frame.contains(point) {
+            return .selectImage
+        }
+
+        return .none
+    }
+
+    private var sourceHeaderFrame: CGRect {
+        guard sourceHeaderHeight > 0 else {
+            return .null
+        }
+
+        return CGRect(x: 0, y: 0, width: bounds.width, height: sourceHeaderHeight)
     }
 }
