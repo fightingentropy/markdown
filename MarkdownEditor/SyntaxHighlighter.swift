@@ -1,5 +1,70 @@
 import AppKit
 
+enum EditorLinkDetector {
+    private static let markdownLinkRegex = try! NSRegularExpression(pattern: #"\[([^\]]+)\]\(([^)\s]+)\)"#)
+    private static let bareLinkRegex = try! NSRegularExpression(pattern: #"https?://[^\s)>\"]+"#)
+
+    static func url(near characterIndex: Int, in text: String) -> URL? {
+        let nsText = text as NSString
+        guard nsText.length > 0 else {
+            return nil
+        }
+
+        let candidateIndices = Set([
+            characterIndex,
+            max(0, characterIndex - 1),
+        ].filter { $0 < nsText.length })
+
+        for index in candidateIndices.sorted() {
+            if let url = markdownLinkURL(at: index, in: text, nsText: nsText) {
+                return url
+            }
+
+            if let url = bareLinkURL(at: index, in: text, nsText: nsText) {
+                return url
+            }
+        }
+
+        return nil
+    }
+
+    private static func markdownLinkURL(at characterIndex: Int, in text: String, nsText: NSString) -> URL? {
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        for match in markdownLinkRegex.matches(in: text, range: fullRange) {
+            guard NSLocationInRange(characterIndex, match.range) else {
+                continue
+            }
+
+            if match.range.location > 0, nsText.character(at: match.range.location - 1) == 33 {
+                continue
+            }
+
+            let urlString = nsText.substring(with: match.range(at: 2))
+            guard let url = URL(string: urlString), url.scheme != nil else {
+                return nil
+            }
+
+            return url
+        }
+
+        return nil
+    }
+
+    private static func bareLinkURL(at characterIndex: Int, in text: String, nsText: NSString) -> URL? {
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        for match in bareLinkRegex.matches(in: text, range: fullRange) {
+            guard NSLocationInRange(characterIndex, match.range) else {
+                continue
+            }
+
+            let urlString = nsText.substring(with: match.range)
+            return URL(string: urlString)
+        }
+
+        return nil
+    }
+}
+
 @MainActor
 final class SyntaxHighlighter {
 
@@ -125,17 +190,10 @@ final class SyntaxHighlighter {
                 continue
             }
 
-            let urlString = nsText.substring(with: match.range(at: 2))
             storage.addAttributes([
                 .foregroundColor: Theme.linkColor,
                 .underlineStyle: NSUnderlineStyle.single.rawValue
             ], range: match.range)
-
-            guard let url = URL(string: urlString), url.scheme != nil else {
-                continue
-            }
-
-            storage.addAttribute(.link, value: url, range: match.range)
         }
     }
 
@@ -145,12 +203,11 @@ final class SyntaxHighlighter {
         let nsText = text as NSString
         for match in regex.matches(in: text, range: range) {
             let urlString = nsText.substring(with: match.range)
-            guard let url = URL(string: urlString) else { continue }
+            guard URL(string: urlString) != nil else { continue }
 
             storage.addAttributes([
                 .foregroundColor: Theme.linkColor,
-                .underlineStyle: NSUnderlineStyle.single.rawValue,
-                .link: url
+                .underlineStyle: NSUnderlineStyle.single.rawValue
             ], range: match.range)
         }
     }

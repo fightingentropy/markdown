@@ -243,16 +243,6 @@ struct SourceEditorView: NSViewRepresentable {
         }
 
         func inlinePreviewTextView(_ textView: NSTextView, handleInlinePreviewClickAt point: CGPoint) -> Bool {
-            if let visibleLineSelection = selectionForVisibleLineClick(at: point, in: textView) {
-                placeCaret(at: visibleLineSelection.location, in: textView)
-                return true
-            }
-
-            if let blankLineSelection = selectionForBlankLineClick(at: point, in: textView) {
-                placeCaret(at: blankLineSelection.location, in: textView)
-                return true
-            }
-
             for view in inlineImageViews.compactMap({ $0 as? InlineImageBlockView }).reversed() {
                 guard let lineLocation = view.lineLocation else {
                     continue
@@ -292,10 +282,6 @@ struct SourceEditorView: NSViewRepresentable {
         }
 
         func inlinePreviewTextViewDidCompleteMouseSelection(_ textView: NSTextView) {
-            if correctSelectionForVisibleLineClickIfNeeded(in: textView) {
-                return
-            }
-
             guard textView.window?.firstResponder === textView,
                   selectedInlineImageView != nil else {
                 return
@@ -331,14 +317,6 @@ struct SourceEditorView: NSViewRepresentable {
             willChangeSelectionFromCharacterRange oldSelectedCharRange: NSRange,
             toCharacterRange newSelectedCharRange: NSRange
         ) -> NSRange {
-            if let visibleLineSelection = selectionForMouseClickOnVisibleLine(in: textView) {
-                return visibleLineSelection
-            }
-
-            if let blankLineSelection = selectionForMouseClickOnBlankLine(in: textView) {
-                return blankLineSelection
-            }
-
             if let explicitMouseSelection = selectionForMouseClickInHiddenInlinePreview(in: textView) {
                 return explicitMouseSelection
             }
@@ -815,8 +793,26 @@ struct SourceEditorView: NSViewRepresentable {
             textView.scrollRangeToVisible(textView.selectedRange())
         }
 
+        func inlinePreviewTextView(_ textView: NSTextView, handleModifiedLinkClickAt point: CGPoint, with event: NSEvent) -> Bool {
+            guard event.modifierFlags.contains(.command),
+                  let url = linkURL(at: point, in: textView) else {
+                return false
+            }
+
+            NSWorkspace.shared.open(url)
+            return true
+        }
+
         private func viewWidthFallback(in textView: NSTextView) -> CGFloat {
             max(parent.maximumReadableWidth, textView.bounds.width - (textView.textContainerInset.width * 2))
+        }
+
+        private func linkURL(at point: CGPoint, in textView: NSTextView) -> URL? {
+            guard let location = insertionLocation(for: point, in: textView) else {
+                return nil
+            }
+
+            return EditorLinkDetector.url(near: location, in: textView.string)
         }
 
         private func normalizedEmbedSource(for fileURL: URL) -> String {
@@ -1012,114 +1008,6 @@ struct SourceEditorView: NSViewRepresentable {
             return nil
         }
 
-        private func selectionForMouseClickOnBlankLine(in textView: NSTextView) -> NSRange? {
-            guard let inlinePreviewTextView = textView as? InlinePreviewTextView,
-                  let mouseDownPoint = inlinePreviewTextView.activeMouseDownPoint else {
-                return nil
-            }
-
-            return selectionForBlankLineClick(at: mouseDownPoint, in: textView)
-        }
-
-        private func selectionForMouseClickOnVisibleLine(in textView: NSTextView) -> NSRange? {
-            guard let inlinePreviewTextView = textView as? InlinePreviewTextView,
-                  let mouseDownPoint = inlinePreviewTextView.activeMouseDownPoint else {
-                return nil
-            }
-
-            return selectionForVisibleLineClick(at: mouseDownPoint, in: textView)
-        }
-
-        private func selectionForVisibleLineClick(at point: CGPoint, in textView: NSTextView) -> NSRange? {
-            guard let layoutManager = textView.layoutManager else {
-                return nil
-            }
-
-            let text = textView.string as NSString
-            let textColumnWidth = textView.textContainer?.containerSize.width ?? viewWidthFallback(in: textView)
-            var location = 0
-
-            while location < text.length {
-                let lineRange = text.lineRange(for: NSRange(location: location, length: 0))
-                defer { location = NSMaxRange(lineRange) }
-
-                let line = text.substring(with: lineRange)
-                guard !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                      !hiddenInlinePreviewRanges.contains(where: { $0.location == lineRange.location }),
-                      let rect = textLineActivationRect(
-                        forLineAt: lineRange.location,
-                        width: textColumnWidth,
-                        text: text,
-                        layoutManager: layoutManager,
-                        in: textView
-                      ),
-                      rect.contains(point) else {
-                    continue
-                }
-
-                guard let insertionLocation = insertionLocation(
-                    for: point,
-                    in: textView,
-                    constrainedTo: lineRange
-                ) else {
-                    return nil
-                }
-                return NSRange(location: insertionLocation, length: 0)
-            }
-
-            return nil
-        }
-
-        private func correctSelectionForVisibleLineClickIfNeeded(in textView: NSTextView) -> Bool {
-            guard let inlinePreviewTextView = textView as? InlinePreviewTextView,
-                  let mouseDownPoint = inlinePreviewTextView.activeMouseDownPoint,
-                  textView.window?.firstResponder === textView else {
-                return false
-            }
-
-            let selection = textView.selectedRange()
-            guard selection.length == 0,
-                  let targetSelection = selectionForVisibleLineClick(at: mouseDownPoint, in: textView),
-                  targetSelection.location != selection.location else {
-                return false
-            }
-
-            placeCaret(at: targetSelection.location, in: textView)
-            return true
-        }
-
-        private func selectionForBlankLineClick(at point: CGPoint, in textView: NSTextView) -> NSRange? {
-            guard let layoutManager = textView.layoutManager else {
-                return nil
-            }
-
-            let text = textView.string as NSString
-            let textColumnWidth = textView.textContainer?.containerSize.width ?? viewWidthFallback(in: textView)
-            var location = 0
-
-            while location < text.length {
-                let lineRange = text.lineRange(for: NSRange(location: location, length: 0))
-                defer { location = NSMaxRange(lineRange) }
-
-                let line = text.substring(with: lineRange)
-                guard line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                      let rect = textLineActivationRect(
-                        forLineAt: lineRange.location,
-                        width: textColumnWidth,
-                        text: text,
-                        layoutManager: layoutManager,
-                        in: textView
-                      ),
-                      rect.contains(point) else {
-                    continue
-                }
-
-                return NSRange(location: lineRange.location, length: 0)
-            }
-
-            return nil
-        }
-
         private func insertionLocation(
             for point: CGPoint,
             in textView: NSTextView,
@@ -1264,6 +1152,7 @@ struct SourceEditorView: NSViewRepresentable {
 
 @MainActor
 private protocol InlinePreviewTextViewDelegate: AnyObject {
+    func inlinePreviewTextView(_ textView: NSTextView, handleModifiedLinkClickAt point: CGPoint, with event: NSEvent) -> Bool
     func inlinePreviewTextView(_ textView: NSTextView, handleInlinePreviewClickAt point: CGPoint) -> Bool
     func inlinePreviewTextViewHandlePlainTextClickIfNeeded(_ textView: NSTextView, at point: CGPoint) -> Bool
     func inlinePreviewTextViewDidCompleteMouseSelection(_ textView: NSTextView)
@@ -1275,6 +1164,10 @@ private final class InlinePreviewTextView: NSTextView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        if inlinePreviewDelegate?.inlinePreviewTextView(self, handleModifiedLinkClickAt: point, with: event) == true {
+            return
+        }
+
         if inlinePreviewDelegate?.inlinePreviewTextView(self, handleInlinePreviewClickAt: point) == true {
             return
         }

@@ -4,6 +4,33 @@ import XCTest
 @testable import Markdown
 
 final class PreviewPipelineTests: XCTestCase {
+    func testEditorLinkDetectorFindsBareURLAtCharacterIndex() {
+        let text = "Visit https://21st.dev/community/components for components."
+        let index = (text as NSString).range(of: "21st.dev").location
+
+        let url = EditorLinkDetector.url(near: index, in: text)
+
+        XCTAssertEqual(url?.absoluteString, "https://21st.dev/community/components")
+    }
+
+    func testEditorLinkDetectorFindsMarkdownLinkAtCharacterIndex() {
+        let text = "[Componentful](https://www.componentful.com/)"
+        let index = (text as NSString).range(of: "Componentful").location + 2
+
+        let url = EditorLinkDetector.url(near: index, in: text)
+
+        XCTAssertEqual(url?.absoluteString, "https://www.componentful.com/")
+    }
+
+    func testEditorLinkDetectorIgnoresMarkdownImages() {
+        let text = "![Preview](https://example.com/image.png)"
+        let index = (text as NSString).range(of: "Preview").location
+
+        let url = EditorLinkDetector.url(near: index, in: text)
+
+        XCTAssertNil(url)
+    }
+
     func testAssetResolverResolvesDocumentRelativeImage() throws {
         let fixture = try makeFixture()
 
