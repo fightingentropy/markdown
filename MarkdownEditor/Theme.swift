@@ -5,7 +5,7 @@ enum Theme {
     static let headingColor = NSColor.systemBlue
     static let codeColor = NSColor.systemOrange
     static let codeBackground = NSColor.quaternaryLabelColor
-    static let linkColor = NSColor.systemCyan
+    static let linkColor = NSColor.linkColor
     static let quoteColor = NSColor.secondaryLabelColor
     static let metaColor = NSColor.tertiaryLabelColor
 
