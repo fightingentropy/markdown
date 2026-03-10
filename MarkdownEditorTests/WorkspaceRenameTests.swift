@@ -5,6 +5,28 @@ import XCTest
 
 @MainActor
 final class WorkspaceRenameTests: XCTestCase {
+    func testOpenRequestedFilesOverridesRestoredSelection() throws {
+        let fixture = try makeWorkspaceFixture(
+            files: [
+                ("Old", "# Old\n\nBody"),
+                ("New", "# New\n\nBody")
+            ]
+        )
+
+        let initialWorkspace = Workspace()
+        initialWorkspace.openVault(fixture.vaultURL)
+        initialWorkspace.selectFile(fixture.fileURLs[0])
+        XCTAssertEqual(initialWorkspace.selectedFileURL?.standardizedFileURL, fixture.fileURLs[0].standardizedFileURL)
+
+        let restoredWorkspace = Workspace()
+        XCTAssertEqual(restoredWorkspace.selectedFileURL?.standardizedFileURL, fixture.fileURLs[0].standardizedFileURL)
+
+        restoredWorkspace.openRequestedFiles([fixture.fileURLs[1]])
+
+        XCTAssertEqual(restoredWorkspace.selectedFileURL?.standardizedFileURL, fixture.fileURLs[1].standardizedFileURL)
+        XCTAssertEqual(restoredWorkspace.text, "# New\n\nBody")
+    }
+
     func testRenameFileUpdatesSelectionAndHeadingWhenTitleMatchesFilename() throws {
         let fixture = try makeWorkspaceFixture(fileName: "Old", content: "# Old\n\nBody")
         let workspace = Workspace()
@@ -47,22 +69,34 @@ final class WorkspaceRenameTests: XCTestCase {
     }
 
     private func makeWorkspaceFixture(fileName: String, content: String) throws -> (vaultURL: URL, fileURL: URL) {
+        let fixture = try makeWorkspaceFixture(files: [(fileName, content)])
+        return (fixture.vaultURL, fixture.fileURLs[0])
+    }
+
+    private func makeWorkspaceFixture(files: [(name: String, content: String)]) throws -> (vaultURL: URL, fileURLs: [URL]) {
         let vaultURL = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
             .standardizedFileURL
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: vaultURL, withIntermediateDirectories: true)
 
-        let fileURL = vaultURL
-            .appendingPathComponent(fileName)
-            .appendingPathExtension("md")
-            .standardizedFileURL
-        try Data(content.utf8).write(to: fileURL, options: .atomic)
+        let fileURLs = try files.map { file in
+            let fileURL = vaultURL
+                .appendingPathComponent(file.name)
+                .appendingPathExtension("md")
+                .standardizedFileURL
+            try Data(file.content.utf8).write(to: fileURL, options: .atomic)
+            return fileURL
+        }
+
+        let selectedFileKey = "selectedFile::" + vaultURL.standardizedFileURL.path
 
         addTeardownBlock {
+            UserDefaults.standard.removeObject(forKey: "vaultBookmark")
+            UserDefaults.standard.removeObject(forKey: selectedFileKey)
             try? FileManager.default.removeItem(at: vaultURL)
         }
 
-        return (vaultURL, fileURL)
+        return (vaultURL, fileURLs)
     }
 }

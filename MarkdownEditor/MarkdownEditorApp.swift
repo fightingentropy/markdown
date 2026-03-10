@@ -1,7 +1,34 @@
+import AppKit
 import SwiftUI
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var pendingOpenURLs: [URL] = []
+    private var openURLsHandler: (([URL]) -> Void)?
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard !urls.isEmpty else { return }
+
+        if let openURLsHandler {
+            openURLsHandler(urls)
+        } else {
+            pendingOpenURLs.append(contentsOf: urls)
+        }
+    }
+
+    func setOpenURLsHandler(_ handler: @escaping ([URL]) -> Void) {
+        openURLsHandler = handler
+
+        guard !pendingOpenURLs.isEmpty else { return }
+        let urls = pendingOpenURLs
+        pendingOpenURLs.removeAll()
+        handler(urls)
+    }
+}
 
 @main
 struct MarkdownEditorApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
     @State private var workspace: Workspace
     @State private var appUpdater: AppUpdater
@@ -13,11 +40,15 @@ struct MarkdownEditorApp: App {
     init() {
         let assistantSettings = AssistantSettings()
         let appPreferences = AppPreferences()
+        let workspace = Workspace(preferences: appPreferences)
         _assistantSettings = State(initialValue: assistantSettings)
         _appPreferences = State(initialValue: appPreferences)
-        _workspace = State(initialValue: Workspace(preferences: appPreferences))
+        _workspace = State(initialValue: workspace)
         _appUpdater = State(initialValue: AppUpdater())
         _noteAssistant = State(initialValue: NoteAssistant())
+        appDelegate.setOpenURLsHandler { urls in
+            workspace.openRequestedFiles(urls)
+        }
     }
 
     var body: some Scene {

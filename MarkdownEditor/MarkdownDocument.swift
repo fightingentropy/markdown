@@ -133,13 +133,7 @@ final class Workspace {
 
     func openVault(_ url: URL) {
         beginAccessingVault(url)
-        if let bookmark = try? url.bookmarkData(
-            options: .withSecurityScope,
-            includingResourceValuesForKeys: nil,
-            relativeTo: nil
-        ) {
-            UserDefaults.standard.set(bookmark, forKey: Self.bookmarkKey)
-        }
+        persistVaultBookmark(for: url)
         vaultURL = url
         restoreSortOrder()
         refreshFiles()
@@ -292,50 +286,37 @@ final class Workspace {
     }
 
     func importDroppedFile(_ url: URL) {
-        guard let data = try? Data(contentsOf: url),
-              let string = String(data: data, encoding: .utf8) else { return }
+        openRequestedFiles([url])
+    }
 
-        let normalizedString = normalizedContent(for: url, content: string)
-
-        let parent = url.deletingLastPathComponent()
-        beginAccessingVault(parent)
-
-        // Try to bookmark the parent for full vault access
-        if let bookmark = try? parent.bookmarkData(
-            options: .withSecurityScope,
-            includingResourceValuesForKeys: nil,
-            relativeTo: nil
-        ) {
-            UserDefaults.standard.set(bookmark, forKey: Self.bookmarkKey)
+    func openRequestedFiles(_ urls: [URL]) {
+        guard let url = urls
+            .map({ $0.resolvingSymlinksInPath().standardizedFileURL })
+            .first(where: { Self.isMarkdownFile($0) || Self.isImageFile($0) }) else {
+            return
         }
 
-        vaultURL = parent
+        saveCurrentFile()
+
+        let parentURL = url.deletingLastPathComponent()
+        beginAccessingVault(parentURL)
+        persistVaultBookmark(for: parentURL)
+
+        vaultURL = parentURL
+        restoreSortOrder()
         refreshFiles()
 
-        // If directory scan failed (sandbox), ensure the dropped file is listed
-        if !files.contains(where: { $0.url == url }) {
-            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
-            let noteTitle = Self.extractTitle(from: normalizedString)
-            files.append(FileItem(id: url, name: url.lastPathComponent, url: url, modificationDate: date, noteTitle: noteTitle))
-            files.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        if Self.isMarkdownFile(url), let content = readFile(url) {
+            let normalizedContent = normalizedContent(for: url, content: content)
+            ensureOpenedFileIsVisible(at: url, markdownContent: normalizedContent)
+            text = normalizedContent
+        } else {
+            ensureOpenedFileIsVisible(at: url, markdownContent: nil)
+            text = ""
         }
 
-        text = normalizedString
         selectedFileURL = url
         persistSelectedFileURL(url)
-
-        if !sidebarNodes.contains(where: { $0.url == url }) {
-            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
-            sidebarNodes = sortSidebarNodes(sidebarNodes + [
-                SidebarNode(
-                    id: url,
-                    url: url,
-                    name: url.deletingPathExtension().lastPathComponent,
-                    kind: .file,
-                    modificationDate: date
-                )
-            ])
-        }
     }
 
     func createNewFolder() {
@@ -718,6 +699,52 @@ final class Workspace {
 
     private static func urlsMatch(_ lhs: URL, _ rhs: URL) -> Bool {
         lhs.resolvingSymlinksInPath().standardizedFileURL == rhs.resolvingSymlinksInPath().standardizedFileURL
+    }
+
+    private func ensureOpenedFileIsVisible(at url: URL, markdownContent: String?) {
+        let modificationDate = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
+
+        if Self.isMarkdownFile(url), !files.contains(where: { Self.urlsMatch($0.url, url) }) {
+            files.append(
+                FileItem(
+                    id: url,
+                    name: url.lastPathComponent,
+                    url: url,
+                    modificationDate: modificationDate,
+                    noteTitle: markdownContent.flatMap(Self.extractTitle(from:))
+                )
+            )
+        }
+
+        guard !sidebarContainsNode(for: url, in: sidebarNodes) else { return }
+
+        sidebarNodes = sortSidebarNodes(
+            sidebarNodes + [
+                SidebarNode(
+                    id: url,
+                    url: url,
+                    name: Self.isMarkdownFile(url) ? url.deletingPathExtension().lastPathComponent : url.lastPathComponent,
+                    kind: .file,
+                    modificationDate: modificationDate
+                )
+            ]
+        )
+    }
+
+    private func sidebarContainsNode(for url: URL, in nodes: [SidebarNode]) -> Bool {
+        nodes.contains { node in
+            Self.urlsMatch(node.url, url) || sidebarContainsNode(for: url, in: node.children)
+        }
+    }
+
+    private func persistVaultBookmark(for url: URL) {
+        if let bookmark = try? url.bookmarkData(
+            options: .withSecurityScope,
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        ) {
+            UserDefaults.standard.set(bookmark, forKey: Self.bookmarkKey)
+        }
     }
 
     private func persistSelectedFileURL(_ url: URL) {
