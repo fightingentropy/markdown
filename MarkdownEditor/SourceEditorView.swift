@@ -113,7 +113,6 @@ struct SourceEditorView: NSViewRepresentable {
 
     private func configure(_ textView: SourceTextView, coordinator: Coordinator) {
         textView.isRichText = false
-        textView.textColor = .textColor
         textView.insertionPointColor = .controlAccentColor
         textView.backgroundColor = .textBackgroundColor
         textView.drawsBackground = true
@@ -138,9 +137,8 @@ struct SourceEditorView: NSViewRepresentable {
         let columnWidth = min(readableWidth, max(0, availableWidth - (minimumHorizontalInset * 2)))
         let horizontalInset = max(minimumHorizontalInset, (availableWidth - columnWidth) / 2)
 
-        let editorFont = Theme.editorFont(using: preferences)
-        textView.font = editorFont
-        textView.typingAttributes[.font] = editorFont
+        let baseAttributes = Theme.defaultAttributes(using: preferences)
+        textView.typingAttributes = baseAttributes
         textView.defaultParagraphStyle = Theme.defaultParagraphStyle(using: preferences)
         textView.textContainerInset = NSSize(width: horizontalInset, height: 28)
         textView.textContainer?.containerSize = NSSize(width: columnWidth, height: CGFloat.greatestFiniteMagnitude)
