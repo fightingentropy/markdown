@@ -7,6 +7,7 @@ struct MarkdownPreview: View {
     let markdown: String
     let documentURL: URL?
     let vaultURL: URL?
+    let preferences: AppPreferences
 
     private var context: PreviewContext {
         PreviewContext(documentURL: documentURL, vaultURL: vaultURL)
@@ -19,9 +20,9 @@ struct MarkdownPreview: View {
     var body: some View {
         switch document.preferredRenderMode {
         case .native:
-            NativeMarkdownPreview(markdown: markdown, context: context)
+            NativeMarkdownPreview(markdown: markdown, context: context, preferences: preferences)
         case .html:
-            HTMLMarkdownPreview(document: document)
+            HTMLMarkdownPreview(document: document, preferences: preferences)
         }
     }
 }
@@ -29,17 +30,28 @@ struct MarkdownPreview: View {
 private struct NativeMarkdownPreview: View {
     let markdown: String
     let context: PreviewContext
+    let preferences: AppPreferences
+
+    private var inlineStyle: InlineStyle {
+        InlineStyle.gitHub.code(
+            .font(preferences.previewCodeFontChoice.swiftUIFont(size: preferences.previewCodeFontSizeCGFloat)),
+            .backgroundColor(Color(nsColor: .quaternaryLabelColor).opacity(0.22))
+        )
+    }
 
     var body: some View {
         ScrollView {
             StructuredText(markdown, parser: NativePreviewMarkupParser(context: context))
+                .font(preferences.previewFontChoice.swiftUIFont(size: preferences.previewFontSizeCGFloat))
                 .textual.structuredTextStyle(.gitHub)
+                .textual.inlineStyle(inlineStyle)
+                .textual.codeBlockStyle(ConfigurablePreviewCodeBlockStyle(preferences: preferences))
                 .textual.imageAttachmentLoader(PreviewImageAttachmentLoader(context: context))
                 .textual.overflowMode(.wrap)
                 .padding(.horizontal, 72)
                 .padding(.top, 48)
                 .padding(.bottom, 120)
-                .frame(maxWidth: 920, alignment: .leading)
+                .frame(maxWidth: preferences.previewPageWidthCGFloat, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .center)
         }
         .background(Color(nsColor: .textBackgroundColor))
@@ -52,9 +64,13 @@ private struct NativeMarkdownPreview: View {
 
 private struct HTMLMarkdownPreview: View {
     let document: PreviewDocument
+    let preferences: AppPreferences
 
     private var fullPageHTML: String {
-        PreviewStylesheet.page(body: HTMLPreviewRenderer.render(document: document))
+        PreviewStylesheet.page(
+            body: HTMLPreviewRenderer.render(document: document),
+            preferences: preferences
+        )
     }
 
     var body: some View {
@@ -62,6 +78,24 @@ private struct HTMLMarkdownPreview: View {
             html: fullPageHTML,
             baseURL: document.context.previewBaseURL
         )
+    }
+}
+
+private struct ConfigurablePreviewCodeBlockStyle: StructuredText.CodeBlockStyle {
+    let preferences: AppPreferences
+
+    func makeBody(configuration: Configuration) -> some View {
+        Overflow {
+            configuration.label
+                .textual.lineSpacing(.fontScaled(0.225))
+                .textual.fontScale(0.85)
+                .fixedSize(horizontal: false, vertical: true)
+                .font(preferences.previewCodeFontChoice.swiftUIFont(size: preferences.previewCodeFontSizeCGFloat))
+                .padding(16)
+        }
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .textual.blockSpacing(.init(top: 0, bottom: 16))
     }
 }
 

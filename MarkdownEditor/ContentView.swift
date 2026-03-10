@@ -5,12 +5,26 @@ struct ContentView: View {
     @Bindable var workspace: Workspace
     @Bindable var assistant: NoteAssistant
     @Bindable var assistantSettings: AssistantSettings
+    @Bindable var preferences: AppPreferences
     @State private var controller = EditorController()
     @State private var renameRequest: RenameRequest?
-    @State private var showPreview = false
+    @State private var viewMode: OpenViewMode
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var expandedFolderURLs: Set<URL> = []
     @State private var restoredVaultKey: String?
+
+    init(
+        workspace: Workspace,
+        assistant: NoteAssistant,
+        assistantSettings: AssistantSettings,
+        preferences: AppPreferences
+    ) {
+        self.workspace = workspace
+        self.assistant = assistant
+        self.assistantSettings = assistantSettings
+        self.preferences = preferences
+        _viewMode = State(initialValue: preferences.defaultOpenViewMode)
+    }
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -39,10 +53,18 @@ struct ContentView: View {
                     }
                     .help("New File")
 
-                    Button { showPreview.toggle() } label: {
-                        Image(systemName: showPreview ? "pencil" : "eye")
+                    Menu {
+                        ForEach(OpenViewMode.allCases) { mode in
+                            Button {
+                                viewMode = mode
+                            } label: {
+                                Label(mode.title, systemImage: viewMode == mode ? "checkmark" : mode.systemImage)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: viewMode.systemImage)
                     }
-                    .help(showPreview ? "Show Editor" : "Show Preview")
+                    .help("View Mode")
                     .disabled(!workspace.selectedFileIsMarkdown)
                 }
             }
@@ -57,6 +79,7 @@ struct ContentView: View {
         }
         .onAppear {
             restoreExpandedFoldersIfNeeded()
+            applyPreferredViewMode()
             synchronizeAssistantContext()
         }
         .onDisappear {
@@ -76,7 +99,17 @@ struct ContentView: View {
             synchronizeAssistantContext()
         }
         .onChange(of: workspace.selectedFileURL) { _, _ in
+            applyPreferredViewMode()
             synchronizeAssistantContext()
+        }
+        .onChange(of: preferences.restoresExpandedFolders) { _, _ in
+            restoreExpandedFoldersIfNeeded(force: true)
+        }
+        .onChange(of: preferences.collapsesFoldersOnVaultSwitch) { _, _ in
+            restoreExpandedFoldersIfNeeded(force: true)
+        }
+        .onChange(of: preferences.defaultOpenViewMode) { _, _ in
+            applyPreferredViewMode()
         }
         .sheet(item: $renameRequest) { request in
             RenameFileSheet(target: request) { proposedName in
@@ -158,16 +191,8 @@ struct ContentView: View {
         if workspace.selectedFileURL != nil {
             if workspace.selectedFileIsImage, let selectedURL = workspace.selectedFileURL {
                 ImagePreview(url: selectedURL)
-            } else if showPreview {
-                previewView
             } else {
-                SourceEditorView(
-                    text: $workspace.text,
-                    controller: controller,
-                    documentURL: workspace.selectedFileURL,
-                    vaultURL: workspace.vaultURL,
-                    showsInlineImagePreviewsWhileEditing: assistantSettings.showsInlineImagePreviewsWhileEditing
-                )
+                noteWorkspaceView
             }
         } else {
             ContentUnavailableView(
@@ -182,9 +207,28 @@ struct ContentView: View {
         MarkdownPreview(
             markdown: workspace.text,
             documentURL: workspace.selectedFileURL,
-            vaultURL: workspace.vaultURL
+            vaultURL: workspace.vaultURL,
+            preferences: preferences
         )
         .id(workspace.selectedFileURL)
+    }
+
+    @ViewBuilder
+    private var noteWorkspaceView: some View {
+        switch viewMode {
+        case .editor:
+            editorView
+        case .preview:
+            previewView
+        }
+    }
+
+    private var editorView: some View {
+        SourceEditorView(
+            text: $workspace.text,
+            controller: controller,
+            preferences: preferences
+        )
     }
 }
 
@@ -649,6 +693,11 @@ private func isMD(_ url: URL) -> Bool {
 }
 
 private extension ContentView {
+    func applyPreferredViewMode() {
+        guard workspace.selectedFileIsMarkdown else { return }
+        viewMode = preferences.defaultOpenViewMode
+    }
+
     func synchronizeAssistantContext() {
         guard workspace.selectedFileIsMarkdown else {
             assistant.updateContext(
@@ -686,6 +735,18 @@ private extension ContentView {
             return
         }
 
+        if !preferences.restoresExpandedFolders {
+            expandedFolderURLs = []
+            restoredVaultKey = storageKey
+            return
+        }
+
+        if force && preferences.collapsesFoldersOnVaultSwitch {
+            expandedFolderURLs = []
+            restoredVaultKey = storageKey
+            return
+        }
+
         guard force || restoredVaultKey != storageKey else {
             let validFolderURLs = folderURLs(in: workspace.sidebarNodes)
             let filteredURLs = expandedFolderURLs.intersection(validFolderURLs)
@@ -706,7 +767,7 @@ private extension ContentView {
     }
 
     func persistExpandedFolders() {
-        guard let storageKey = sidebarExpansionStorageKey else { return }
+        guard preferences.restoresExpandedFolders, let storageKey = sidebarExpansionStorageKey else { return }
         let paths = expandedFolderURLs
             .map { $0.standardizedFileURL.path }
             .sorted()

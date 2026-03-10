@@ -6,6 +6,10 @@ struct NoteAssistantPanel: View {
     let currentFileTitle: String
     let hasSelectedFile: Bool
 
+    private var selectedModelName: String {
+        AssistantSettings.model(for: settings.selectedModel)?.displayName ?? "Assistant"
+    }
+
     var body: some View {
         Group {
             if assistant.isPresented {
@@ -52,28 +56,41 @@ struct NoteAssistantPanel: View {
 
             composer
         }
-        .frame(width: 360, height: 430)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .frame(width: 380, height: 456)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .strokeBorder(.white.opacity(0.08))
         }
-        .shadow(color: .black.opacity(0.22), radius: 24, y: 16)
+        .shadow(color: .black.opacity(0.22), radius: 28, y: 18)
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "sparkles")
-                .foregroundStyle(Color.accentColor)
+        HStack(alignment: .top, spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(Color.accentColor.opacity(0.16))
+                    .frame(width: 34, height: 34)
 
-            VStack(alignment: .leading, spacing: 2) {
+                Image(systemName: "sparkles")
+                    .foregroundStyle(Color.accentColor)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
                 Text("Note Assistant")
-                    .font(.headline)
+                    .font(.headline.weight(.semibold))
 
                 Text(hasSelectedFile ? currentFileTitle : "No note selected")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+
+                Label(selectedModelName, systemImage: "cpu")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(.white.opacity(0.05), in: Capsule())
             }
 
             Spacer()
@@ -131,7 +148,7 @@ struct NoteAssistantPanel: View {
             )
         } else {
             AssistantTranscriptView(messages: assistant.messages)
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 16)
                 .padding(.vertical, 12)
         }
     }
@@ -142,15 +159,22 @@ struct NoteAssistantPanel: View {
                 Text(errorMessage)
                     .font(.caption)
                     .foregroundStyle(.red)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.red.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
 
             HStack(alignment: .bottom, spacing: 10) {
                 TextField("Ask about this note…", text: $assistant.draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...4)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-                    .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(.white.opacity(0.05))
+                    }
                     .disabled(!settings.isConfigured || !hasSelectedFile || assistant.isSending)
                     .onSubmit {
                         submit()
@@ -162,11 +186,13 @@ struct NoteAssistantPanel: View {
                     if assistant.isSending {
                         ProgressView()
                             .controlSize(.small)
-                            .frame(width: 34, height: 34)
+                            .frame(width: 42, height: 42)
                     } else {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .font(.system(size: 28))
-                            .foregroundStyle(canSubmit ? Color.accentColor : Color.secondary)
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(canSubmit ? .white : .secondary)
+                            .frame(width: 42, height: 42)
+                            .background(canSubmit ? Color.accentColor : Color.white.opacity(0.05), in: Circle())
                     }
                 }
                 .buttonStyle(.plain)
@@ -199,9 +225,15 @@ struct NoteAssistantPanel: View {
         VStack(spacing: 14) {
             Spacer()
 
-            Image(systemName: "bubble.left.and.bubble.right")
-                .font(.system(size: 28, weight: .medium))
-                .foregroundStyle(Color.accentColor.opacity(0.8))
+            ZStack {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.12))
+                    .frame(width: 58, height: 58)
+
+                Image(systemName: "bubble.left.and.bubble.right")
+                    .font(.system(size: 24, weight: .medium))
+                    .foregroundStyle(Color.accentColor.opacity(0.9))
+            }
 
             Text(title)
                 .font(.headline)
@@ -341,8 +373,12 @@ private struct AssistantMessageBubble: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .frame(maxWidth: 250, alignment: .leading)
+        .frame(maxWidth: 262, alignment: .leading)
         .background(backgroundStyle, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(.white.opacity(message.role == .assistant ? 0.05 : 0))
+        }
     }
 
     private var backgroundStyle: some ShapeStyle {

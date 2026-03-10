@@ -2,13 +2,6 @@ import AppKit
 
 @MainActor
 enum Theme {
-    static let editorFontSize: CGFloat = 14
-    static let codeFontSize: CGFloat = 13
-
-    static let editorFont = NSFont.monospacedSystemFont(ofSize: editorFontSize, weight: .regular)
-    static let editorBoldFont = NSFont.monospacedSystemFont(ofSize: editorFontSize, weight: .bold)
-    static let codeFont = NSFont.monospacedSystemFont(ofSize: codeFontSize, weight: .regular)
-
     static let headingColor = NSColor.systemBlue
     static let codeColor = NSColor.systemOrange
     static let codeBackground = NSColor.quaternaryLabelColor
@@ -16,17 +9,29 @@ enum Theme {
     static let quoteColor = NSColor.secondaryLabelColor
     static let metaColor = NSColor.tertiaryLabelColor
 
-    static let defaultParagraphStyle: NSMutableParagraphStyle = {
-        let style = NSMutableParagraphStyle()
-        style.lineSpacing = 4
-        return style
-    }()
+    static func editorFont(using preferences: AppPreferences) -> NSFont {
+        preferences.editorFontChoice.nsFont(size: preferences.editorFontSizeCGFloat)
+    }
 
-    static var defaultAttributes: [NSAttributedString.Key: Any] {
+    static func editorBoldFont(using preferences: AppPreferences) -> NSFont {
+        preferences.editorFontChoice.nsFont(size: preferences.editorFontSizeCGFloat, weight: .bold)
+    }
+
+    static func codeFont(using preferences: AppPreferences) -> NSFont {
+        preferences.editorFontChoice.nsFont(size: max(12, preferences.editorFontSizeCGFloat - 1))
+    }
+
+    static func defaultParagraphStyle(using preferences: AppPreferences) -> NSMutableParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = preferences.editorLineSpacingCGFloat
+        return style
+    }
+
+    static func defaultAttributes(using preferences: AppPreferences) -> [NSAttributedString.Key: Any] {
         [
-            .font: editorFont,
+            .font: editorFont(using: preferences),
             .foregroundColor: NSColor.textColor,
-            .paragraphStyle: defaultParagraphStyle,
+            .paragraphStyle: defaultParagraphStyle(using: preferences),
         ]
     }
 }

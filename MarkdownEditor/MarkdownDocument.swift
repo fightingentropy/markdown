@@ -65,7 +65,7 @@ final class Workspace {
     var selectedFileURL: URL?
     var text: String = ""
     var vaultURL: URL?
-    var sortOrder: SortOrder = .byDate {
+    var sortOrder: SortOrder {
         didSet {
             guard oldValue != sortOrder else { return }
             persistSortOrder()
@@ -106,10 +106,13 @@ final class Workspace {
     private static let bookmarkKey = "vaultBookmark"
     private static let markdownExtensions: Set<String> = ["md", "markdown", "mdown"]
     private static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "svg", "tiff", "bmp"]
+    private let preferences: AppPreferences
     private var activeSecurityScopedVaultURL: URL?
     private var autosaveTask: Task<Void, Never>?
 
-    init() {
+    init(preferences: AppPreferences = AppPreferences()) {
+        self.preferences = preferences
+        self.sortOrder = preferences.defaultSortOrder
         if let data = UserDefaults.standard.data(forKey: Self.bookmarkKey) {
             restoreVault(from: data)
         }
@@ -242,8 +245,9 @@ final class Workspace {
         guard selectedFileIsMarkdown else { return }
 
         autosaveTask?.cancel()
+        let delayNanoseconds = UInt64(preferences.autosaveDelaySeconds * 1_000_000_000)
         autosaveTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(500))
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
             guard !Task.isCancelled else { return }
             self?.saveCurrentFile()
         }
@@ -744,7 +748,7 @@ final class Workspace {
         guard let storageKey = sortOrderStorageKey,
               let rawValue = UserDefaults.standard.string(forKey: storageKey),
               let restored = SortOrder(rawValue: rawValue) else {
-            sortOrder = .byDate
+            sortOrder = preferences.defaultSortOrder
             return
         }
 

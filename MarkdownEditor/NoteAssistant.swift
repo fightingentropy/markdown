@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 struct NoteAssistantContext: Equatable {
     let fileURL: URL
@@ -26,7 +27,7 @@ final class NoteAssistant {
     var isPresented = false
     var isSending = false
     var errorMessage: String?
-    private(set) var currentContext: NoteAssistantContext?
+    @ObservationIgnored private(set) var currentContext: NoteAssistantContext?
 
     func updateContext(fileURL: URL?, title: String, markdown: String) {
         guard let fileURL else {

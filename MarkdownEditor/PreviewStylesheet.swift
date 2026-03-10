@@ -1,20 +1,27 @@
+@MainActor
 enum PreviewStylesheet {
 
-    static func page(body: String) -> String {
+    static func page(body: String, preferences: AppPreferences) -> String {
         """
         <!DOCTYPE html>
         <html>
         <head>
         <meta charset="utf-8">
         <meta name="color-scheme" content="light dark">
-        <style>\(css)</style>
+        <style>\(css(using: preferences))</style>
         </head>
         <body>\(body)</body>
         </html>
         """
     }
 
-    static let css = """
+    static func css(using preferences: AppPreferences) -> String {
+        let previewFontFamily = preferences.previewFontChoice.cssFontFamily
+        let previewFontSize = Int(preferences.previewFontSize.rounded())
+        let previewPageWidth = Int(preferences.previewPageWidth.rounded())
+        let previewCodeFontFamily = preferences.previewCodeFontChoice.cssFontFamily
+
+        return """
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
     :root { color-scheme: light dark; }
@@ -24,12 +31,12 @@ enum PreviewStylesheet {
     }
 
     body {
-        font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
-        font-size: 15px;
+        font-family: \(previewFontFamily);
+        font-size: \(previewFontSize)px;
         line-height: 1.75;
         color: #1d1d1f;
         background: transparent;
-        max-width: 920px;
+        max-width: \(previewPageWidth)px;
         margin: 0 auto;
         padding: 48px 72px 120px;
         -webkit-font-smoothing: antialiased;
@@ -103,7 +110,7 @@ enum PreviewStylesheet {
     del { text-decoration: line-through; opacity: 0.6; }
 
     code {
-        font-family: 'SF Mono', SFMono-Regular, Menlo, monospace;
+        font-family: \(previewCodeFontFamily);
         font-size: 0.88em;
         background: rgba(0,0,0,0.05);
         padding: 0.15em 0.45em;
@@ -215,4 +222,5 @@ enum PreviewStylesheet {
         height: auto;
     }
     """
+    }
 }

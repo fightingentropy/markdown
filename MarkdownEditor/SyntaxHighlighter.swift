@@ -67,13 +67,18 @@ enum EditorLinkDetector {
 
 @MainActor
 final class SyntaxHighlighter {
+    private let preferences: AppPreferences
+
+    init(preferences: AppPreferences) {
+        self.preferences = preferences
+    }
 
     func highlight(_ textStorage: NSTextStorage) {
         let text = textStorage.string
         let fullRange = NSRange(location: 0, length: textStorage.length)
 
         textStorage.beginEditing()
-        textStorage.setAttributes(Theme.defaultAttributes, range: fullRange)
+        textStorage.setAttributes(Theme.defaultAttributes(using: preferences), range: fullRange)
 
         let codeBlockRanges = highlightCodeBlocks(textStorage, text: text)
         let safeRanges = subtractRanges(codeBlockRanges, from: fullRange)
@@ -124,7 +129,7 @@ final class SyntaxHighlighter {
 
     private func applyCodeBlockStyle(_ textStorage: NSTextStorage, range: NSRange) {
         textStorage.addAttributes([
-            .font: Theme.codeFont,
+            .font: Theme.codeFont(using: preferences),
             .foregroundColor: Theme.codeColor,
             .backgroundColor: Theme.codeBackground,
         ], range: range)
@@ -134,13 +139,13 @@ final class SyntaxHighlighter {
 
     private func highlightInRange(_ textStorage: NSTextStorage, text: String, range: NSRange) {
         apply(#"^#{1,6}\s.*$"#, to: textStorage, in: text, range: range,
-              attrs: [.font: Theme.editorBoldFont, .foregroundColor: Theme.headingColor])
+              attrs: [.font: Theme.editorBoldFont(using: preferences), .foregroundColor: Theme.headingColor])
 
         apply(#"\*{2}.+?\*{2}"#, to: textStorage, in: text, range: range,
-              attrs: [.font: Theme.editorBoldFont])
+              attrs: [.font: Theme.editorBoldFont(using: preferences)])
 
         apply(#"`[^`\n]+`"#, to: textStorage, in: text, range: range,
-              attrs: [.font: Theme.codeFont, .foregroundColor: Theme.codeColor, .backgroundColor: Theme.codeBackground])
+              attrs: [.font: Theme.codeFont(using: preferences), .foregroundColor: Theme.codeColor, .backgroundColor: Theme.codeBackground])
 
         applyMarkdownLinks(to: textStorage, in: text, range: range)
 

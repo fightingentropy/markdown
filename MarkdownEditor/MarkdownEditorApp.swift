@@ -3,11 +3,22 @@ import SwiftUI
 @main
 struct MarkdownEditorApp: App {
     @Environment(\.scenePhase) private var scenePhase
-    @State private var workspace = Workspace()
-    @State private var appUpdater = AppUpdater()
-    @State private var assistantSettings = AssistantSettings()
-    @State private var noteAssistant = NoteAssistant()
+    @State private var workspace: Workspace
+    @State private var appUpdater: AppUpdater
+    @State private var assistantSettings: AssistantSettings
+    @State private var appPreferences: AppPreferences
+    @State private var noteAssistant: NoteAssistant
     @FocusedValue(\.editorController) private var editorController
+
+    init() {
+        let assistantSettings = AssistantSettings()
+        let appPreferences = AppPreferences()
+        _assistantSettings = State(initialValue: assistantSettings)
+        _appPreferences = State(initialValue: appPreferences)
+        _workspace = State(initialValue: Workspace(preferences: appPreferences))
+        _appUpdater = State(initialValue: AppUpdater())
+        _noteAssistant = State(initialValue: NoteAssistant())
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -16,7 +27,8 @@ struct MarkdownEditorApp: App {
                     ContentView(
                         workspace: workspace,
                         assistant: noteAssistant,
-                        assistantSettings: assistantSettings
+                        assistantSettings: assistantSettings,
+                        preferences: appPreferences
                     )
                 } else {
                     WelcomeView(workspace: workspace)
@@ -63,7 +75,10 @@ struct MarkdownEditorApp: App {
         }
 
         Settings {
-            AssistantSettingsView(settings: assistantSettings)
+            AppSettingsView(
+                assistantSettings: assistantSettings,
+                preferences: appPreferences
+            )
         }
     }
 
