@@ -47,6 +47,21 @@ struct ContentView: View {
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
+                EditorSearchToolbarField(
+                    query: controller.searchQuery,
+                    controller: controller,
+                    isEnabled: workspace.selectedFileIsMarkdown,
+                    onActivate: showEditorForSearch
+                )
+                .frame(width: 150)
+                .help("Search Current Document")
+            }
+
+            if #available(macOS 26.0, *) {
+                ToolbarSpacer(.fixed, placement: .primaryAction)
+            }
+
+            ToolbarItem(placement: .primaryAction) {
                 HStack(spacing: 2) {
                     Button { workspace.createNewFile() } label: {
                         Image(systemName: "plus")
@@ -110,6 +125,11 @@ struct ContentView: View {
         }
         .onChange(of: preferences.defaultOpenViewMode) { _, _ in
             applyPreferredViewMode()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .editorFindCommand)) { _ in
+            guard workspace.selectedFileIsMarkdown else { return }
+            showEditorForSearch()
+            controller.activateSearch()
         }
         .sheet(item: $renameRequest) { request in
             RenameFileSheet(target: request) { proposedName in
@@ -696,6 +716,13 @@ private extension ContentView {
     func applyPreferredViewMode() {
         guard workspace.selectedFileIsMarkdown else { return }
         viewMode = preferences.defaultOpenViewMode
+    }
+
+    func showEditorForSearch() {
+        guard workspace.selectedFileIsMarkdown else { return }
+        if viewMode != .editor {
+            viewMode = .editor
+        }
     }
 
     func synchronizeAssistantContext() {

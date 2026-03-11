@@ -19,7 +19,20 @@ extension FocusedValues {
 @Observable
 @MainActor
 final class EditorController {
-    weak var textView: NSTextView?
+    private enum SearchRequest {
+        case locateMatch
+        case findNext
+    }
+
+    weak var textView: NSTextView? {
+        didSet {
+            performPendingSearchIfNeeded()
+        }
+    }
+    weak var searchField: NSSearchField?
+    var searchQuery = ""
+
+    private var pendingSearchRequest: SearchRequest?
 
     func applyBold() { wrapSelection(prefix: "**", suffix: "**") }
     func applyItalic() { wrapSelection(prefix: "*", suffix: "*") }
@@ -45,6 +58,40 @@ final class EditorController {
         }
     }
 
+    func registerSearchField(_ searchField: NSSearchField) {
+        self.searchField = searchField
+    }
+
+    func activateSearch() {
+        guard let searchField else { return }
+        searchField.selectText(nil)
+
+        if !searchQuery.isEmpty {
+            queueSearch(.locateMatch)
+        }
+    }
+
+    func updateSearchQuery(_ query: String) {
+        searchQuery = query
+
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else {
+            pendingSearchRequest = nil
+            return
+        }
+
+        queueSearch(.locateMatch)
+    }
+
+    func findNextMatch() {
+        guard !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            NSSound.beep()
+            return
+        }
+
+        queueSearch(.findNext)
+    }
+
     private func wrapSelection(prefix: String, suffix: String) {
         guard let textView else { return }
         let range = textView.selectedRange()
@@ -58,6 +105,72 @@ final class EditorController {
         let cursorPos = textView.selectedRange().location
         let lineRange = nsString.lineRange(for: NSRange(location: cursorPos, length: 0))
         textView.insertText(prefix, replacementRange: NSRange(location: lineRange.location, length: 0))
+    }
+
+    private func queueSearch(_ request: SearchRequest) {
+        guard let textView else {
+            pendingSearchRequest = request
+            return
+        }
+
+        performSearch(request, in: textView)
+    }
+
+    private func performPendingSearchIfNeeded() {
+        guard let request = pendingSearchRequest else { return }
+        pendingSearchRequest = nil
+        queueSearch(request)
+    }
+
+    private func performSearch(_ request: SearchRequest, in textView: NSTextView) {
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+
+        let document = textView.string as NSString
+        let selectedRange = textView.selectedRange()
+        let startLocation: Int
+
+        switch request {
+        case .locateMatch:
+            startLocation = min(selectedRange.location, document.length)
+        case .findNext:
+            startLocation = min(selectedRange.location + max(selectedRange.length, 1), document.length)
+        }
+
+        let primaryRange = NSRange(location: startLocation, length: document.length - startLocation)
+        let wrapRange = NSRange(location: 0, length: startLocation)
+
+        if let match = findMatch(
+            query: query,
+            in: document,
+            primaryRange: primaryRange,
+            wrapRange: wrapRange
+        ) {
+            textView.setSelectedRange(match)
+            textView.scrollRangeToVisible(match)
+            textView.showFindIndicator(for: match)
+        } else {
+            NSSound.beep()
+        }
+    }
+
+    private func findMatch(
+        query: String,
+        in document: NSString,
+        primaryRange: NSRange,
+        wrapRange: NSRange
+    ) -> NSRange? {
+        let options: NSString.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+
+        let primaryMatch = document.range(of: query, options: options, range: primaryRange)
+        if primaryMatch.location != NSNotFound {
+            return primaryMatch
+        }
+
+        guard wrapRange.length > 0 else { return nil }
+
+        let wrappedMatch = document.range(of: query, options: options, range: wrapRange)
+        return wrappedMatch.location == NSNotFound ? nil : wrappedMatch
     }
 }
 
@@ -368,5 +481,77 @@ private final class SourceTextView: NSTextView {
         }
 
         super.mouseDown(with: event)
+    }
+}
+
+struct EditorSearchToolbarField: NSViewRepresentable {
+    let query: String
+    let controller: EditorController
+    let isEnabled: Bool
+    let onActivate: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSSearchField {
+        let searchField = NSSearchField()
+        searchField.delegate = context.coordinator
+        searchField.controlSize = .small
+        searchField.placeholderString = "Search ⌘F"
+        searchField.sendsWholeSearchString = true
+        searchField.focusRingType = .default
+        searchField.target = context.coordinator
+        searchField.action = #selector(Coordinator.submitSearch(_:))
+        controller.registerSearchField(searchField)
+        return searchField
+    }
+
+    func updateNSView(_ searchField: NSSearchField, context: Context) {
+        context.coordinator.parent = self
+        searchField.isEnabled = isEnabled
+        if searchField.stringValue != query {
+            searchField.stringValue = query
+        }
+        controller.registerSearchField(searchField)
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSSearchFieldDelegate, NSControlTextEditingDelegate {
+        var parent: EditorSearchToolbarField
+
+        init(parent: EditorSearchToolbarField) {
+            self.parent = parent
+        }
+
+        func controlTextDidBeginEditing(_ notification: Notification) {
+            parent.onActivate()
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let searchField = notification.object as? NSSearchField else { return }
+            parent.onActivate()
+            parent.controller.updateSearchQuery(searchField.stringValue)
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                parent.onActivate()
+                parent.controller.findNextMatch()
+                return true
+            }
+
+            return false
+        }
+
+        @objc
+        func submitSearch(_ sender: NSSearchField) {
+            parent.onActivate()
+            if sender.stringValue.isEmpty {
+                parent.controller.updateSearchQuery("")
+            } else {
+                parent.controller.findNextMatch()
+            }
+        }
     }
 }

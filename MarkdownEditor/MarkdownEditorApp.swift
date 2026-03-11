@@ -1,6 +1,10 @@
 import AppKit
 import SwiftUI
 
+extension Notification.Name {
+    static let editorFindCommand = Notification.Name("EditorFindCommand")
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pendingOpenURLs: [URL] = []
@@ -89,6 +93,14 @@ struct MarkdownEditorApp: App {
                 Button("Save") { workspace.saveCurrentFile() }
                     .keyboardShortcut("s")
                     .disabled(workspace.selectedFileURL == nil)
+            }
+            CommandGroup(after: .pasteboard) {
+                Divider()
+                Button("Find in Document") {
+                    NotificationCenter.default.post(name: .editorFindCommand, object: nil)
+                }
+                .keyboardShortcut("f")
+                .disabled(!workspace.selectedFileIsMarkdown)
             }
             CommandGroup(after: .newItem) {
                 Button("Search Notes") { workspace.isCommandPalettePresented.toggle() }
