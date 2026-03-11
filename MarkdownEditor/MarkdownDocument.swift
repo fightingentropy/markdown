@@ -1,7 +1,7 @@
 import AppKit
 import UniformTypeIdentifiers
 
-struct FileItem: Identifiable, Hashable {
+struct FileItem: Identifiable, Hashable, Sendable {
     let id: URL
     let name: String
     let url: URL
@@ -17,8 +17,8 @@ struct FileItem: Identifiable, Hashable {
     }
 }
 
-struct SidebarNode: Identifiable, Hashable {
-    enum Kind: Hashable {
+struct SidebarNode: Identifiable, Hashable, Sendable {
+    enum Kind: Hashable, Sendable {
         case folder
         case file
     }
@@ -35,7 +35,7 @@ struct SidebarNode: Identifiable, Hashable {
     }
 }
 
-enum SortOrder: String {
+enum SortOrder: String, Sendable {
     case byName
     case byDate
 }
@@ -56,6 +56,9 @@ enum FileRenameError: LocalizedError, Equatable {
         }
     }
 }
+
+private let markdownFileExtensions: Set<String> = ["md", "markdown", "mdown"]
+private let imageFileExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "svg", "tiff", "bmp"]
 
 @Observable
 @MainActor
@@ -104,11 +107,11 @@ final class Workspace {
     }
 
     private static let bookmarkKey = "vaultBookmark"
-    private static let markdownExtensions: Set<String> = ["md", "markdown", "mdown"]
-    private static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "svg", "tiff", "bmp"]
     private let preferences: AppPreferences
     private var activeSecurityScopedVaultURL: URL?
     private var autosaveTask: Task<Void, Never>?
+    private var snapshotLoadTask: Task<Void, Never>?
+    private var snapshotGeneration = 0
 
     init(preferences: AppPreferences = AppPreferences()) {
         self.preferences = preferences
@@ -136,15 +139,14 @@ final class Workspace {
         persistVaultBookmark(for: url)
         vaultURL = url
         restoreSortOrder()
-        refreshFiles()
-        if let restoredURL = restoreSelectedFileURL(), let matchingURL = matchingFileURL(for: restoredURL) {
-            selectFile(matchingURL)
-        } else if let first = sortedFiles.first {
-            selectFile(first.url)
-        } else {
-            selectedFileURL = nil
-            text = ""
-        }
+        files = []
+        sidebarNodes = []
+        selectedFileURL = nil
+        text = ""
+        refreshFilesInBackground(
+            preferredSelectionURL: restoreSelectedFileURL(),
+            selectFirstFileIfNeeded: true
+        )
     }
 
     private func restoreVault(from bookmarkData: Data) {
@@ -168,23 +170,29 @@ final class Workspace {
             UserDefaults.standard.set(fresh, forKey: Self.bookmarkKey)
         }
 
-        refreshFiles()
-
-        if let restoredURL = restoreSelectedFileURL(), let matchingURL = matchingFileURL(for: restoredURL) {
-            selectFile(matchingURL)
-        }
+        files = []
+        sidebarNodes = []
+        selectedFileURL = nil
+        text = ""
+        refreshFilesInBackground(
+            preferredSelectionURL: restoreSelectedFileURL(),
+            selectFirstFileIfNeeded: true
+        )
     }
 
     // MARK: - File Operations
 
     func refreshFiles() {
+        snapshotLoadTask?.cancel()
+        snapshotGeneration += 1
+
         guard let vaultURL else {
             files = []
             sidebarNodes = []
             return
         }
 
-        let snapshot = snapshotDirectory(at: vaultURL)
+        let snapshot = Self.snapshotDirectory(at: vaultURL, sortOrder: sortOrder)
         files = snapshot.files
         sidebarNodes = snapshot.nodes
 
@@ -207,7 +215,11 @@ final class Workspace {
 
         saveCurrentFile()
         if Self.isMarkdownFile(canonicalURL), let content = readFile(canonicalURL) {
-            let normalizedContent = normalizedContent(for: canonicalURL, content: content)
+            let normalizedContent = Self.normalizedContent(
+                for: canonicalURL,
+                content: content,
+                persistIfMissingTitle: true
+            )
             selectedFileURL = canonicalURL
             text = normalizedContent
             persistSelectedFileURL(canonicalURL)
@@ -219,12 +231,7 @@ final class Workspace {
     }
 
     private func readFile(_ url: URL) -> String? {
-        if let data = try? Data(contentsOf: url),
-           let s = String(data: data, encoding: .utf8) { return s }
-        let accessed = url.startAccessingSecurityScopedResource()
-        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return String(data: data, encoding: .utf8)
+        Self.readFileContents(url)
     }
 
     func saveCurrentFile() {
@@ -304,10 +311,13 @@ final class Workspace {
 
         vaultURL = parentURL
         restoreSortOrder()
-        refreshFiles()
 
         if Self.isMarkdownFile(url), let content = readFile(url) {
-            let normalizedContent = normalizedContent(for: url, content: content)
+            let normalizedContent = Self.normalizedContent(
+                for: url,
+                content: content,
+                persistIfMissingTitle: true
+            )
             ensureOpenedFileIsVisible(at: url, markdownContent: normalizedContent)
             text = normalizedContent
         } else {
@@ -317,6 +327,7 @@ final class Workspace {
 
         selectedFileURL = url
         persistSelectedFileURL(url)
+        refreshFilesInBackground(preferredSelectionURL: url, selectFirstFileIfNeeded: false)
     }
 
     func createNewFolder() {
@@ -412,7 +423,7 @@ final class Workspace {
         return relativePath == file.name && file.name == file.displayName ? nil : relativePath
     }
 
-    private static func extractTitle(from content: String) -> String? {
+    private nonisolated static func extractTitle(from content: String) -> String? {
         for line in content.split(whereSeparator: \.isNewline) {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
@@ -576,7 +587,57 @@ final class Workspace {
         )
     }
 
-    private func snapshotDirectory(at directoryURL: URL) -> DirectorySnapshot {
+    private func refreshFilesInBackground(
+        preferredSelectionURL: URL?,
+        selectFirstFileIfNeeded: Bool
+    ) {
+        snapshotLoadTask?.cancel()
+        snapshotGeneration += 1
+
+        guard let vaultURL else {
+            files = []
+            sidebarNodes = []
+            selectedFileURL = nil
+            text = ""
+            return
+        }
+
+        let generation = snapshotGeneration
+        let sortOrder = sortOrder
+
+        snapshotLoadTask = Task { [vaultURL] in
+            let snapshot = await Task.detached(priority: .userInitiated) {
+                Self.snapshotDirectory(at: vaultURL, sortOrder: sortOrder)
+            }.value
+
+            guard !Task.isCancelled else { return }
+            guard generation == self.snapshotGeneration else { return }
+            guard self.vaultURL?.standardizedFileURL == vaultURL.standardizedFileURL else { return }
+
+            self.files = snapshot.files
+            self.sidebarNodes = snapshot.nodes
+
+            if let preferredSelectionURL,
+               let matchingURL = self.matchingFileURL(for: preferredSelectionURL) {
+                self.selectFile(matchingURL)
+                return
+            }
+
+            if let selectedFileURL {
+                if let matchingURL = self.matchingFileURL(for: selectedFileURL) {
+                    self.selectedFileURL = matchingURL
+                } else {
+                    self.selectedFileURL = nil
+                    self.text = ""
+                    self.clearStoredSelectedFileURL()
+                }
+            } else if selectFirstFileIfNeeded, let first = self.sortedFiles.first {
+                self.selectFile(first.url)
+            }
+        }
+    }
+
+    private nonisolated static func snapshotDirectory(at directoryURL: URL, sortOrder: SortOrder) -> DirectorySnapshot {
         guard let contents = try? FileManager.default.contentsOfDirectory(
             at: directoryURL,
             includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
@@ -593,7 +654,7 @@ final class Workspace {
             let modificationDate = values?.contentModificationDate ?? .distantPast
 
             if values?.isDirectory == true {
-                let childSnapshot = snapshotDirectory(at: url)
+                let childSnapshot = snapshotDirectory(at: url, sortOrder: sortOrder)
                 let childLatestDate = childSnapshot.nodes.map(\.modificationDate).max() ?? modificationDate
                 nodes.append(
                     SidebarNode(
@@ -632,14 +693,18 @@ final class Workspace {
         }
 
         return DirectorySnapshot(
-            nodes: sortSidebarNodes(nodes),
+            nodes: sortSidebarNodes(nodes, sortOrder: sortOrder),
             files: files
         )
     }
 
-    private func makeFileItem(at url: URL, modificationDate: Date) -> FileItem {
-        let noteTitle = readFile(url).flatMap { content in
-            Self.extractTitle(from: normalizedContent(for: url, content: content))
+    private nonisolated static func makeFileItem(at url: URL, modificationDate: Date) -> FileItem {
+        let noteTitle = readFileContents(url).flatMap { content in
+            Self.extractTitle(from: normalizedContent(
+                for: url,
+                content: content,
+                persistIfMissingTitle: false
+            ))
         }
         return FileItem(
             id: url,
@@ -650,7 +715,7 @@ final class Workspace {
         )
     }
 
-    private func sortSidebarNodes(_ nodes: [SidebarNode]) -> [SidebarNode] {
+    private nonisolated static func sortSidebarNodes(_ nodes: [SidebarNode], sortOrder: SortOrder) -> [SidebarNode] {
         nodes.sorted { lhs, rhs in
             if lhs.isFolder != rhs.isFolder {
                 return lhs.isFolder && !rhs.isFolder
@@ -668,7 +733,11 @@ final class Workspace {
         }
     }
 
-    private func normalizedContent(for url: URL, content: String) -> String {
+    private nonisolated static func normalizedContent(
+        for url: URL,
+        content: String,
+        persistIfMissingTitle: Bool
+    ) -> String {
         if Self.extractTitle(from: content) != nil {
             return content
         }
@@ -678,19 +747,36 @@ final class Workspace {
         let body = trimmedLeadingNewlines.isEmpty ? "" : "\n\n\(trimmedLeadingNewlines)"
         let normalized = "# \(title)\(body)"
 
-        if normalized != content {
+        if persistIfMissingTitle, normalized != content {
             try? Data(normalized.utf8).write(to: url, options: .atomic)
         }
 
         return normalized
     }
 
-    static func isMarkdownFile(_ url: URL) -> Bool {
-        markdownExtensions.contains(url.pathExtension.lowercased())
+    private nonisolated static func readFileContents(_ url: URL) -> String? {
+        if let data = try? Data(contentsOf: url),
+           let string = String(data: data, encoding: .utf8) {
+            return string
+        }
+
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer {
+            if accessed {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
-    static func isImageFile(_ url: URL) -> Bool {
-        imageExtensions.contains(url.pathExtension.lowercased())
+    nonisolated static func isMarkdownFile(_ url: URL) -> Bool {
+        markdownFileExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    nonisolated static func isImageFile(_ url: URL) -> Bool {
+        imageFileExtensions.contains(url.pathExtension.lowercased())
     }
 
     private func matchingFileURL(for url: URL) -> URL? {
@@ -718,7 +804,7 @@ final class Workspace {
 
         guard !sidebarContainsNode(for: url, in: sidebarNodes) else { return }
 
-        sidebarNodes = sortSidebarNodes(
+        sidebarNodes = Self.sortSidebarNodes(
             sidebarNodes + [
                 SidebarNode(
                     id: url,
@@ -727,7 +813,8 @@ final class Workspace {
                     kind: .file,
                     modificationDate: modificationDate
                 )
-            ]
+            ],
+            sortOrder: sortOrder
         )
     }
 
@@ -812,7 +899,7 @@ final class Workspace {
 
 }
 
-private struct DirectorySnapshot {
+private struct DirectorySnapshot: Sendable {
     let nodes: [SidebarNode]
     let files: [FileItem]
 }

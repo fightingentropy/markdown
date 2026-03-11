@@ -5,7 +5,7 @@ import XCTest
 
 @MainActor
 final class WorkspaceRenameTests: XCTestCase {
-    func testOpenRequestedFilesOverridesRestoredSelection() throws {
+    func testOpenRequestedFilesOverridesRestoredSelection() async throws {
         let fixture = try makeWorkspaceFixture(
             files: [
                 ("Old", "# Old\n\nBody"),
@@ -19,6 +19,12 @@ final class WorkspaceRenameTests: XCTestCase {
         XCTAssertEqual(initialWorkspace.selectedFileURL?.standardizedFileURL, fixture.fileURLs[0].standardizedFileURL)
 
         let restoredWorkspace = Workspace()
+        for _ in 0..<20 {
+            if restoredWorkspace.selectedFileURL?.standardizedFileURL == fixture.fileURLs[0].standardizedFileURL {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
         XCTAssertEqual(restoredWorkspace.selectedFileURL?.standardizedFileURL, fixture.fileURLs[0].standardizedFileURL)
 
         restoredWorkspace.openRequestedFiles([fixture.fileURLs[1]])
@@ -66,6 +72,17 @@ final class WorkspaceRenameTests: XCTestCase {
         XCTAssertThrowsError(try workspace.renameFile(fixture.fileURL, to: "Taken")) { error in
             XCTAssertEqual(error as? FileRenameError, .nameAlreadyExists)
         }
+    }
+
+    func testRefreshFilesDoesNotRewriteFilesWithoutHeadings() throws {
+        let fixture = try makeWorkspaceFixture(fileName: "Untitled", content: "Plain body")
+        let workspace = Workspace()
+        workspace.vaultURL = fixture.vaultURL
+
+        workspace.refreshFiles()
+
+        XCTAssertEqual(try String(contentsOf: fixture.fileURL, encoding: .utf8), "Plain body")
+        XCTAssertEqual(workspace.files.first?.noteTitle, "Untitled")
     }
 
     private func makeWorkspaceFixture(fileName: String, content: String) throws -> (vaultURL: URL, fileURL: URL) {
