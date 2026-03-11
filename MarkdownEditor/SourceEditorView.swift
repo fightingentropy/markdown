@@ -90,9 +90,11 @@ struct SourceEditorView: NSViewRepresentable {
         textView.string = text
 
         context.coordinator.parent = self
+        context.coordinator.observeSizeChanges(of: scrollView)
         updateTextLayout(for: scrollView, textView: textView)
         context.coordinator.primeAppearanceSignature()
         context.coordinator.highlight(textView, preservingViewport: false)
+        context.coordinator.scheduleDeferredLayoutUpdate(for: scrollView, textView: textView)
 
         controller.textView = textView
 
@@ -103,6 +105,7 @@ struct SourceEditorView: NSViewRepresentable {
         guard let textView = nsView.documentView as? SourceTextView else { return }
 
         context.coordinator.parent = self
+        context.coordinator.observeSizeChanges(of: nsView)
         configure(textView, coordinator: context.coordinator)
         updateTextLayout(for: nsView, textView: textView)
         context.coordinator.applyExternalTextIfNeeded(text, to: textView)
@@ -156,6 +159,7 @@ struct SourceEditorView: NSViewRepresentable {
         var parent: SourceEditorView
         private var isApplyingExternalText = false
         private var lastAppearanceSignature: AppearanceSignature?
+        private weak var observedClipView: NSClipView?
 
         init(_ parent: SourceEditorView) {
             self.parent = parent
@@ -163,6 +167,40 @@ struct SourceEditorView: NSViewRepresentable {
 
         private var highlighter: SyntaxHighlighter {
             SyntaxHighlighter(preferences: parent.preferences)
+        }
+
+        func observeSizeChanges(of scrollView: NSScrollView) {
+            let clipView = scrollView.contentView
+            guard observedClipView !== clipView else { return }
+
+            stopObservingSizeChanges()
+            observedClipView = clipView
+            clipView.postsFrameChangedNotifications = true
+
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(clipViewFrameDidChange(_:)),
+                name: NSView.frameDidChangeNotification,
+                object: clipView
+            )
+        }
+
+        func scheduleDeferredLayoutUpdate(for scrollView: NSScrollView, textView: NSTextView) {
+            DispatchQueue.main.async { [weak self, weak scrollView, weak textView] in
+                guard let self, let scrollView, let textView else { return }
+                self.parent.updateTextLayout(for: scrollView, textView: textView)
+            }
+        }
+
+        private func stopObservingSizeChanges() {
+            guard let observedClipView else { return }
+
+            NotificationCenter.default.removeObserver(
+                self,
+                name: NSView.frameDidChangeNotification,
+                object: observedClipView
+            )
+            self.observedClipView = nil
         }
 
         func applyExternalTextIfNeeded(_ text: String, to textView: NSTextView) {
@@ -300,6 +338,17 @@ struct SourceEditorView: NSViewRepresentable {
             )
 
             return min(rawLocation, textView.string.utf16.count)
+        }
+
+        @objc
+        private func clipViewFrameDidChange(_ notification: Notification) {
+            guard let clipView = notification.object as? NSClipView,
+                  let scrollView = clipView.superview as? NSScrollView,
+                  let textView = scrollView.documentView as? NSTextView else {
+                return
+            }
+
+            parent.updateTextLayout(for: scrollView, textView: textView)
         }
     }
 }
