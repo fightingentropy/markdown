@@ -77,6 +77,7 @@ final class Workspace {
         }
     }
     var isCommandPalettePresented = false
+    var isLoadingSnapshot = false
 
     var hasVault: Bool { vaultURL != nil }
     var selectedFileIsMarkdown: Bool {
@@ -185,6 +186,7 @@ final class Workspace {
     func refreshFiles() {
         snapshotLoadTask?.cancel()
         snapshotGeneration += 1
+        isLoadingSnapshot = false
 
         guard let vaultURL else {
             files = []
@@ -595,6 +597,7 @@ final class Workspace {
         snapshotGeneration += 1
 
         guard let vaultURL else {
+            isLoadingSnapshot = false
             files = []
             sidebarNodes = []
             selectedFileURL = nil
@@ -602,6 +605,7 @@ final class Workspace {
             return
         }
 
+        isLoadingSnapshot = true
         let generation = snapshotGeneration
         let sortOrder = sortOrder
 
@@ -620,6 +624,7 @@ final class Workspace {
             if let preferredSelectionURL,
                let matchingURL = self.matchingFileURL(for: preferredSelectionURL) {
                 self.selectFile(matchingURL)
+                self.isLoadingSnapshot = false
                 return
             }
 
@@ -634,6 +639,8 @@ final class Workspace {
             } else if selectFirstFileIfNeeded, let first = self.sortedFiles.first {
                 self.selectFile(first.url)
             }
+
+            self.isLoadingSnapshot = false
         }
     }
 

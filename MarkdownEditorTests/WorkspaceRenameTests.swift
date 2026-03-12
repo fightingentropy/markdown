@@ -85,6 +85,27 @@ final class WorkspaceRenameTests: XCTestCase {
         XCTAssertEqual(workspace.files.first?.noteTitle, "Untitled")
     }
 
+    func testSidebarExpansionRestoreDefersUntilFoldersAreLoaded() {
+        let folderURL = URL(fileURLWithPath: "/tmp/vault/misc", isDirectory: true)
+        let storedPaths = [folderURL.path]
+
+        let deferredResult = SidebarExpansionPersistence.restoreResult(
+            storedPaths: storedPaths,
+            validFolderURLs: [],
+            isLoadingSnapshot: true
+        )
+
+        XCTAssertEqual(deferredResult, .deferred)
+
+        let restoredResult = SidebarExpansionPersistence.restoreResult(
+            storedPaths: storedPaths,
+            validFolderURLs: [folderURL],
+            isLoadingSnapshot: false
+        )
+
+        XCTAssertEqual(restoredResult, .restored([folderURL]))
+    }
+
     private func makeWorkspaceFixture(fileName: String, content: String) throws -> (vaultURL: URL, fileURL: URL) {
         let fixture = try makeWorkspaceFixture(files: [(fileName, content)])
         return (fixture.vaultURL, fixture.fileURLs[0])

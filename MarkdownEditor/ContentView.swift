@@ -106,6 +106,9 @@ struct ContentView: View {
         .onChange(of: workspace.sidebarNodes) { _, _ in
             restoreExpandedFoldersIfNeeded()
         }
+        .onChange(of: workspace.isLoadingSnapshot) { _, _ in
+            restoreExpandedFoldersIfNeeded()
+        }
         .onChange(of: expandedFolderURLs) { _, _ in
             persistExpandedFolders()
         }
@@ -246,6 +249,7 @@ struct ContentView: View {
     private var editorView: some View {
         SourceEditorView(
             text: $workspace.text,
+            documentURL: workspace.selectedFileURL,
             controller: controller,
             preferences: preferences
         )
@@ -774,9 +778,13 @@ private extension ContentView {
             return
         }
 
+        let validFolderURLs = folderURLs(in: workspace.sidebarNodes)
+
         guard force || restoredVaultKey != storageKey else {
-            let validFolderURLs = folderURLs(in: workspace.sidebarNodes)
-            let filteredURLs = expandedFolderURLs.intersection(validFolderURLs)
+            let filteredURLs = SidebarExpansionPersistence.filteredExpandedFolderURLs(
+                expandedFolderURLs,
+                validFolderURLs: validFolderURLs
+            )
             if filteredURLs != expandedFolderURLs {
                 expandedFolderURLs = filteredURLs
                 persistExpandedFolders()
@@ -785,12 +793,19 @@ private extension ContentView {
         }
 
         let storedPaths = UserDefaults.standard.stringArray(forKey: storageKey) ?? []
-        let validFolderURLs = folderURLs(in: workspace.sidebarNodes)
-        let restoredURLs = Set(storedPaths.map(URL.init(fileURLWithPath:)))
-            .intersection(validFolderURLs)
 
-        expandedFolderURLs = restoredURLs
-        restoredVaultKey = storageKey
+        switch SidebarExpansionPersistence.restoreResult(
+            storedPaths: storedPaths,
+            validFolderURLs: validFolderURLs,
+            isLoadingSnapshot: workspace.isLoadingSnapshot
+        ) {
+        case .deferred:
+            expandedFolderURLs = []
+            restoredVaultKey = nil
+        case .restored(let restoredURLs):
+            expandedFolderURLs = restoredURLs
+            restoredVaultKey = storageKey
+        }
     }
 
     func persistExpandedFolders() {
@@ -807,6 +822,64 @@ private extension ContentView {
         return "sidebarExpandedFolders::" + vaultURL.standardizedFileURL.path
     }
 
+}
+
+enum SidebarExpansionRestoreResult: Equatable {
+    case deferred
+    case restored(Set<URL>)
+}
+
+enum SidebarExpansionPersistence {
+    static func restoreResult(
+        storedPaths: [String],
+        validFolderURLs: Set<URL>,
+        isLoadingSnapshot: Bool
+    ) -> SidebarExpansionRestoreResult {
+        if isLoadingSnapshot && validFolderURLs.isEmpty && !storedPaths.isEmpty {
+            return .deferred
+        }
+
+        return .restored(
+            matchedFolderURLs(
+                for: storedPaths,
+                within: validFolderURLs
+            )
+        )
+    }
+
+    static func filteredExpandedFolderURLs(
+        _ expandedFolderURLs: Set<URL>,
+        validFolderURLs: Set<URL>
+    ) -> Set<URL> {
+        let validFoldersByPath = keyedByCanonicalPath(validFolderURLs)
+        return Set(
+            expandedFolderURLs.compactMap { validFoldersByPath[canonicalPath(for: $0)] }
+        )
+    }
+
+    private static func matchedFolderURLs(
+        for storedPaths: [String],
+        within validFolderURLs: Set<URL>
+    ) -> Set<URL> {
+        let validFoldersByPath = keyedByCanonicalPath(validFolderURLs)
+        return Set(
+            storedPaths.compactMap { storedPath in
+                validFoldersByPath[canonicalPath(forPath: storedPath)]
+            }
+        )
+    }
+
+    private static func keyedByCanonicalPath(_ urls: Set<URL>) -> [String: URL] {
+        Dictionary(uniqueKeysWithValues: urls.map { (canonicalPath(for: $0), $0) })
+    }
+
+    private static func canonicalPath(for url: URL) -> String {
+        url.resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
+    private static func canonicalPath(forPath path: String) -> String {
+        canonicalPath(for: URL(fileURLWithPath: path))
+    }
 }
 
 private struct ImagePreview: View {

@@ -178,6 +178,7 @@ final class EditorController {
 
 struct SourceEditorView: NSViewRepresentable {
     @Binding var text: String
+    let documentURL: URL?
     let controller: EditorController
     let preferences: AppPreferences
 
@@ -205,9 +206,12 @@ struct SourceEditorView: NSViewRepresentable {
         context.coordinator.parent = self
         context.coordinator.observeSizeChanges(of: scrollView)
         updateTextLayout(for: scrollView, textView: textView)
+        context.coordinator.setCurrentDocument(documentURL)
+        context.coordinator.showBeginningOfDocument(in: textView)
         context.coordinator.primeAppearanceSignature()
         context.coordinator.highlight(textView, preservingViewport: false)
         context.coordinator.scheduleDeferredLayoutUpdate(for: scrollView, textView: textView)
+        context.coordinator.scheduleShowBeginningOfDocument(in: textView)
 
         controller.textView = textView
 
@@ -221,7 +225,12 @@ struct SourceEditorView: NSViewRepresentable {
         context.coordinator.observeSizeChanges(of: nsView)
         configure(textView, coordinator: context.coordinator)
         updateTextLayout(for: nsView, textView: textView)
-        context.coordinator.applyExternalTextIfNeeded(text, to: textView)
+        let documentChanged = context.coordinator.setCurrentDocument(documentURL)
+        context.coordinator.applyExternalTextIfNeeded(
+            text,
+            documentChanged: documentChanged,
+            to: textView
+        )
         context.coordinator.refreshAppearanceIfNeeded(on: textView)
 
         controller.textView = textView
@@ -273,6 +282,7 @@ struct SourceEditorView: NSViewRepresentable {
         private var isApplyingExternalText = false
         private var lastAppearanceSignature: AppearanceSignature?
         private weak var observedClipView: NSClipView?
+        private var currentDocumentIdentity: String?
 
         init(_ parent: SourceEditorView) {
             self.parent = parent
@@ -316,8 +326,39 @@ struct SourceEditorView: NSViewRepresentable {
             self.observedClipView = nil
         }
 
-        func applyExternalTextIfNeeded(_ text: String, to textView: NSTextView) {
-            guard textView.string != text else { return }
+        func setCurrentDocument(_ url: URL?) -> Bool {
+            let nextIdentity = documentIdentity(for: url)
+            let didChange = currentDocumentIdentity != nextIdentity
+            currentDocumentIdentity = nextIdentity
+            return didChange
+        }
+
+        func scheduleShowBeginningOfDocument(in textView: NSTextView) {
+            DispatchQueue.main.async { [weak self, weak textView] in
+                guard let self, let textView else { return }
+                self.showBeginningOfDocument(in: textView)
+            }
+        }
+
+        func applyExternalTextIfNeeded(
+            _ text: String,
+            documentChanged: Bool,
+            to textView: NSTextView
+        ) {
+            guard documentChanged || textView.string != text else { return }
+
+            if documentChanged {
+                isApplyingExternalText = true
+                defer { isApplyingExternalText = false }
+
+                if textView.string != text {
+                    textView.string = text
+                }
+                showBeginningOfDocument(in: textView)
+                highlight(textView, preservingViewport: false)
+                scheduleShowBeginningOfDocument(in: textView)
+                return
+            }
 
             withPreservedViewport(for: textView) {
                 isApplyingExternalText = true
@@ -325,6 +366,13 @@ struct SourceEditorView: NSViewRepresentable {
                 textView.string = text
                 highlight(textView, preservingViewport: false)
             }
+        }
+
+        func showBeginningOfDocument(in textView: NSTextView) {
+            let documentStart = NSRange(location: 0, length: 0)
+            textView.setSelectedRange(documentStart)
+            textView.scrollRangeToVisible(documentStart)
+            restoreScrollOrigin(.zero, in: textView)
         }
 
         func refreshAppearanceIfNeeded(on textView: NSTextView) {
@@ -451,6 +499,10 @@ struct SourceEditorView: NSViewRepresentable {
             )
 
             return min(rawLocation, textView.string.utf16.count)
+        }
+
+        private func documentIdentity(for url: URL?) -> String? {
+            url?.resolvingSymlinksInPath().standardizedFileURL.path
         }
 
         @objc
