@@ -1,31 +1,44 @@
 import Foundation
-import Security
 
 @Observable
 @MainActor
 final class AssistantSettings {
     static let supportedModels: [AssistantModel] = [
         AssistantModel(
-            id: "glm-5",
-            displayName: "GLM 5",
-            endpoint: URL(string: "https://opencode.ai/zen/v1/chat/completions")!,
+            id: "gpt-5.4",
+            displayName: "GPT-5.4",
+            endpoint: URL(string: "https://api.openai.com/v1/chat/completions")!,
+            apiStyle: .chatCompletions,
+            supportedReasoningEfforts: [.none, .low, .medium, .high, .xhigh]
+        ),
+        AssistantModel(
+            id: "gpt-5.3-codex-spark",
+            displayName: "GPT-5.3-Codex-Spark (limited preview)",
+            endpoint: URL(string: "https://api.openai.com/v1/chat/completions")!,
+            apiStyle: .chatCompletions,
+            supportedReasoningEfforts: [.low, .medium, .high, .xhigh]
+        ),
+        AssistantModel(
+            id: "gpt-4o-mini",
+            displayName: "GPT-4o mini",
+            endpoint: URL(string: "https://api.openai.com/v1/chat/completions")!,
             apiStyle: .chatCompletions
         ),
         AssistantModel(
-            id: "kimi-k2.5",
-            displayName: "Kimi K2.5",
-            endpoint: URL(string: "https://opencode.ai/zen/v1/chat/completions")!,
+            id: "gpt-4o",
+            displayName: "GPT-4o",
+            endpoint: URL(string: "https://api.openai.com/v1/chat/completions")!,
             apiStyle: .chatCompletions
         ),
         AssistantModel(
-            id: "minimax-m2.5",
-            displayName: "MiniMax M2.5",
-            endpoint: URL(string: "https://opencode.ai/zen/v1/chat/completions")!,
+            id: "gpt-4.1-mini",
+            displayName: "GPT-4.1 mini",
+            endpoint: URL(string: "https://api.openai.com/v1/chat/completions")!,
             apiStyle: .chatCompletions
         )
     ]
 
-    static let authURL = URL(string: "https://opencode.ai/auth")!
+    static let authURL = URL(string: "https://platform.openai.com/api-keys")!
     static let supportedLauncherSymbols: [AssistantLauncherSymbol] = [
         AssistantLauncherSymbol(id: "bubble.left.and.bubble.right.fill", displayName: "Chat"),
         AssistantLauncherSymbol(id: "ellipsis.bubble.fill", displayName: "Reply"),
@@ -34,8 +47,6 @@ final class AssistantSettings {
 
     var apiKey: String {
         didSet {
-            guard !isLoadingAPIKey else { return }
-            hasLoadedAPIKey = true
             persistAPIKey()
         }
     }
@@ -43,6 +54,12 @@ final class AssistantSettings {
     var selectedModel: String {
         didSet {
             userDefaults.set(selectedModel, forKey: Self.modelDefaultsKey)
+        }
+    }
+
+    var selectedReasoningEffort: AssistantReasoningEffortOption {
+        didSet {
+            userDefaults.set(selectedReasoningEffort.rawValue, forKey: Self.reasoningEffortDefaultsKey)
         }
     }
 
@@ -93,11 +110,10 @@ final class AssistantSettings {
     }
 
     private let userDefaults: UserDefaults
-    private let keychain: AssistantKeychainStore
-    private var hasLoadedAPIKey = false
-    private var isLoadingAPIKey = false
 
+    private static let apiKeyDefaultsKey = "assistant.apiKey"
     private static let modelDefaultsKey = "assistant.selectedModel"
+    private static let reasoningEffortDefaultsKey = "assistant.reasoningEffort"
     private static let launcherSymbolDefaultsKey = "assistant.launcher.symbol"
     private static let launcherSizeDefaultsKey = "assistant.launcher.size"
     private static let launcherCornerRadiusDefaultsKey = "assistant.launcher.cornerRadius"
@@ -105,7 +121,8 @@ final class AssistantSettings {
     private static let launcherForegroundDefaultsKey = "assistant.launcher.foregroundLevel"
     private static let launcherBorderDefaultsKey = "assistant.launcher.borderLevel"
     private static let launcherBadgeDefaultsKey = "assistant.launcher.showsStatusBadge"
-    private static let defaultModel = "glm-5"
+    private static let defaultModel = "gpt-4o-mini"
+    private static let defaultReasoningEffort: AssistantReasoningEffortOption = .modelDefault
     private static let defaultLauncherSymbol = "bubble.left.and.bubble.right.fill"
     private static let defaultLauncherSize = 58.0
     private static let defaultLauncherCornerRadius = 18.0
@@ -114,17 +131,21 @@ final class AssistantSettings {
     private static let defaultLauncherBorderLevel = 0.20
     private static let defaultShowsLauncherStatusBadge = true
     init(
-        userDefaults: UserDefaults = .standard,
-        keychain: AssistantKeychainStore = .shared
+        userDefaults: UserDefaults = .standard
     ) {
         self.userDefaults = userDefaults
-        self.keychain = keychain
-        self.apiKey = ""
+        self.apiKey = userDefaults.string(forKey: Self.apiKeyDefaultsKey) ?? ""
         let storedModel = userDefaults.string(forKey: Self.modelDefaultsKey)
         if let storedModel, Self.model(for: storedModel) != nil {
             self.selectedModel = storedModel
         } else {
             self.selectedModel = Self.defaultModel
+        }
+        if let storedReasoningEffort = userDefaults.string(forKey: Self.reasoningEffortDefaultsKey),
+           let selectedReasoningEffort = AssistantReasoningEffortOption(rawValue: storedReasoningEffort) {
+            self.selectedReasoningEffort = selectedReasoningEffort
+        } else {
+            self.selectedReasoningEffort = Self.defaultReasoningEffort
         }
         let storedLauncherSymbol = userDefaults.string(forKey: Self.launcherSymbolDefaultsKey)
         if let storedLauncherSymbol, Self.launcherSymbol(for: storedLauncherSymbol) != nil {
@@ -157,20 +178,12 @@ final class AssistantSettings {
         supportedLauncherSymbols.first(where: { $0.id == id })
     }
 
-    func loadAPIKeyIfNeeded() {
-        guard !hasLoadedAPIKey else { return }
-        isLoadingAPIKey = true
-        apiKey = keychain.read()
-        isLoadingAPIKey = false
-        hasLoadedAPIKey = true
-    }
-
     private func persistAPIKey() {
         let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            keychain.delete()
+            userDefaults.removeObject(forKey: Self.apiKeyDefaultsKey)
         } else {
-            keychain.write(trimmed)
+            userDefaults.set(trimmed, forKey: Self.apiKeyDefaultsKey)
             if apiKey != trimmed {
                 apiKey = trimmed
             }
@@ -187,56 +200,102 @@ struct AssistantModel: Identifiable, Equatable {
     let displayName: String
     let endpoint: URL
     let apiStyle: APIStyle
+    let supportedReasoningEfforts: [AssistantReasoningEffort]
+
+    init(
+        id: String,
+        displayName: String,
+        endpoint: URL,
+        apiStyle: APIStyle,
+        supportedReasoningEfforts: [AssistantReasoningEffort] = []
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.endpoint = endpoint
+        self.apiStyle = apiStyle
+        self.supportedReasoningEfforts = supportedReasoningEfforts
+    }
+}
+
+enum AssistantReasoningEffort: String, CaseIterable, Identifiable {
+    case none
+    case minimal
+    case low
+    case medium
+    case high
+    case xhigh
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .none:
+            return "None"
+        case .minimal:
+            return "Minimal"
+        case .low:
+            return "Low"
+        case .medium:
+            return "Medium"
+        case .high:
+            return "High"
+        case .xhigh:
+            return "X-High"
+        }
+    }
+}
+
+enum AssistantReasoningEffortOption: String, CaseIterable, Identifiable {
+    case modelDefault = "default"
+    case none
+    case minimal
+    case low
+    case medium
+    case high
+    case xhigh
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .modelDefault:
+            return "Model default"
+        case .none:
+            return "None"
+        case .minimal:
+            return "Minimal"
+        case .low:
+            return "Low"
+        case .medium:
+            return "Medium"
+        case .high:
+            return "High"
+        case .xhigh:
+            return "X-High"
+        }
+    }
+
+    var reasoningEffort: AssistantReasoningEffort? {
+        switch self {
+        case .modelDefault:
+            return nil
+        case .none:
+            return AssistantReasoningEffort.none
+        case .minimal:
+            return .minimal
+        case .low:
+            return .low
+        case .medium:
+            return .medium
+        case .high:
+            return .high
+        case .xhigh:
+            return .xhigh
+        }
+    }
 }
 
 struct AssistantLauncherSymbol: Identifiable, Equatable {
     let id: String
     let displayName: String
-}
-
-struct AssistantKeychainStore {
-    static let shared = AssistantKeychainStore()
-
-    private let service = "com.md.MarkdownEditor"
-    private let account = "OpenCodeZenAPIKey"
-
-    func read() -> String {
-        var query = baseQuery
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess,
-              let data = item as? Data,
-              let string = String(data: data, encoding: .utf8) else {
-            return ""
-        }
-
-        return string
-    }
-
-    func write(_ value: String) {
-        let data = Data(value.utf8)
-        var attributes = baseQuery
-        attributes[kSecValueData as String] = data
-
-        let status = SecItemAdd(attributes as CFDictionary, nil)
-        if status == errSecDuplicateItem {
-            let updates = [kSecValueData as String: data] as CFDictionary
-            SecItemUpdate(baseQuery as CFDictionary, updates)
-        }
-    }
-
-    func delete() {
-        SecItemDelete(baseQuery as CFDictionary)
-    }
-
-    private var baseQuery: [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-    }
 }

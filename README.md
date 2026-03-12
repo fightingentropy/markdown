@@ -71,7 +71,7 @@ It is designed for working in a folder of notes with a plain-text editor, a rend
 - Optional in-app note assistant
 - Uses the current note as the primary context
 - Resets chat automatically when switching notes
-- Stores the API key in macOS Keychain
+- Stores the API key in the app's local settings on that Mac
 - Lets you choose the assistant model
 - Lets you customize the floating launcher button
 
@@ -199,7 +199,7 @@ or for Release:
 ### Ask The Assistant
 
 1. Open Settings.
-2. Add or load your API key.
+2. Add or load your OpenAI API key.
 3. Choose a model.
 4. Open a note.
 5. Use the floating assistant button to ask questions about that note.
@@ -316,7 +316,7 @@ If the archive URLs or notes URLs are hosted somewhere else:
 - Do not commit private keys to the repo
 - Use the same `SPARKLE_PRIVATE_KEY` for future releases if you want existing users to keep receiving Sparkle updates without a manual reinstall
 - Local `/Applications/Markdown.app` installs should be signed with the local `Markdown` identity, not ad-hoc
-- Assistant API keys are stored in macOS Keychain, not in note files
+- Assistant API keys are stored in the app's local settings, not in note files
 
 ## Current Update Feed
 

@@ -5,6 +5,14 @@ extension Notification.Name {
     static let editorFindCommand = Notification.Name("EditorFindCommand")
 }
 
+extension NSUserInterfaceItemIdentifier {
+    static let settingsWindow = Self("MarkdownEditor.SettingsWindow")
+}
+
+private enum WindowSceneID {
+    static let settings = "settings"
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pendingOpenURLs: [URL] = []
@@ -78,6 +86,7 @@ struct MarkdownEditorApp: App {
             }
         }
         .commands {
+            SettingsCommands()
             CommandGroup(replacing: .newItem) {
                 Button("New File") { workspace.createNewFile() }
                     .keyboardShortcut("n")
@@ -106,6 +115,9 @@ struct MarkdownEditorApp: App {
                 Button("Search Notes") { workspace.isCommandPalettePresented.toggle() }
                     .keyboardShortcut("k")
                     .disabled(!workspace.hasVault)
+                Button("Toggle Assistant") { noteAssistant.togglePresentation() }
+                    .keyboardShortcut("l")
+                    .disabled(!workspace.hasVault)
             }
             CommandGroup(after: .help) {
                 if appUpdater.isConfigured {
@@ -117,12 +129,15 @@ struct MarkdownEditorApp: App {
             formatMenu
         }
 
-        Settings {
+        Window("Settings", id: WindowSceneID.settings) {
             AppSettingsView(
                 assistantSettings: assistantSettings,
                 preferences: appPreferences
             )
+            .background(SettingsWindowAccessor())
         }
+        .defaultSize(width: 980, height: 720)
+        .windowResizability(.contentSize)
     }
 
     // MARK: - Format Menu
@@ -153,6 +168,49 @@ struct MarkdownEditorApp: App {
             Button("Bullet List") { editorController?.applyUnorderedList() }
             Button("Numbered List") { editorController?.applyOrderedList() }
             Button("Code Block") { editorController?.applyCodeBlock() }
+        }
+    }
+}
+
+private struct SettingsCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(replacing: .appSettings) {
+            Button("Settings…") {
+                toggleSettingsWindow()
+            }
+            .keyboardShortcut(",", modifiers: [.command])
+        }
+    }
+
+    private func toggleSettingsWindow() {
+        if let settingsWindow = NSApp.windows.first(where: {
+            $0.identifier == .settingsWindow && $0.isVisible
+        }) {
+            settingsWindow.performClose(nil)
+            return
+        }
+
+        openWindow(id: WindowSceneID.settings)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+private struct SettingsWindowAccessor: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        assignIdentifier(to: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        assignIdentifier(to: nsView)
+    }
+
+    private func assignIdentifier(to view: NSView) {
+        DispatchQueue.main.async {
+            view.window?.identifier = .settingsWindow
         }
     }
 }

@@ -5,6 +5,11 @@ struct NoteAssistantPanel: View {
     let settings: AssistantSettings
     let currentFileTitle: String
     let hasSelectedFile: Bool
+    @FocusState private var focusedField: Field?
+
+    private enum Field: Hashable {
+        case composer
+    }
 
     private var selectedModelName: String {
         AssistantSettings.model(for: settings.selectedModel)?.displayName ?? "Assistant"
@@ -19,11 +24,31 @@ struct NoteAssistantPanel: View {
             }
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.88), value: assistant.isPresented)
+        .onChange(of: assistant.isPresented) { _, isPresented in
+            guard isPresented else {
+                focusedField = nil
+                return
+            }
+
+            requestComposerFocus()
+        }
+        .onChange(of: assistant.isSending) { _, isSending in
+            guard !isSending, assistant.isPresented else { return }
+            requestComposerFocus()
+        }
+        .onChange(of: hasSelectedFile) { _, hasSelectedFile in
+            guard hasSelectedFile, assistant.isPresented else { return }
+            requestComposerFocus()
+        }
+        .onChange(of: settings.isConfigured) { _, isConfigured in
+            guard isConfigured, assistant.isPresented else { return }
+            requestComposerFocus()
+        }
     }
 
     private var launcherButton: some View {
         Button {
-            assistant.isPresented = true
+            assistant.togglePresentation()
         } label: {
             launcherContent
                 .frame(width: settings.launcherSize, height: settings.launcherSize)
@@ -105,7 +130,7 @@ struct NoteAssistantPanel: View {
             }
 
             Button {
-                assistant.isPresented = false
+                assistant.togglePresentation()
             } label: {
                 Image(systemName: "xmark")
                     .font(.caption.weight(.semibold))
@@ -123,7 +148,7 @@ struct NoteAssistantPanel: View {
     private var content: some View {
         if !settings.isConfigured {
             assistantPlaceholder(
-                title: "Set your OpenCode API key",
+                title: "Set your OpenAI API key",
                 message: "Open Settings, paste your API key, and the assistant will use the current note as context for each question."
             ) {
                 HStack(spacing: 10) {
@@ -168,6 +193,7 @@ struct NoteAssistantPanel: View {
                 TextField("Ask about this note…", text: $assistant.draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...4)
+                    .focused($focusedField, equals: .composer)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 12)
                     .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -210,10 +236,25 @@ struct NoteAssistantPanel: View {
         !assistant.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var canFocusComposer: Bool {
+        settings.isConfigured && hasSelectedFile && !assistant.isSending
+    }
+
     private func submit() {
         guard canSubmit else { return }
         Task {
             await assistant.sendCurrentDraft(using: settings)
+        }
+    }
+
+    private func requestComposerFocus() {
+        guard canFocusComposer else { return }
+
+        Task { @MainActor in
+            await Task.yield()
+
+            guard assistant.isPresented, canFocusComposer else { return }
+            focusedField = .composer
         }
     }
 
@@ -333,6 +374,9 @@ private struct AssistantTranscriptView: View {
             .onChange(of: messages.count) { _, _ in
                 scrollToBottom(using: proxy)
             }
+            .onChange(of: messages.last?.text) { _, _ in
+                scrollToBottom(using: proxy)
+            }
         }
     }
 
@@ -348,6 +392,22 @@ private struct AssistantTranscriptView: View {
 
 private struct AssistantMessageBubble: View {
     let message: NoteAssistantMessage
+
+    private var showsTypingIndicator: Bool {
+        message.role == .assistant &&
+        message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var renderedMessage: AttributedString? {
+        guard message.role == .assistant else { return nil }
+
+        return try? AttributedString(
+            markdown: message.text,
+            options: AttributedString.MarkdownParsingOptions(
+                interpretedSyntax: .inlineOnlyPreservingWhitespace
+            )
+        )
+    }
 
     var body: some View {
         HStack {
@@ -367,9 +427,18 @@ private struct AssistantMessageBubble: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
 
-            Text(message.text)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
+            if showsTypingIndicator {
+                AssistantTypingIndicator()
+                    .padding(.top, 2)
+            } else if let renderedMessage {
+                Text(renderedMessage)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(message.text)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -385,5 +454,29 @@ private struct AssistantMessageBubble: View {
         message.role == .assistant
             ? AnyShapeStyle(.white.opacity(0.06))
             : AnyShapeStyle(Color.accentColor.opacity(0.2))
+    }
+}
+
+private struct AssistantTypingIndicator: View {
+    @State private var activeDot = 0
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(0..<3, id: \.self) { index in
+                Circle()
+                    .fill(.secondary.opacity(index == activeDot ? 0.95 : 0.35))
+                    .frame(width: 7, height: 7)
+                    .scaleEffect(index == activeDot ? 1 : 0.82)
+                    .animation(.easeInOut(duration: 0.18), value: activeDot)
+            }
+        }
+        .frame(height: 16, alignment: .leading)
+        .task {
+            activeDot = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(260))
+                activeDot = (activeDot + 1) % 3
+            }
+        }
     }
 }
