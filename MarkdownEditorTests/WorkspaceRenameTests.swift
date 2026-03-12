@@ -39,6 +39,7 @@ final class WorkspaceRenameTests: XCTestCase {
         workspace.vaultURL = fixture.vaultURL
         workspace.refreshFiles()
         workspace.selectFile(fixture.fileURL)
+        workspace.persistEditorSelection(NSRange(location: 7, length: 0), for: fixture.fileURL)
 
         let renamedURL = try workspace.renameFile(fixture.fileURL, to: "New")
 
@@ -47,6 +48,8 @@ final class WorkspaceRenameTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.fileURL.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: renamedURL.path))
         XCTAssertEqual(try String(contentsOf: renamedURL, encoding: .utf8), "# New\n\nBody")
+        XCTAssertEqual(workspace.editorSelection(for: renamedURL), NSRange(location: 7, length: 0))
+        XCTAssertNil(workspace.editorSelection(for: fixture.fileURL))
     }
 
     func testRenameFilePreservesCustomHeading() throws {
@@ -83,6 +86,22 @@ final class WorkspaceRenameTests: XCTestCase {
 
         XCTAssertEqual(try String(contentsOf: fixture.fileURL, encoding: .utf8), "Plain body")
         XCTAssertEqual(workspace.files.first?.noteTitle, "Untitled")
+    }
+
+    func testEditorSelectionPersistsPerFile() throws {
+        let fixture = try makeWorkspaceFixture(
+            files: [
+                ("First", "# First\n\nBody"),
+                ("Second", "# Second\n\nBody")
+            ]
+        )
+        let workspace = Workspace()
+
+        workspace.persistEditorSelection(NSRange(location: 5, length: 0), for: fixture.fileURLs[0])
+        workspace.persistEditorSelection(NSRange(location: 12, length: 3), for: fixture.fileURLs[1])
+
+        XCTAssertEqual(workspace.editorSelection(for: fixture.fileURLs[0]), NSRange(location: 5, length: 0))
+        XCTAssertEqual(workspace.editorSelection(for: fixture.fileURLs[1]), NSRange(location: 12, length: 3))
     }
 
     func testSidebarExpansionRestoreDefersUntilFoldersAreLoaded() {
@@ -132,6 +151,12 @@ final class WorkspaceRenameTests: XCTestCase {
         addTeardownBlock {
             UserDefaults.standard.removeObject(forKey: "vaultBookmark")
             UserDefaults.standard.removeObject(forKey: selectedFileKey)
+            let selectionKeys = UserDefaults.standard.dictionaryRepresentation().keys.filter {
+                $0.hasPrefix("editorSelection::" + vaultURL.standardizedFileURL.path)
+            }
+            for key in selectionKeys {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
             try? FileManager.default.removeItem(at: vaultURL)
         }
 

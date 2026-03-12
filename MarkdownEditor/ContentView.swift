@@ -119,6 +119,7 @@ struct ContentView: View {
         .onChange(of: workspace.selectedFileURL) { _, _ in
             applyPreferredViewMode()
             synchronizeAssistantContext()
+            controller.requestEditorFocus()
         }
         .onChange(of: preferences.restoresExpandedFolders) { _, _ in
             restoreExpandedFoldersIfNeeded(force: true)
@@ -251,7 +252,11 @@ struct ContentView: View {
             text: $workspace.text,
             documentURL: workspace.selectedFileURL,
             controller: controller,
-            preferences: preferences
+            preferences: preferences,
+            savedSelection: workspace.editorSelection(for: workspace.selectedFileURL),
+            onSelectionChange: { documentURL, selection in
+                workspace.persistEditorSelection(selection, for: documentURL)
+            }
         )
     }
 }

@@ -108,6 +108,7 @@ final class Workspace {
     }
 
     private static let bookmarkKey = "vaultBookmark"
+    private static let editorSelectionKeyPrefix = "editorSelection::"
     private let preferences: AppPreferences
     private var activeSecurityScopedVaultURL: URL?
     private var autosaveTask: Task<Void, Never>?
@@ -286,6 +287,7 @@ final class Workspace {
 
     func deleteFile(_ url: URL) {
         try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
+        clearStoredEditorSelection(for: url)
         if let selectedFileURL, Self.urlsMatch(selectedFileURL, url) {
             text = ""
             self.selectedFileURL = nil
@@ -393,8 +395,30 @@ final class Workspace {
             persistSelectedFileURL(newURL)
         }
 
+        moveStoredEditorSelection(from: url, to: newURL)
+
         refreshFiles()
         return newURL
+    }
+
+    func persistEditorSelection(_ selection: NSRange, for url: URL?) {
+        guard let url else { return }
+
+        let sanitizedSelection = [max(0, selection.location), max(0, selection.length)]
+        UserDefaults.standard.set(sanitizedSelection, forKey: editorSelectionStorageKey(for: url))
+    }
+
+    func editorSelection(for url: URL?) -> NSRange? {
+        guard let url,
+              let persistedSelection = UserDefaults.standard.array(forKey: editorSelectionStorageKey(for: url)) as? [Int],
+              persistedSelection.count == 2 else {
+            return nil
+        }
+
+        return NSRange(
+            location: max(0, persistedSelection[0]),
+            length: max(0, persistedSelection[1])
+        )
     }
 
     func title(for file: FileItem) -> String {
@@ -846,6 +870,17 @@ final class Workspace {
         UserDefaults.standard.set(url.standardizedFileURL.path, forKey: storageKey)
     }
 
+    private func moveStoredEditorSelection(from oldURL: URL, to newURL: URL) {
+        let defaults = UserDefaults.standard
+        let oldKey = editorSelectionStorageKey(for: oldURL)
+        let newKey = editorSelectionStorageKey(for: newURL)
+
+        guard let persistedSelection = defaults.array(forKey: oldKey) else { return }
+
+        defaults.set(persistedSelection, forKey: newKey)
+        defaults.removeObject(forKey: oldKey)
+    }
+
     private func restoreSelectedFileURL() -> URL? {
         guard let storageKey = selectedFileStorageKey,
               let path = UserDefaults.standard.string(forKey: storageKey) else {
@@ -858,6 +893,10 @@ final class Workspace {
     private func clearStoredSelectedFileURL() {
         guard let storageKey = selectedFileStorageKey else { return }
         UserDefaults.standard.removeObject(forKey: storageKey)
+    }
+
+    private func clearStoredEditorSelection(for url: URL) {
+        UserDefaults.standard.removeObject(forKey: editorSelectionStorageKey(for: url))
     }
 
     private func persistSortOrder() {
@@ -884,6 +923,10 @@ final class Workspace {
     private var sortOrderStorageKey: String? {
         guard let vaultURL else { return nil }
         return "sortOrder::" + vaultURL.standardizedFileURL.path
+    }
+
+    private func editorSelectionStorageKey(for url: URL) -> String {
+        Self.editorSelectionKeyPrefix + url.resolvingSymlinksInPath().standardizedFileURL.path
     }
 
     private func beginAccessingVault(_ url: URL) {

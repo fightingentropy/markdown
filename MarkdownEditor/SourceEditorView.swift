@@ -33,6 +33,7 @@ final class EditorController {
     var searchQuery = ""
 
     private var pendingSearchRequest: SearchRequest?
+    private var pendingEditorFocusRequest = false
 
     func applyBold() { wrapSelection(prefix: "**", suffix: "**") }
     func applyItalic() { wrapSelection(prefix: "*", suffix: "*") }
@@ -90,6 +91,15 @@ final class EditorController {
         }
 
         queueSearch(.findNext)
+    }
+
+    func requestEditorFocus() {
+        pendingEditorFocusRequest = true
+    }
+
+    func consumePendingEditorFocusRequest() -> Bool {
+        defer { pendingEditorFocusRequest = false }
+        return pendingEditorFocusRequest
     }
 
     private func wrapSelection(prefix: String, suffix: String) {
@@ -181,6 +191,8 @@ struct SourceEditorView: NSViewRepresentable {
     let documentURL: URL?
     let controller: EditorController
     let preferences: AppPreferences
+    let savedSelection: NSRange?
+    let onSelectionChange: (URL?, NSRange) -> Void
 
     private let minimumHorizontalInset: CGFloat = 72
 
@@ -207,11 +219,14 @@ struct SourceEditorView: NSViewRepresentable {
         context.coordinator.observeSizeChanges(of: scrollView)
         updateTextLayout(for: scrollView, textView: textView)
         context.coordinator.setCurrentDocument(documentURL)
-        context.coordinator.showBeginningOfDocument(in: textView)
         context.coordinator.primeAppearanceSignature()
+        context.coordinator.restoreEditorState(
+            in: textView,
+            selection: savedSelection,
+            focusEditor: controller.consumePendingEditorFocusRequest()
+        )
         context.coordinator.highlight(textView, preservingViewport: false)
         context.coordinator.scheduleDeferredLayoutUpdate(for: scrollView, textView: textView)
-        context.coordinator.scheduleShowBeginningOfDocument(in: textView)
 
         controller.textView = textView
 
@@ -229,6 +244,8 @@ struct SourceEditorView: NSViewRepresentable {
         context.coordinator.applyExternalTextIfNeeded(
             text,
             documentChanged: documentChanged,
+            savedSelection: savedSelection,
+            focusEditor: controller.consumePendingEditorFocusRequest(),
             to: textView
         )
         context.coordinator.refreshAppearanceIfNeeded(on: textView)
@@ -333,16 +350,11 @@ struct SourceEditorView: NSViewRepresentable {
             return didChange
         }
 
-        func scheduleShowBeginningOfDocument(in textView: NSTextView) {
-            DispatchQueue.main.async { [weak self, weak textView] in
-                guard let self, let textView else { return }
-                self.showBeginningOfDocument(in: textView)
-            }
-        }
-
         func applyExternalTextIfNeeded(
             _ text: String,
             documentChanged: Bool,
+            savedSelection: NSRange?,
+            focusEditor: Bool,
             to textView: NSTextView
         ) {
             guard documentChanged || textView.string != text else { return }
@@ -354,9 +366,12 @@ struct SourceEditorView: NSViewRepresentable {
                 if textView.string != text {
                     textView.string = text
                 }
-                showBeginningOfDocument(in: textView)
+                restoreEditorState(
+                    in: textView,
+                    selection: savedSelection,
+                    focusEditor: focusEditor
+                )
                 highlight(textView, preservingViewport: false)
-                scheduleShowBeginningOfDocument(in: textView)
                 return
             }
 
@@ -368,11 +383,24 @@ struct SourceEditorView: NSViewRepresentable {
             }
         }
 
-        func showBeginningOfDocument(in textView: NSTextView) {
-            let documentStart = NSRange(location: 0, length: 0)
-            textView.setSelectedRange(documentStart)
-            textView.scrollRangeToVisible(documentStart)
-            restoreScrollOrigin(.zero, in: textView)
+        func restoreEditorState(
+            in textView: NSTextView,
+            selection: NSRange?,
+            focusEditor: Bool
+        ) {
+            let restoredSelection = selection ?? NSRange(location: 0, length: 0)
+            restoreSelection(restoredSelection, in: textView)
+            textView.scrollRangeToVisible(textView.selectedRange())
+
+            guard focusEditor else { return }
+
+            DispatchQueue.main.async { [weak textView] in
+                guard let textView,
+                      let window = textView.window else { return }
+
+                window.makeFirstResponder(textView)
+                textView.scrollRangeToVisible(textView.selectedRange())
+            }
         }
 
         func refreshAppearanceIfNeeded(on textView: NSTextView) {
@@ -417,6 +445,13 @@ struct SourceEditorView: NSViewRepresentable {
 
             parent.text = textView.string
             highlight(textView)
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            guard !isApplyingExternalText else { return }
+
+            parent.onSelectionChange(parent.documentURL, textView.selectedRange())
         }
 
         func sourceTextView(_ textView: NSTextView, handleModifiedLinkClickAt point: CGPoint, with event: NSEvent) -> Bool {
