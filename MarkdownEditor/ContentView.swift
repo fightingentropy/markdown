@@ -91,7 +91,9 @@ struct ContentView: View {
         .background(WindowToolbarConfigurator())
         .overlay {
             if workspace.isCommandPalettePresented {
-                CommandPaletteView(workspace: workspace)
+                CommandPaletteView(workspace: workspace) {
+                    restoreEditorFocusAfterPaletteDismiss()
+                }
                 .transition(.opacity.combined(with: .scale(scale: 0.98)))
             }
         }
@@ -282,6 +284,11 @@ struct ContentView: View {
             }
         )
     }
+
+    private func restoreEditorFocusAfterPaletteDismiss() {
+        guard viewMode == .editor, workspace.selectedFileIsMarkdown else { return }
+        controller.focusEditor()
+    }
 }
 
 private struct SidebarDragItem: Codable, Transferable {
@@ -388,6 +395,7 @@ private enum SidebarDropSupport {
 
 private struct CommandPaletteView: View {
     let workspace: Workspace
+    let onDismiss: () -> Void
 
     @State private var query = ""
     @FocusState private var isSearchFieldFocused: Bool
@@ -531,6 +539,7 @@ private struct CommandPaletteView: View {
 
     private func dismiss() {
         workspace.isCommandPalettePresented = false
+        onDismiss()
     }
 
     private func activatePrimaryResult() {

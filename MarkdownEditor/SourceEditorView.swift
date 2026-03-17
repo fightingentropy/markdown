@@ -95,11 +95,16 @@ final class EditorController {
 
     func requestEditorFocus() {
         pendingEditorFocusRequest = true
+        focusEditorIfPossible(queueIfUnavailable: true)
     }
 
     func consumePendingEditorFocusRequest() -> Bool {
         defer { pendingEditorFocusRequest = false }
         return pendingEditorFocusRequest
+    }
+
+    func focusEditor() {
+        focusEditorIfPossible(queueIfUnavailable: false)
     }
 
     private func wrapSelection(prefix: String, suffix: String) {
@@ -130,6 +135,29 @@ final class EditorController {
         guard let request = pendingSearchRequest else { return }
         pendingSearchRequest = nil
         queueSearch(request)
+    }
+
+    private func focusEditorIfPossible(queueIfUnavailable: Bool) {
+        guard let textView else {
+            if queueIfUnavailable {
+                pendingEditorFocusRequest = true
+            }
+            return
+        }
+
+        DispatchQueue.main.async { [weak self, weak textView] in
+            guard let textView,
+                  let window = textView.window else {
+                if queueIfUnavailable {
+                    self?.pendingEditorFocusRequest = true
+                }
+                return
+            }
+
+            window.makeFirstResponder(textView)
+            textView.scrollRangeToVisible(textView.selectedRange())
+            self?.pendingEditorFocusRequest = false
+        }
     }
 
     private func performSearch(_ request: SearchRequest, in textView: NSTextView) {
