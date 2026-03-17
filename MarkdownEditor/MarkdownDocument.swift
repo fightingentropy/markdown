@@ -40,7 +40,7 @@ enum SortOrder: String, Sendable {
     case byDate
 }
 
-enum FileRenameError: LocalizedError, Equatable {
+enum ItemRenameError: LocalizedError, Equatable {
     case emptyName
     case invalidName
     case nameAlreadyExists
@@ -48,11 +48,11 @@ enum FileRenameError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .emptyName:
-            "Enter a file name."
+            "Enter a name."
         case .invalidName:
-            "File names can't contain slashes, colons, or line breaks."
+            "Names can't contain slashes, colons, or line breaks."
         case .nameAlreadyExists:
-            "A file with that name already exists."
+            "An item with that name already exists."
         }
     }
 }
@@ -92,8 +92,11 @@ final class Workspace {
 
     var selectedFileName: String {
         guard let selectedFileURL else { return "" }
-        if let selected = files.first(where: { $0.url == selectedFileURL }) {
+        if let selected = fileItem(for: selectedFileURL) {
             return title(for: selected)
+        }
+        if let node = sidebarNode(for: selectedFileURL) {
+            return node.name
         }
         return selectedFileURL.deletingPathExtension().lastPathComponent
     }
@@ -200,7 +203,7 @@ final class Workspace {
         sidebarNodes = snapshot.nodes
 
         if let selectedFileURL {
-            if let matchingURL = matchingFileURL(for: selectedFileURL) {
+            if let matchingURL = matchingSidebarURL(for: selectedFileURL) {
                 self.selectedFileURL = matchingURL
             } else {
                 self.selectedFileURL = nil
@@ -211,7 +214,7 @@ final class Workspace {
     }
 
     func selectFile(_ url: URL) {
-        let canonicalURL = matchingFileURL(for: url) ?? url
+        let canonicalURL = matchingSidebarURL(for: url) ?? url
         if let selectedFileURL, Self.urlsMatch(selectedFileURL, canonicalURL) {
             return
         }
@@ -257,32 +260,25 @@ final class Workspace {
         }
     }
 
-    func createNewFile() {
-        if let vaultURL {
-            var name = "Untitled"
-            var counter = 1
-            let fm = FileManager.default
-            var fileURL = vaultURL.appendingPathComponent("\(name).md")
-            while fm.fileExists(atPath: fileURL.path) {
-                name = "Untitled \(counter)"
-                counter += 1
-                fileURL = vaultURL.appendingPathComponent("\(name).md")
-            }
+    func createNewFile(in directoryURL: URL? = nil) {
+        if let destinationDirectoryURL = destinationDirectoryURL(for: directoryURL) {
+            let fileURL = uniqueMarkdownFileURL(in: destinationDirectoryURL)
+            let name = fileURL.deletingPathExtension().lastPathComponent
             let content = Data("# \(name)\n\n".utf8)
-            if (try? content.write(to: fileURL, options: .atomic)) != nil {
-                refreshFiles()
-                selectFile(fileURL)
+
+            guard (try? content.write(to: fileURL, options: .atomic)) != nil else {
+                if directoryURL == nil {
+                    presentStandaloneFileSavePanel()
+                }
                 return
             }
+
+            refreshFiles()
+            selectFile(fileURL)
+            return
         }
-        // Fallback: use a save panel if vault write fails or no vault set
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
-        panel.nameFieldStringValue = "Untitled.md"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        let name = url.deletingPathExtension().lastPathComponent
-        try? Data("# \(name)\n\n".utf8).write(to: url, options: .atomic)
-        importDroppedFile(url)
+
+        presentStandaloneFileSavePanel()
     }
 
     func deleteFile(_ url: URL) {
@@ -334,24 +330,14 @@ final class Workspace {
         refreshFilesInBackground(preferredSelectionURL: url, selectFirstFileIfNeeded: false)
     }
 
-    func createNewFolder() {
-        guard let vaultURL else {
+    func createNewFolder(in directoryURL: URL? = nil) {
+        guard let destinationDirectoryURL = destinationDirectoryURL(for: directoryURL) else {
             pickVault()
             return
         }
 
-        let fm = FileManager.default
-        var name = "New Folder"
-        var counter = 1
-        var folderURL = vaultURL.appendingPathComponent(name, isDirectory: true)
-
-        while fm.fileExists(atPath: folderURL.path) {
-            counter += 1
-            name = "New Folder \(counter)"
-            folderURL = vaultURL.appendingPathComponent(name, isDirectory: true)
-        }
-
-        guard (try? fm.createDirectory(at: folderURL, withIntermediateDirectories: false)) != nil else {
+        let folderURL = uniqueFolderURL(in: destinationDirectoryURL)
+        guard (try? FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: false)) != nil else {
             return
         }
 
@@ -359,7 +345,58 @@ final class Workspace {
     }
 
     @discardableResult
-    func renameFile(_ url: URL, to newName: String) throws -> URL {
+    func moveItem(_ url: URL, toFolder directoryURL: URL?) -> Bool {
+        guard let destinationDirectoryURL = destinationDirectoryURL(for: directoryURL) else {
+            return false
+        }
+
+        let sourceURL = matchingSidebarURL(for: url) ?? url.resolvingSymlinksInPath().standardizedFileURL
+        let standardizedSourceURL = sourceURL.resolvingSymlinksInPath().standardizedFileURL
+        let standardizedDestinationDirectoryURL = destinationDirectoryURL.resolvingSymlinksInPath().standardizedFileURL
+        let currentParentURL = standardizedSourceURL.deletingLastPathComponent()
+
+        guard standardizedSourceURL != standardizedDestinationDirectoryURL else {
+            return false
+        }
+
+        guard currentParentURL != standardizedDestinationDirectoryURL else {
+            return false
+        }
+
+        guard !isDescendant(standardizedDestinationDirectoryURL, of: standardizedSourceURL, allowEqual: true) else {
+            return false
+        }
+
+        let destinationURL = standardizedDestinationDirectoryURL.appendingPathComponent(
+            standardizedSourceURL.lastPathComponent,
+            isDirectory: isDirectoryURL(standardizedSourceURL)
+        )
+
+        guard !FileManager.default.fileExists(atPath: destinationURL.path) else {
+            return false
+        }
+
+        let isSelectedFile = selectedFileURL.map { Self.urlsMatch($0, standardizedSourceURL) } ?? false
+        if isSelectedFile, Self.isMarkdownFile(standardizedSourceURL) {
+            saveCurrentFile()
+        }
+
+        guard (try? FileManager.default.moveItem(at: standardizedSourceURL, to: destinationURL)) != nil else {
+            return false
+        }
+
+        if isSelectedFile {
+            selectedFileURL = destinationURL
+            persistSelectedFileURL(destinationURL)
+        }
+
+        moveStoredEditorSelection(from: standardizedSourceURL, to: destinationURL)
+        refreshFiles()
+        return true
+    }
+
+    @discardableResult
+    func renameItem(_ url: URL, to newName: String) throws -> URL {
         let newURL = try validatedRenamedURL(for: url, proposedName: newName)
         guard newURL != url else { return url }
 
@@ -469,11 +506,11 @@ final class Workspace {
     private func validatedRenamedURL(for url: URL, proposedName: String) throws -> URL {
         let trimmedName = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
-            throw FileRenameError.emptyName
+            throw ItemRenameError.emptyName
         }
 
         guard trimmedName.rangeOfCharacter(from: CharacterSet(charactersIn: "/:\n\r")) == nil else {
-            throw FileRenameError.invalidName
+            throw ItemRenameError.invalidName
         }
 
         let pathExtension = url.pathExtension
@@ -488,7 +525,7 @@ final class Workspace {
         }
 
         guard !sanitizedName.isEmpty else {
-            throw FileRenameError.emptyName
+            throw ItemRenameError.emptyName
         }
 
         let parentURL = url.deletingLastPathComponent()
@@ -508,7 +545,7 @@ final class Workspace {
 
         let isCaseOnlyRename = newURL.standardizedFileURL.path.caseInsensitiveCompare(url.standardizedFileURL.path) == .orderedSame
         if FileManager.default.fileExists(atPath: newURL.path), !isCaseOnlyRename {
-            throw FileRenameError.nameAlreadyExists
+            throw ItemRenameError.nameAlreadyExists
         }
 
         return newURL
@@ -646,14 +683,14 @@ final class Workspace {
             self.sidebarNodes = snapshot.nodes
 
             if let preferredSelectionURL,
-               let matchingURL = self.matchingFileURL(for: preferredSelectionURL) {
+               let matchingURL = self.matchingSidebarURL(for: preferredSelectionURL) {
                 self.selectFile(matchingURL)
                 self.isLoadingSnapshot = false
                 return
             }
 
             if let selectedFileURL {
-                if let matchingURL = self.matchingFileURL(for: selectedFileURL) {
+                if let matchingURL = self.matchingSidebarURL(for: selectedFileURL) {
                     self.selectedFileURL = matchingURL
                 } else {
                     self.selectedFileURL = nil
@@ -810,8 +847,12 @@ final class Workspace {
         imageFileExtensions.contains(url.pathExtension.lowercased())
     }
 
-    private func matchingFileURL(for url: URL) -> URL? {
-        files.first(where: { Self.urlsMatch($0.url, url) })?.url
+    private func matchingSidebarURL(for url: URL) -> URL? {
+        matchingSidebarURL(for: url, in: sidebarNodes)
+    }
+
+    private func sidebarNode(for url: URL) -> SidebarNode? {
+        sidebarNode(for: url, in: sidebarNodes)
     }
 
     private static func urlsMatch(_ lhs: URL, _ rhs: URL) -> Bool {
@@ -853,6 +894,115 @@ final class Workspace {
         nodes.contains { node in
             Self.urlsMatch(node.url, url) || sidebarContainsNode(for: url, in: node.children)
         }
+    }
+
+    private func matchingSidebarURL(for url: URL, in nodes: [SidebarNode]) -> URL? {
+        for node in nodes {
+            if Self.urlsMatch(node.url, url) {
+                return node.url
+            }
+
+            if let childMatch = matchingSidebarURL(for: url, in: node.children) {
+                return childMatch
+            }
+        }
+
+        return nil
+    }
+
+    private func sidebarNode(for url: URL, in nodes: [SidebarNode]) -> SidebarNode? {
+        for node in nodes {
+            if Self.urlsMatch(node.url, url) {
+                return node
+            }
+
+            if let childMatch = sidebarNode(for: url, in: node.children) {
+                return childMatch
+            }
+        }
+
+        return nil
+    }
+
+    private func destinationDirectoryURL(for requestedDirectoryURL: URL?) -> URL? {
+        guard let vaultURL else {
+            return nil
+        }
+
+        let standardizedVaultURL = vaultURL.resolvingSymlinksInPath().standardizedFileURL
+
+        guard let requestedDirectoryURL else {
+            return standardizedVaultURL
+        }
+
+        let standardizedRequestedDirectoryURL = requestedDirectoryURL.resolvingSymlinksInPath().standardizedFileURL
+        guard isDescendant(standardizedRequestedDirectoryURL, of: standardizedVaultURL, allowEqual: true) else {
+            return nil
+        }
+
+        guard isDirectoryURL(standardizedRequestedDirectoryURL) else {
+            return nil
+        }
+
+        return standardizedRequestedDirectoryURL
+    }
+
+    private func uniqueMarkdownFileURL(in directoryURL: URL) -> URL {
+        let fm = FileManager.default
+        var name = "Untitled"
+        var counter = 1
+        var fileURL = directoryURL.appendingPathComponent(name).appendingPathExtension("md")
+
+        while fm.fileExists(atPath: fileURL.path) {
+            name = "Untitled \(counter)"
+            counter += 1
+            fileURL = directoryURL.appendingPathComponent(name).appendingPathExtension("md")
+        }
+
+        return fileURL
+    }
+
+    private func uniqueFolderURL(in directoryURL: URL) -> URL {
+        let fm = FileManager.default
+        var name = "New Folder"
+        var counter = 1
+        var folderURL = directoryURL.appendingPathComponent(name, isDirectory: true)
+
+        while fm.fileExists(atPath: folderURL.path) {
+            counter += 1
+            name = "New Folder \(counter)"
+            folderURL = directoryURL.appendingPathComponent(name, isDirectory: true)
+        }
+
+        return folderURL
+    }
+
+    private func presentStandaloneFileSavePanel() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+        panel.nameFieldStringValue = "Untitled.md"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let name = url.deletingPathExtension().lastPathComponent
+        try? Data("# \(name)\n\n".utf8).write(to: url, options: .atomic)
+        importDroppedFile(url)
+    }
+
+    private func isDirectoryURL(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+    }
+
+    private func isDescendant(_ url: URL, of parentURL: URL, allowEqual: Bool) -> Bool {
+        let standardizedURL = url.resolvingSymlinksInPath().standardizedFileURL
+        let standardizedParentURL = parentURL.resolvingSymlinksInPath().standardizedFileURL
+
+        if standardizedURL == standardizedParentURL {
+            return allowEqual
+        }
+
+        let parentPath = standardizedParentURL.path.hasSuffix("/")
+            ? standardizedParentURL.path
+            : standardizedParentURL.path + "/"
+        return standardizedURL.path.hasPrefix(parentPath)
     }
 
     private func persistVaultBookmark(for url: URL) {

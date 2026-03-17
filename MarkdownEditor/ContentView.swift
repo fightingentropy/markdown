@@ -1,5 +1,7 @@
 import AppKit
+import CoreTransferable
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @Bindable var workspace: Workspace
@@ -11,6 +13,7 @@ struct ContentView: View {
     @State private var viewMode: OpenViewMode
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var expandedFolderURLs: Set<URL> = []
+    @State private var isSidebarRootDropTargeted = false
     @State private var restoredVaultKey: String?
 
     init(
@@ -136,8 +139,8 @@ struct ContentView: View {
             controller.activateSearch()
         }
         .sheet(item: $renameRequest) { request in
-            RenameFileSheet(target: request) { proposedName in
-                try workspace.renameFile(request.url, to: proposedName)
+            RenameItemSheet(target: request) { proposedName in
+                try workspace.renameItem(request.url, to: proposedName)
             }
         }
     }
@@ -146,26 +149,40 @@ struct ContentView: View {
 
     private var sidebar: some View {
         VStack(spacing: 0) {
-            if workspace.sidebarNodes.isEmpty {
-                ContentUnavailableView(
-                    "No Notes",
-                    systemImage: "folder",
-                    description: Text("This folder doesn't contain any markdown files or visible subfolders yet.")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                List {
-                    SidebarNodeList(
+            Group {
+                if workspace.sidebarNodes.isEmpty {
+                    ContentUnavailableView(
+                        "No Notes",
+                        systemImage: "folder",
+                        description: Text("This folder doesn't contain any markdown files or visible subfolders yet.")
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List {
+                        SidebarNodeList(
                         nodes: workspace.sidebarNodes,
                         workspace: workspace,
                         expandedFolderURLs: $expandedFolderURLs,
-                        onRenameRequested: { file in
-                            renameRequest = RenameRequest(file: file)
+                        onRenameRequested: { request in
+                            renameRequest = request
                         }
                     )
                 }
-                .listStyle(.sidebar)
-                .contentMargins(.top, 0, for: .scrollContent)
+                    .listStyle(.sidebar)
+                    .contentMargins(.top, 0, for: .scrollContent)
+                }
+            }
+            .background {
+                SidebarRootDropArea(
+                    workspace: workspace,
+                    isTargeted: $isSidebarRootDropTargeted
+                )
+            }
+            .overlay {
+                SidebarBackgroundContextMenuHost(
+                    onCreateFile: { workspace.createNewFile() },
+                    onCreateFolder: { workspace.createNewFolder() }
+                )
             }
 
             Divider()
@@ -201,10 +218,12 @@ struct ContentView: View {
             .padding(.vertical, 8)
         }
         .frame(minWidth: 180)
-        .dropDestination(for: URL.self) { urls, _ in
-            guard let url = urls.first, isMD(url) else { return false }
-            workspace.importDroppedFile(url)
-            return true
+        .overlay {
+            if isSidebarRootDropTargeted {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(Color.accentColor.opacity(0.7), lineWidth: 2)
+                    .padding(6)
+            }
         }
     }
 
@@ -258,6 +277,108 @@ struct ContentView: View {
                 workspace.persistEditorSelection(selection, for: documentURL)
             }
         )
+    }
+}
+
+private struct SidebarDragItem: Codable, Transferable {
+    let path: String
+
+    init(url: URL) {
+        path = url.resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
+    var url: URL {
+        URL(fileURLWithPath: path)
+    }
+
+    static var transferRepresentation: some TransferRepresentation {
+        CodableRepresentation(contentType: .sidebarDragItem)
+    }
+
+    func itemProvider() -> NSItemProvider {
+        let provider = NSItemProvider()
+        let encodedItem = try? JSONEncoder().encode(self)
+        provider.registerDataRepresentation(forTypeIdentifier: UTType.sidebarDragItem.identifier, visibility: .all) { completion in
+            completion(encodedItem, nil)
+            return nil
+        }
+        return provider
+    }
+
+    static func loadFirst(
+        from providers: [NSItemProvider],
+        completion: @escaping @MainActor (SidebarDragItem?) -> Void
+    ) {
+        guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.sidebarDragItem.identifier) }) else {
+            Task { @MainActor in
+                completion(nil)
+            }
+            return
+        }
+
+        provider.loadDataRepresentation(forTypeIdentifier: UTType.sidebarDragItem.identifier) { data, _ in
+            let item = data.flatMap { try? JSONDecoder().decode(SidebarDragItem.self, from: $0) }
+            Task { @MainActor in
+                completion(item)
+            }
+        }
+    }
+}
+
+private extension UTType {
+    static let sidebarDragItem = UTType(exportedAs: "com.md.markdown.sidebar-drag-item")
+}
+
+private enum SidebarDropSupport {
+    static let internalTypeIdentifiers = [UTType.sidebarDragItem.identifier]
+    static let rootTypeIdentifiers = [
+        UTType.sidebarDragItem.identifier,
+        UTType.fileURL.identifier,
+        UTType.url.identifier
+    ]
+
+    static func handleMoveDrop(
+        providers: [NSItemProvider],
+        to directoryURL: URL?,
+        workspace: Workspace,
+        onSuccess: @escaping @MainActor () -> Void = {}
+    ) -> Bool {
+        guard providers.contains(where: { $0.hasItemConformingToTypeIdentifier(UTType.sidebarDragItem.identifier) }) else {
+            return false
+        }
+
+        SidebarDragItem.loadFirst(from: providers) { item in
+            guard let item else { return }
+            if workspace.moveItem(item.url, toFolder: directoryURL) {
+                onSuccess()
+            }
+        }
+
+        return true
+    }
+
+    static func handleRootDrop(providers: [NSItemProvider], workspace: Workspace) -> Bool {
+        if handleMoveDrop(providers: providers, to: nil, workspace: workspace) {
+            return true
+        }
+
+        let urlProviders = providers.filter { $0.canLoadObject(ofClass: NSURL.self) }
+        guard !urlProviders.isEmpty else {
+            return false
+        }
+
+        for provider in urlProviders {
+            provider.loadObject(ofClass: NSURL.self) { object, _ in
+                guard let url = object as? NSURL else { return }
+                let fileURL = url as URL
+                guard isMD(fileURL) else { return }
+                Task { @MainActor in
+                    workspace.importDroppedFile(fileURL)
+                }
+            }
+        }
+
+        return true
     }
 }
 
@@ -424,43 +545,23 @@ private struct SidebarNodeList: View {
     let nodes: [SidebarNode]
     let workspace: Workspace
     @Binding var expandedFolderURLs: Set<URL>
-    let onRenameRequested: (FileItem) -> Void
+    let onRenameRequested: (RenameRequest) -> Void
 
     var body: some View {
         ForEach(nodes) { node in
             if node.isFolder {
-                DisclosureGroup(isExpanded: expansionBinding(for: node.url)) {
-                    SidebarNodeList(
-                        nodes: node.children,
-                        workspace: workspace,
-                        expandedFolderURLs: $expandedFolderURLs,
-                        onRenameRequested: onRenameRequested
-                    )
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "folder")
-                            .foregroundStyle(.secondary)
-
-                        Text(node.name)
-                            .lineLimit(1)
-
-                        Spacer()
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            expansionBinding(for: node.url).wrappedValue.toggle()
-                        }
-                    }
-                }
-                .listRowInsets(sidebarRowInsets)
+                SidebarFolderRow(
+                    node: node,
+                    workspace: workspace,
+                    expandedFolderURLs: $expandedFolderURLs,
+                    onRenameRequested: onRenameRequested
+                )
             } else if let file = workspace.fileItem(for: node.url) {
                 SidebarFileRow(
                     file: file,
                     workspace: workspace,
                     onRenameRequested: {
-                        onRenameRequested(file)
+                        onRenameRequested(RenameRequest(file: file))
                     }
                 )
             } else {
@@ -468,15 +569,83 @@ private struct SidebarNodeList: View {
             }
         }
     }
+}
 
-    private func expansionBinding(for url: URL) -> Binding<Bool> {
+private struct SidebarFolderRow: View {
+    let node: SidebarNode
+    let workspace: Workspace
+    @Binding var expandedFolderURLs: Set<URL>
+    let onRenameRequested: (RenameRequest) -> Void
+    @State private var isDropTargeted = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: expansionBinding) {
+            SidebarNodeList(
+                nodes: node.children,
+                workspace: workspace,
+                expandedFolderURLs: $expandedFolderURLs,
+                onRenameRequested: onRenameRequested
+            )
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "folder")
+                    .foregroundStyle(.secondary)
+
+                Text(node.name)
+                    .lineLimit(1)
+
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    expansionBinding.wrappedValue.toggle()
+                }
+            }
+            .contextMenu {
+                Button {
+                    onRenameRequested(RenameRequest(folder: node))
+                } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
+
+                Button {
+                    expandedFolderURLs.insert(node.url)
+                    workspace.createNewFile(in: node.url)
+                } label: {
+                    Label("New File", systemImage: "doc.badge.plus")
+                }
+
+                Button {
+                    expandedFolderURLs.insert(node.url)
+                    workspace.createNewFolder(in: node.url)
+                } label: {
+                    Label("New Folder", systemImage: "folder.badge.plus")
+                }
+            }
+            .onDrop(of: SidebarDropSupport.internalTypeIdentifiers, isTargeted: $isDropTargeted) { providers in
+                SidebarDropSupport.handleMoveDrop(
+                    providers: providers,
+                    to: node.url,
+                    workspace: workspace
+                ) {
+                    expandedFolderURLs.insert(node.url)
+                }
+            }
+        }
+        .listRowInsets(sidebarRowInsets)
+        .listRowBackground(isDropTargeted ? Color.accentColor.opacity(0.12) : Color.clear)
+    }
+
+    private var expansionBinding: Binding<Bool> {
         Binding(
-            get: { expandedFolderURLs.contains(url) },
+            get: { expandedFolderURLs.contains(node.url) },
             set: { isExpanded in
                 if isExpanded {
-                    expandedFolderURLs.insert(url)
+                    expandedFolderURLs.insert(node.url)
                 } else {
-                    expandedFolderURLs.remove(url)
+                    expandedFolderURLs.remove(node.url)
                 }
             }
         )
@@ -507,6 +676,9 @@ private struct SidebarAssetRow: View {
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
         .listRowInsets(sidebarRowInsets)
+        .onDrag {
+            SidebarDragItem(url: node.url).itemProvider()
+        }
         .listRowBackground(node.url == workspace.selectedFileURL ? Color.accentColor.opacity(0.14) : Color.clear)
     }
 }
@@ -540,6 +712,9 @@ private struct SidebarFileRow: View {
         }
         .buttonStyle(.plain)
         .listRowInsets(sidebarRowInsets)
+        .onDrag {
+            SidebarDragItem(url: file.url).itemProvider()
+        }
         .contextMenu {
             Button {
                 onRenameRequested()
@@ -571,13 +746,60 @@ private struct SidebarFileRow: View {
 
 private let sidebarRowInsets = EdgeInsets(top: 2, leading: 6, bottom: 2, trailing: 10)
 
+private struct SidebarRootDropArea: View {
+    let workspace: Workspace
+    @Binding var isTargeted: Bool
+
+    var body: some View {
+        Rectangle()
+            .fill(.clear)
+            .contentShape(Rectangle())
+            .onDrop(of: SidebarDropSupport.rootTypeIdentifiers, isTargeted: $isTargeted) { providers in
+                SidebarDropSupport.handleRootDrop(providers: providers, workspace: workspace)
+            }
+    }
+}
+
 private enum PaletteResult: Equatable {
     case file(URL)
+}
+
+private enum RenameItemKind {
+    case file
+    case folder
+
+    var title: String {
+        switch self {
+        case .file:
+            "Rename File"
+        case .folder:
+            "Rename Folder"
+        }
+    }
+
+    var prompt: String {
+        switch self {
+        case .file:
+            "Choose a new name for this file."
+        case .folder:
+            "Choose a new name for this folder."
+        }
+    }
+
+    var placeholder: String {
+        switch self {
+        case .file:
+            "File name"
+        case .folder:
+            "Folder name"
+        }
+    }
 }
 
 private struct RenameRequest: Identifiable {
     let url: URL
     let displayName: String
+    let kind: RenameItemKind
 
     var id: URL { url }
     var pathExtension: String { url.pathExtension }
@@ -585,10 +807,17 @@ private struct RenameRequest: Identifiable {
     init(file: FileItem) {
         self.url = file.url
         self.displayName = file.displayName
+        self.kind = .file
+    }
+
+    init(folder: SidebarNode) {
+        self.url = folder.url
+        self.displayName = folder.name
+        self.kind = .folder
     }
 }
 
-private struct RenameFileSheet: View {
+private struct RenameItemSheet: View {
     let target: RenameRequest
     let onSave: (String) throws -> Void
 
@@ -606,10 +835,10 @@ private struct RenameFileSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Rename File")
+                Text(target.kind.title)
                     .font(.title3.weight(.semibold))
 
-                Text("Choose a new name for this file.")
+                Text(target.kind.prompt)
                     .foregroundStyle(.secondary)
             }
 
@@ -618,7 +847,7 @@ private struct RenameFileSheet: View {
                     .font(.subheadline.weight(.medium))
 
                 HStack(spacing: 8) {
-                    TextField("File name", text: $proposedName)
+                    TextField(target.kind.placeholder, text: $proposedName)
                         .textFieldStyle(.roundedBorder)
                         .focused($isNameFieldFocused)
                         .onSubmit {
@@ -1147,6 +1376,145 @@ private final class CenteringClipView: NSClipView {
         }
 
         return constrained
+    }
+}
+
+private struct SidebarBackgroundContextMenuHost: NSViewRepresentable {
+    let onCreateFile: () -> Void
+    let onCreateFolder: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            onCreateFile: onCreateFile,
+            onCreateFolder: onCreateFolder
+        )
+    }
+
+    func makeNSView(context: Context) -> SidebarBackgroundContextMenuView {
+        let view = SidebarBackgroundContextMenuView()
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateNSView(_ nsView: SidebarBackgroundContextMenuView, context: Context) {
+        context.coordinator.onCreateFile = onCreateFile
+        context.coordinator.onCreateFolder = onCreateFolder
+        nsView.coordinator = context.coordinator
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var onCreateFile: () -> Void
+        var onCreateFolder: () -> Void
+
+        init(
+            onCreateFile: @escaping () -> Void,
+            onCreateFolder: @escaping () -> Void
+        ) {
+            self.onCreateFile = onCreateFile
+            self.onCreateFolder = onCreateFolder
+        }
+
+        func makeMenu() -> NSMenu {
+            let menu = NSMenu()
+
+            let fileItem = NSMenuItem(
+                title: "New File",
+                action: #selector(createFile),
+                keyEquivalent: ""
+            )
+            fileItem.target = self
+            menu.addItem(fileItem)
+
+            let folderItem = NSMenuItem(
+                title: "New Folder",
+                action: #selector(createFolder),
+                keyEquivalent: ""
+            )
+            folderItem.target = self
+            menu.addItem(folderItem)
+
+            return menu
+        }
+
+        @objc private func createFile() {
+            onCreateFile()
+        }
+
+        @objc private func createFolder() {
+            onCreateFolder()
+        }
+    }
+}
+
+@MainActor
+private final class SidebarBackgroundContextMenuView: NSView {
+    weak var coordinator: SidebarBackgroundContextMenuHost.Coordinator?
+
+    override var isOpaque: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard shouldActivateForCurrentEvent(at: point) else {
+            return nil
+        }
+
+        return shouldHandleBlankSidebarArea(at: point) ? self : nil
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let localPoint = convert(event.locationInWindow, from: nil)
+        guard shouldHandleBlankSidebarArea(at: localPoint) else {
+            return nil
+        }
+
+        return coordinator?.makeMenu()
+    }
+
+    private func shouldActivateForCurrentEvent(at point: NSPoint) -> Bool {
+        guard bounds.contains(point), let event = NSApp.currentEvent else {
+            return false
+        }
+
+        switch event.type {
+        case .rightMouseDown:
+            return true
+        case .leftMouseDown:
+            return event.modifierFlags.contains(.control)
+        default:
+            return false
+        }
+    }
+
+    private func shouldHandleBlankSidebarArea(at point: NSPoint) -> Bool {
+        guard let outlineView = enclosingOutlineView() else {
+            return true
+        }
+
+        let pointInOutlineView = outlineView.convert(point, from: self)
+        guard outlineView.bounds.contains(pointInOutlineView) else {
+            return false
+        }
+
+        return outlineView.row(at: pointInOutlineView) == -1
+    }
+
+    private func enclosingOutlineView() -> NSOutlineView? {
+        guard let containerView = superview else { return nil }
+        return findOutlineView(in: containerView, excluding: self)
+    }
+
+    private func findOutlineView(in view: NSView, excluding excludedView: NSView) -> NSOutlineView? {
+        for subview in view.subviews where subview !== excludedView {
+            if let outlineView = subview as? NSOutlineView {
+                return outlineView
+            }
+
+            if let outlineView = findOutlineView(in: subview, excluding: excludedView) {
+                return outlineView
+            }
+        }
+
+        return nil
     }
 }
 

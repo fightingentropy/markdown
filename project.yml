@@ -78,6 +78,11 @@ targets:
                 - md
                 - markdown
                 - mdown
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.md.markdown.sidebar-drag-item
+            UTTypeConformsTo:
+              - public.data
+            UTTypeDescription: Markdown Sidebar Drag Item
   MarkdownEditorTests:
     type: bundle.unit-test
     platform: macOS
