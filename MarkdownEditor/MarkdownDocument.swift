@@ -281,14 +281,26 @@ final class Workspace {
         presentStandaloneFileSavePanel()
     }
 
-    func deleteFile(_ url: URL) {
-        try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
-        clearStoredEditorSelection(for: url)
-        if let selectedFileURL, Self.urlsMatch(selectedFileURL, url) {
+    func deleteItem(_ url: URL) {
+        let itemURL = matchingSidebarURL(for: url) ?? url.resolvingSymlinksInPath().standardizedFileURL
+        let isDirectory = isDirectoryURL(itemURL)
+        let editorSelectionKeysToClear = editorSelectionKeys(forDeletedItemAt: itemURL, isDirectory: isDirectory)
+        let shouldClearSelectedFile = selectedFileURL.map {
+            deletedItem(itemURL, isDirectory: isDirectory, contains: $0)
+        } ?? false
+
+        guard (try? FileManager.default.trashItem(at: itemURL, resultingItemURL: nil)) != nil else {
+            return
+        }
+
+        clearStoredEditorSelections(forKeys: editorSelectionKeysToClear)
+
+        if shouldClearSelectedFile {
             text = ""
             self.selectedFileURL = nil
             clearStoredSelectedFileURL()
         }
+
         refreshFiles()
     }
 
@@ -1045,8 +1057,45 @@ final class Workspace {
         UserDefaults.standard.removeObject(forKey: storageKey)
     }
 
-    private func clearStoredEditorSelection(for url: URL) {
-        UserDefaults.standard.removeObject(forKey: editorSelectionStorageKey(for: url))
+    private func editorSelectionKeys(forDeletedItemAt url: URL, isDirectory: Bool) -> [String] {
+        guard isDirectory else {
+            return [editorSelectionStorageKey(for: url)]
+        }
+
+        let defaults = UserDefaults.standard
+        let prefix = Self.editorSelectionKeyPrefix
+        var keysToRemove: [String] = []
+
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(prefix) {
+            let path = String(key.dropFirst(prefix.count))
+            let storedURL = URL(fileURLWithPath: path)
+            if deletedItem(url, isDirectory: true, contains: storedURL) {
+                keysToRemove.append(key)
+            }
+        }
+
+        return keysToRemove
+    }
+
+    private func clearStoredEditorSelections(forKeys keys: [String]) {
+        let defaults = UserDefaults.standard
+        for key in keys {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    private func deletedItem(_ deletedURL: URL, isDirectory: Bool, contains candidateURL: URL) -> Bool {
+        let standardizedCandidateURL = candidateURL.resolvingSymlinksInPath().standardizedFileURL
+
+        if Self.urlsMatch(standardizedCandidateURL, deletedURL) {
+            return true
+        }
+
+        guard isDirectory else {
+            return false
+        }
+
+        return isDescendant(standardizedCandidateURL, of: deletedURL, allowEqual: false)
     }
 
     private func persistSortOrder() {

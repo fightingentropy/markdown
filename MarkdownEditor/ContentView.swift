@@ -181,7 +181,11 @@ struct ContentView: View {
             .overlay {
                 SidebarBackgroundContextMenuHost(
                     onCreateFile: { workspace.createNewFile() },
-                    onCreateFolder: { workspace.createNewFolder() }
+                    onCreateFolder: { workspace.createNewFolder() },
+                    onDeleteSelection: {
+                        guard let selectedFileURL = workspace.selectedFileURL else { return }
+                        workspace.deleteItem(selectedFileURL)
+                    }
                 )
             }
 
@@ -623,6 +627,14 @@ private struct SidebarFolderRow: View {
                 } label: {
                     Label("New Folder", systemImage: "folder.badge.plus")
                 }
+
+                Divider()
+
+                Button(role: .destructive) {
+                    workspace.deleteItem(node.url)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
             }
             .onDrop(of: SidebarDropSupport.internalTypeIdentifiers, isTargeted: $isDropTargeted) { providers in
                 SidebarDropSupport.handleMoveDrop(
@@ -679,6 +691,13 @@ private struct SidebarAssetRow: View {
         .onDrag {
             SidebarDragItem(url: node.url).itemProvider()
         }
+        .contextMenu {
+            Button(role: .destructive) {
+                workspace.deleteItem(node.url)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
         .listRowBackground(node.url == workspace.selectedFileURL ? Color.accentColor.opacity(0.14) : Color.clear)
     }
 }
@@ -723,7 +742,7 @@ private struct SidebarFileRow: View {
             }
 
             Button("Delete", role: .destructive) {
-                workspace.deleteFile(file.url)
+                workspace.deleteItem(file.url)
             }
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
@@ -735,7 +754,7 @@ private struct SidebarFileRow: View {
             .tint(.accentColor)
 
             Button(role: .destructive) {
-                workspace.deleteFile(file.url)
+                workspace.deleteItem(file.url)
             } label: {
                 Label("Delete", systemImage: "trash")
             }
@@ -1382,11 +1401,13 @@ private final class CenteringClipView: NSClipView {
 private struct SidebarBackgroundContextMenuHost: NSViewRepresentable {
     let onCreateFile: () -> Void
     let onCreateFolder: () -> Void
+    let onDeleteSelection: (() -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             onCreateFile: onCreateFile,
-            onCreateFolder: onCreateFolder
+            onCreateFolder: onCreateFolder,
+            onDeleteSelection: onDeleteSelection
         )
     }
 
@@ -1399,6 +1420,7 @@ private struct SidebarBackgroundContextMenuHost: NSViewRepresentable {
     func updateNSView(_ nsView: SidebarBackgroundContextMenuView, context: Context) {
         context.coordinator.onCreateFile = onCreateFile
         context.coordinator.onCreateFolder = onCreateFolder
+        context.coordinator.onDeleteSelection = onDeleteSelection
         nsView.coordinator = context.coordinator
     }
 
@@ -1406,13 +1428,16 @@ private struct SidebarBackgroundContextMenuHost: NSViewRepresentable {
     final class Coordinator: NSObject {
         var onCreateFile: () -> Void
         var onCreateFolder: () -> Void
+        var onDeleteSelection: (() -> Void)?
 
         init(
             onCreateFile: @escaping () -> Void,
-            onCreateFolder: @escaping () -> Void
+            onCreateFolder: @escaping () -> Void,
+            onDeleteSelection: (() -> Void)?
         ) {
             self.onCreateFile = onCreateFile
             self.onCreateFolder = onCreateFolder
+            self.onDeleteSelection = onDeleteSelection
         }
 
         func makeMenu() -> NSMenu {
@@ -1434,6 +1459,22 @@ private struct SidebarBackgroundContextMenuHost: NSViewRepresentable {
             folderItem.target = self
             menu.addItem(folderItem)
 
+            if onDeleteSelection != nil {
+                menu.addItem(.separator())
+
+                let deleteItem = NSMenuItem(
+                    title: "Delete",
+                    action: #selector(deleteSelection),
+                    keyEquivalent: ""
+                )
+                deleteItem.target = self
+                deleteItem.image = NSImage(
+                    systemSymbolName: "trash",
+                    accessibilityDescription: "Delete"
+                )
+                menu.addItem(deleteItem)
+            }
+
             return menu
         }
 
@@ -1443,6 +1484,10 @@ private struct SidebarBackgroundContextMenuHost: NSViewRepresentable {
 
         @objc private func createFolder() {
             onCreateFolder()
+        }
+
+        @objc private func deleteSelection() {
+            onDeleteSelection?()
         }
     }
 }

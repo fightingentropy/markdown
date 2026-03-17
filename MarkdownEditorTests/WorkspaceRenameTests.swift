@@ -144,6 +144,43 @@ final class WorkspaceRenameTests: XCTestCase {
         XCTAssertEqual(workspace.text, "# Untitled\n\n")
     }
 
+    func testDeleteItemRemovesSelectedMarkdownFileAndClearsSelectionState() throws {
+        let fixture = try makeWorkspaceFixture(fileName: "Old", content: "# Old\n\nBody")
+        let workspace = Workspace()
+        workspace.vaultURL = fixture.vaultURL
+        workspace.refreshFiles()
+        workspace.selectFile(fixture.fileURL)
+        workspace.persistEditorSelection(NSRange(location: 7, length: 0), for: fixture.fileURL)
+
+        workspace.deleteItem(fixture.fileURL)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.fileURL.path))
+        XCTAssertNil(workspace.selectedFileURL)
+        XCTAssertEqual(workspace.text, "")
+        XCTAssertNil(workspace.editorSelection(for: fixture.fileURL))
+    }
+
+    func testDeleteItemRemovesFolderAndClearsNestedSelectionState() throws {
+        let fixture = try makeWorkspaceFixture(fileName: "Existing", content: "# Existing\n\nBody")
+        let folderURL = fixture.vaultURL.appendingPathComponent("Drafts", isDirectory: true)
+        try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+        let nestedFileURL = folderURL.appendingPathComponent("Nested.md")
+        try Data("# Nested\n\nBody".utf8).write(to: nestedFileURL, options: .atomic)
+
+        let workspace = Workspace()
+        workspace.vaultURL = fixture.vaultURL
+        workspace.refreshFiles()
+        workspace.selectFile(nestedFileURL)
+        workspace.persistEditorSelection(NSRange(location: 10, length: 0), for: nestedFileURL)
+
+        workspace.deleteItem(folderURL)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folderURL.path))
+        XCTAssertNil(workspace.selectedFileURL)
+        XCTAssertEqual(workspace.text, "")
+        XCTAssertNil(workspace.editorSelection(for: nestedFileURL))
+    }
+
     func testMoveMarkdownFileIntoFolderUpdatesSelectionAndEditorState() throws {
         let fixture = try makeWorkspaceFixture(fileName: "Note", content: "# Note\n\nBody")
         let folderURL = fixture.vaultURL.appendingPathComponent("Archive", isDirectory: true)
