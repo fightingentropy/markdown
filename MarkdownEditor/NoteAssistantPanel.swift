@@ -356,11 +356,12 @@ private struct AssistantLauncherStatusBadge: View {
 
 private struct AssistantTranscriptView: View {
     let messages: [NoteAssistantMessage]
+    @State private var pendingStreamingScrollTask: Task<Void, Never>?
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
+                LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(messages) { message in
                         AssistantMessageBubble(message: message)
                             .id(message.id)
@@ -369,21 +370,38 @@ private struct AssistantTranscriptView: View {
             }
             .defaultScrollAnchor(.bottom)
             .onAppear {
-                scrollToBottom(using: proxy)
+                scrollToBottom(using: proxy, animated: false)
             }
             .onChange(of: messages.count) { _, _ in
-                scrollToBottom(using: proxy)
+                pendingStreamingScrollTask?.cancel()
+                scrollToBottom(using: proxy, animated: true)
             }
             .onChange(of: messages.last?.text) { _, _ in
-                scrollToBottom(using: proxy)
+                scheduleStreamingScroll(using: proxy)
+            }
+            .onDisappear {
+                pendingStreamingScrollTask?.cancel()
             }
         }
     }
 
-    private func scrollToBottom(using proxy: ScrollViewProxy) {
+    private func scheduleStreamingScroll(using proxy: ScrollViewProxy) {
+        pendingStreamingScrollTask?.cancel()
+        pendingStreamingScrollTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(80))
+            guard !Task.isCancelled else { return }
+            scrollToBottom(using: proxy, animated: false)
+        }
+    }
+
+    private func scrollToBottom(using proxy: ScrollViewProxy, animated: Bool) {
         guard let lastID = messages.last?.id else { return }
         DispatchQueue.main.async {
-            withAnimation(.easeOut(duration: 0.2)) {
+            if animated {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    proxy.scrollTo(lastID, anchor: .bottom)
+                }
+            } else {
                 proxy.scrollTo(lastID, anchor: .bottom)
             }
         }
@@ -396,17 +414,6 @@ private struct AssistantMessageBubble: View {
     private var showsTypingIndicator: Bool {
         message.role == .assistant &&
         message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private var renderedMessage: AttributedString? {
-        guard message.role == .assistant else { return nil }
-
-        return try? AttributedString(
-            markdown: message.text,
-            options: AttributedString.MarkdownParsingOptions(
-                interpretedSyntax: .inlineOnlyPreservingWhitespace
-            )
-        )
     }
 
     var body: some View {
@@ -430,7 +437,7 @@ private struct AssistantMessageBubble: View {
             if showsTypingIndicator {
                 AssistantTypingIndicator()
                     .padding(.top, 2)
-            } else if let renderedMessage {
+            } else if let renderedMessage = message.renderedMarkdown {
                 Text(renderedMessage)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)

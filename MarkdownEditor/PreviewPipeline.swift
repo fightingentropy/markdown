@@ -8,6 +8,7 @@ import Textual
 struct PreviewContext: Equatable {
     let documentURL: URL?
     let vaultURL: URL?
+    var assetLookupByFilename: [String: [URL]] = [:]
 
     var documentDirectoryURL: URL? {
         documentURL?.deletingLastPathComponent()
@@ -169,6 +170,10 @@ struct AssetResolver {
             if FileManager.default.fileExists(atPath: candidate.path) {
                 return candidate
             }
+        }
+
+        if let indexedMatches = context.assetLookupByFilename[normalized], !indexedMatches.isEmpty {
+            return indexedMatches.count == 1 ? indexedMatches[0] : indexedMatches.first
         }
 
         guard !normalized.contains("/"), let vaultURL = context.vaultURL else {

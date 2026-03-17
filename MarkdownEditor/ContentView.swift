@@ -257,6 +257,7 @@ struct ContentView: View {
             markdown: workspace.text,
             documentURL: workspace.selectedFileURL,
             vaultURL: workspace.vaultURL,
+            assetLookupByFilename: workspace.assetLookupSnapshot,
             preferences: preferences
         )
         .id(workspace.selectedFileURL)
@@ -401,11 +402,12 @@ private struct CommandPaletteView: View {
     @FocusState private var isSearchFieldFocused: Bool
 
     private var filteredFiles: [FileItem] {
+        let files = workspace.sortedFiles
         if query.isEmpty {
-            return workspace.sortedFiles
+            return files
         }
 
-        return workspace.sortedFiles.filter { file in
+        return files.filter { file in
             workspace.title(for: file).localizedStandardContains(query) ||
             file.displayName.localizedStandardContains(query) ||
             file.name.localizedStandardContains(query)
@@ -447,7 +449,7 @@ private struct CommandPaletteView: View {
                 Divider()
 
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
+                    LazyVStack(alignment: .leading, spacing: 20) {
                         paletteSection("Notes") {
                             if filteredFiles.isEmpty {
                                 Text("No matching notes")
@@ -1076,7 +1078,6 @@ private extension ContentView {
             .map { $0.standardizedFileURL.path }
             .sorted()
         UserDefaults.standard.set(paths, forKey: storageKey)
-        UserDefaults.standard.synchronize()
     }
 
     var sidebarExpansionStorageKey: String? {
@@ -1145,38 +1146,23 @@ enum SidebarExpansionPersistence {
 }
 
 private struct ImagePreview: View {
+    private static let imageCache = NSCache<NSURL, NSImage>()
+
     let url: URL
     @State private var zoomScale: CGFloat = 1
     @State private var isShowingControls = false
     @State private var controlsHideTask: Task<Void, Never>?
+    @State private var image: NSImage?
+    @State private var isLoadingImage = false
 
     var body: some View {
         Group {
-            if let image = NSImage(contentsOf: url) {
-                ZoomableImageScrollView(image: image, zoomScale: $zoomScale)
-                    .padding(24)
-                    .overlay(alignment: .topTrailing) {
-                        zoomControls
-                            .padding(16)
-                            .opacity(isShowingControls ? 1 : 0)
-                            .offset(y: isShowingControls ? 0 : -6)
-                            .animation(.easeInOut(duration: 0.18), value: isShowingControls)
-                            .allowsHitTesting(isShowingControls)
-                    }
-                    .onHover { isHovering in
-                        if isHovering {
-                            revealControls()
-                        } else {
-                            scheduleControlsHide(after: .milliseconds(900))
-                        }
-                    }
-                    .simultaneousGesture(
-                        TapGesture().onEnded {
-                            revealControls()
-                        }
-                    )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.black.opacity(0.18))
+            if let image {
+                imageView(image)
+            } else if isLoadingImage {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.black.opacity(0.18))
             } else {
                 ContentUnavailableView(
                     "Image Unavailable",
@@ -1184,6 +1170,12 @@ private struct ImagePreview: View {
                     description: Text("This image couldn't be loaded.")
                 )
             }
+        }
+        .task(id: url) {
+            await loadImage()
+        }
+        .onDisappear {
+            controlsHideTask?.cancel()
         }
     }
 
@@ -1207,6 +1199,58 @@ private struct ImagePreview: View {
             guard !Task.isCancelled else { return }
             isShowingControls = false
         }
+    }
+
+    private func imageView(_ image: NSImage) -> some View {
+        ZoomableImageScrollView(image: image, zoomScale: $zoomScale)
+            .padding(24)
+            .overlay(alignment: .topTrailing) {
+                zoomControls
+                    .padding(16)
+                    .opacity(isShowingControls ? 1 : 0)
+                    .offset(y: isShowingControls ? 0 : -6)
+                    .animation(.easeInOut(duration: 0.18), value: isShowingControls)
+                    .allowsHitTesting(isShowingControls)
+            }
+            .onHover { isHovering in
+                if isHovering {
+                    revealControls()
+                } else {
+                    scheduleControlsHide(after: .milliseconds(900))
+                }
+            }
+            .simultaneousGesture(
+                TapGesture().onEnded {
+                    revealControls()
+                }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.black.opacity(0.18))
+    }
+
+    @MainActor
+    private func loadImage() async {
+        let cacheKey = url as NSURL
+        if let cachedImage = Self.imageCache.object(forKey: cacheKey) {
+            image = cachedImage
+            isLoadingImage = false
+            return
+        }
+
+        image = nil
+        isLoadingImage = true
+        let data = await Task.detached(priority: .userInitiated) {
+            try? Data(contentsOf: url)
+        }.value
+        guard !Task.isCancelled else { return }
+
+        let loadedImage = data.flatMap(NSImage.init(data:))
+        if let loadedImage {
+            Self.imageCache.setObject(loadedImage, forKey: cacheKey)
+        }
+
+        image = loadedImage
+        isLoadingImage = false
     }
 
     private var zoomControls: some View {

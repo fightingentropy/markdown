@@ -17,6 +17,7 @@ struct NoteAssistantMessage: Identifiable, Hashable {
     let role: Role
     let text: String
     let createdAt: Date
+    let renderedMarkdown: AttributedString?
 
     init(
         id: UUID = UUID(),
@@ -28,6 +29,16 @@ struct NoteAssistantMessage: Identifiable, Hashable {
         self.role = role
         self.text = text
         self.createdAt = createdAt
+        if role == .assistant, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            self.renderedMarkdown = try? AttributedString(
+                markdown: text,
+                options: AttributedString.MarkdownParsingOptions(
+                    interpretedSyntax: .inlineOnlyPreservingWhitespace
+                )
+            )
+        } else {
+            self.renderedMarkdown = nil
+        }
     }
 }
 

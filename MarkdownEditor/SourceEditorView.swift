@@ -246,7 +246,7 @@ struct SourceEditorView: NSViewRepresentable {
         context.coordinator.parent = self
         context.coordinator.observeSizeChanges(of: scrollView)
         updateTextLayout(for: scrollView, textView: textView)
-        context.coordinator.setCurrentDocument(documentURL)
+        _ = context.coordinator.setCurrentDocument(documentURL)
         context.coordinator.primeAppearanceSignature()
         context.coordinator.restoreEditorState(
             in: textView,
@@ -326,15 +326,14 @@ struct SourceEditorView: NSViewRepresentable {
         var parent: SourceEditorView
         private var isApplyingExternalText = false
         private var lastAppearanceSignature: AppearanceSignature?
+        private let highlighter: SyntaxHighlighter
         private weak var observedClipView: NSClipView?
         private var currentDocumentIdentity: String?
+        private var lastSelectionRange: NSRange?
 
         init(_ parent: SourceEditorView) {
             self.parent = parent
-        }
-
-        private var highlighter: SyntaxHighlighter {
-            SyntaxHighlighter(preferences: parent.preferences)
+            self.highlighter = SyntaxHighlighter(preferences: parent.preferences)
         }
 
         func observeSizeChanges(of scrollView: NSScrollView) {
@@ -418,6 +417,7 @@ struct SourceEditorView: NSViewRepresentable {
         ) {
             let restoredSelection = selection ?? NSRange(location: 0, length: 0)
             restoreSelection(restoredSelection, in: textView)
+            lastSelectionRange = textView.selectedRange()
             textView.scrollRangeToVisible(textView.selectedRange())
 
             guard focusEditor else { return }
@@ -453,17 +453,20 @@ struct SourceEditorView: NSViewRepresentable {
             )
         }
 
-        func highlight(_ textView: NSTextView, preservingViewport: Bool = true) {
+        func highlight(
+            _ textView: NSTextView,
+            preservingViewport: Bool = true,
+            editedRange: NSRange? = nil
+        ) {
             let applyHighlighting = {
                 guard let storage = textView.textStorage else { return }
-                self.highlighter.highlight(storage)
+                self.highlighter.highlight(storage, editedRange: editedRange)
             }
 
             if preservingViewport {
                 withPreservedViewport(for: textView, updates: applyHighlighting)
             } else {
                 applyHighlighting()
-                textView.scrollRangeToVisible(textView.selectedRange())
             }
         }
 
@@ -472,14 +475,21 @@ struct SourceEditorView: NSViewRepresentable {
             guard !isApplyingExternalText else { return }
 
             parent.text = textView.string
-            highlight(textView)
+            highlight(
+                textView,
+                preservingViewport: false,
+                editedRange: textView.textStorage?.editedRange
+            )
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             guard !isApplyingExternalText else { return }
+            let selection = textView.selectedRange()
+            guard lastSelectionRange != selection else { return }
 
-            parent.onSelectionChange(parent.documentURL, textView.selectedRange())
+            lastSelectionRange = selection
+            parent.onSelectionChange(parent.documentURL, selection)
         }
 
         func sourceTextView(_ textView: NSTextView, handleModifiedLinkClickAt point: CGPoint, with event: NSEvent) -> Bool {

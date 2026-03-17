@@ -60,6 +60,11 @@ enum ItemRenameError: LocalizedError, Equatable {
 private let markdownFileExtensions: Set<String> = ["md", "markdown", "mdown"]
 private let imageFileExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "svg", "tiff", "bmp"]
 
+private struct CachedMarkdownMetadata: Sendable {
+    let modificationDate: Date
+    let noteTitle: String?
+}
+
 @Observable
 @MainActor
 final class Workspace {
@@ -101,14 +106,8 @@ final class Workspace {
         return selectedFileURL.deletingPathExtension().lastPathComponent
     }
 
-    var sortedFiles: [FileItem] {
-        switch sortOrder {
-        case .byName:
-            files.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        case .byDate:
-            files.sorted { $0.modificationDate > $1.modificationDate }
-        }
-    }
+    var sortedFiles: [FileItem] { files }
+    var assetLookupSnapshot: [String: [URL]] { assetLookupByFilename }
 
     private static let bookmarkKey = "vaultBookmark"
     private static let editorSelectionKeyPrefix = "editorSelection::"
@@ -117,6 +116,10 @@ final class Workspace {
     private var autosaveTask: Task<Void, Never>?
     private var snapshotLoadTask: Task<Void, Never>?
     private var snapshotGeneration = 0
+    private var cachedMarkdownMetadataByPath: [String: CachedMarkdownMetadata] = [:]
+    private var assetLookupByFilename: [String: [URL]] = [:]
+    private var pendingEditorSelectionsByKey: [String: [Int]] = [:]
+    private var editorSelectionPersistTasksByKey: [String: Task<Void, Never>] = [:]
 
     init(preferences: AppPreferences = AppPreferences()) {
         self.preferences = preferences
@@ -148,6 +151,8 @@ final class Workspace {
         sidebarNodes = []
         selectedFileURL = nil
         text = ""
+        cachedMarkdownMetadataByPath = [:]
+        assetLookupByFilename = [:]
         refreshFilesInBackground(
             preferredSelectionURL: restoreSelectedFileURL(),
             selectFirstFileIfNeeded: true
@@ -179,6 +184,8 @@ final class Workspace {
         sidebarNodes = []
         selectedFileURL = nil
         text = ""
+        cachedMarkdownMetadataByPath = [:]
+        assetLookupByFilename = [:]
         refreshFilesInBackground(
             preferredSelectionURL: restoreSelectedFileURL(),
             selectFirstFileIfNeeded: true
@@ -195,10 +202,18 @@ final class Workspace {
         guard let vaultURL else {
             files = []
             sidebarNodes = []
+            cachedMarkdownMetadataByPath = [:]
+            assetLookupByFilename = [:]
             return
         }
 
-        let snapshot = Self.snapshotDirectory(at: vaultURL, sortOrder: sortOrder)
+        let snapshot = Self.snapshotDirectory(
+            at: vaultURL,
+            sortOrder: sortOrder,
+            cachedMarkdownMetadataByPath: cachedMarkdownMetadataByPath
+        )
+        cachedMarkdownMetadataByPath = snapshot.markdownMetadataByPath
+        assetLookupByFilename = snapshot.assetLookupByFilename
         files = snapshot.files
         sidebarNodes = snapshot.nodes
 
@@ -229,6 +244,7 @@ final class Workspace {
             selectedFileURL = canonicalURL
             text = normalizedContent
             persistSelectedFileURL(canonicalURL)
+            updateCachedMetadata(for: canonicalURL, content: normalizedContent)
         } else {
             selectedFileURL = canonicalURL
             text = ""
@@ -453,14 +469,28 @@ final class Workspace {
     func persistEditorSelection(_ selection: NSRange, for url: URL?) {
         guard let url else { return }
 
+        let storageKey = editorSelectionStorageKey(for: url)
         let sanitizedSelection = [max(0, selection.location), max(0, selection.length)]
-        UserDefaults.standard.set(sanitizedSelection, forKey: editorSelectionStorageKey(for: url))
+        pendingEditorSelectionsByKey[storageKey] = sanitizedSelection
+        editorSelectionPersistTasksByKey[storageKey]?.cancel()
+        editorSelectionPersistTasksByKey[storageKey] = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard let self, !Task.isCancelled else { return }
+            guard self.pendingEditorSelectionsByKey[storageKey] == sanitizedSelection else { return }
+            UserDefaults.standard.set(sanitizedSelection, forKey: storageKey)
+            self.pendingEditorSelectionsByKey.removeValue(forKey: storageKey)
+            self.editorSelectionPersistTasksByKey.removeValue(forKey: storageKey)
+        }
     }
 
     func editorSelection(for url: URL?) -> NSRange? {
-        guard let url,
-              let persistedSelection = UserDefaults.standard.array(forKey: editorSelectionStorageKey(for: url)) as? [Int],
-              persistedSelection.count == 2 else {
+        guard let url else {
+            return nil
+        }
+
+        let storageKey = editorSelectionStorageKey(for: url)
+        let persistedSelection = (pendingEditorSelectionsByKey[storageKey] ?? UserDefaults.standard.array(forKey: storageKey) as? [Int]) ?? []
+        guard persistedSelection.count == 2 else {
             return nil
         }
 
@@ -499,17 +529,56 @@ final class Workspace {
     }
 
     private nonisolated static func extractTitle(from content: String) -> String? {
-        for line in content.split(whereSeparator: \.isNewline) {
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
+        let text = content as NSString
+        guard text.length > 0 else { return nil }
 
-            if trimmed.hasPrefix("#") {
-                let title = trimmed.drop(while: { $0 == "#" || $0.isWhitespace })
-                let result = String(title).trimmingCharacters(in: .whitespacesAndNewlines)
-                return result.isEmpty ? nil : result
+        func isWhitespace(_ character: unichar) -> Bool {
+            character == 32 || character == 9
+        }
+
+        func isNewline(_ character: unichar) -> Bool {
+            character == 10 || character == 13
+        }
+
+        var location = 0
+        while location < text.length {
+            let lineRange = text.lineRange(for: NSRange(location: location, length: 0))
+            var start = lineRange.location
+            var end = NSMaxRange(lineRange)
+
+            while end > start, isNewline(text.character(at: end - 1)) {
+                end -= 1
             }
 
-            return nil
+            while start < end, isWhitespace(text.character(at: start)) {
+                start += 1
+            }
+
+            while end > start, isWhitespace(text.character(at: end - 1)) {
+                end -= 1
+            }
+
+            guard start < end else {
+                location = NSMaxRange(lineRange)
+                continue
+            }
+
+            guard text.character(at: start) == 35 else { return nil }
+
+            while start < end, text.character(at: start) == 35 {
+                start += 1
+            }
+
+            while start < end, isWhitespace(text.character(at: start)) {
+                start += 1
+            }
+
+            while end > start, isWhitespace(text.character(at: end - 1)) {
+                end -= 1
+            }
+
+            guard start < end else { return nil }
+            return text.substring(with: NSRange(location: start, length: end - start))
         }
 
         return nil
@@ -648,18 +717,28 @@ final class Workspace {
     }
 
     private func updateCachedMetadata(for url: URL, content: String) {
-        guard let index = files.firstIndex(where: { $0.url == url }) else { return }
+        let standardizedURL = url.standardizedFileURL
+        let metadataKey = Self.metadataCacheKey(for: standardizedURL)
+        let date = (try? standardizedURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            ?? cachedMarkdownMetadataByPath[metadataKey]?.modificationDate
+            ?? Date()
+        let noteTitle = Self.extractTitle(from: content)
 
-        let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-            ?? files[index].modificationDate
+        cachedMarkdownMetadataByPath[metadataKey] = CachedMarkdownMetadata(
+            modificationDate: date,
+            noteTitle: noteTitle
+        )
+
+        guard let index = files.firstIndex(where: { Self.urlsMatch($0.url, standardizedURL) }) else { return }
 
         files[index] = FileItem(
-            id: url,
-            name: url.lastPathComponent,
-            url: url,
+            id: standardizedURL,
+            name: standardizedURL.lastPathComponent,
+            url: standardizedURL,
             modificationDate: date,
-            noteTitle: Self.extractTitle(from: content)
+            noteTitle: noteTitle
         )
+        resortFiles()
     }
 
     private func refreshFilesInBackground(
@@ -675,22 +754,31 @@ final class Workspace {
             sidebarNodes = []
             selectedFileURL = nil
             text = ""
+            cachedMarkdownMetadataByPath = [:]
+            assetLookupByFilename = [:]
             return
         }
 
         isLoadingSnapshot = true
         let generation = snapshotGeneration
         let sortOrder = sortOrder
+        let cachedMarkdownMetadataByPath = cachedMarkdownMetadataByPath
 
         snapshotLoadTask = Task { [vaultURL] in
             let snapshot = await Task.detached(priority: .userInitiated) {
-                Self.snapshotDirectory(at: vaultURL, sortOrder: sortOrder)
+                Self.snapshotDirectory(
+                    at: vaultURL,
+                    sortOrder: sortOrder,
+                    cachedMarkdownMetadataByPath: cachedMarkdownMetadataByPath
+                )
             }.value
 
             guard !Task.isCancelled else { return }
             guard generation == self.snapshotGeneration else { return }
             guard self.vaultURL?.standardizedFileURL == vaultURL.standardizedFileURL else { return }
 
+            self.cachedMarkdownMetadataByPath = snapshot.markdownMetadataByPath
+            self.assetLookupByFilename = snapshot.assetLookupByFilename
             self.files = snapshot.files
             self.sidebarNodes = snapshot.nodes
 
@@ -717,75 +805,113 @@ final class Workspace {
         }
     }
 
-    private nonisolated static func snapshotDirectory(at directoryURL: URL, sortOrder: SortOrder) -> DirectorySnapshot {
+    private nonisolated static func snapshotDirectory(
+        at directoryURL: URL,
+        sortOrder: SortOrder,
+        cachedMarkdownMetadataByPath: [String: CachedMarkdownMetadata]
+    ) -> DirectorySnapshot {
         guard let contents = try? FileManager.default.contentsOfDirectory(
             at: directoryURL,
-            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .contentModificationDateKey],
             options: .skipsHiddenFiles
         ) else {
-            return DirectorySnapshot(nodes: [], files: [])
+            return DirectorySnapshot(nodes: [], files: [], markdownMetadataByPath: [:], assetLookupByFilename: [:])
         }
 
         var nodes: [SidebarNode] = []
         var files: [FileItem] = []
+        var markdownMetadataByPath: [String: CachedMarkdownMetadata] = [:]
+        var assetLookupByFilename: [String: [URL]] = [:]
 
         for url in contents {
-            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey])
+            let standardizedURL = url.standardizedFileURL
+            let values = try? standardizedURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .contentModificationDateKey])
             let modificationDate = values?.contentModificationDate ?? .distantPast
 
             if values?.isDirectory == true {
-                let childSnapshot = snapshotDirectory(at: url, sortOrder: sortOrder)
+                let childSnapshot = snapshotDirectory(
+                    at: standardizedURL,
+                    sortOrder: sortOrder,
+                    cachedMarkdownMetadataByPath: cachedMarkdownMetadataByPath
+                )
                 let childLatestDate = childSnapshot.nodes.map(\.modificationDate).max() ?? modificationDate
                 nodes.append(
                     SidebarNode(
-                        id: url,
-                        url: url,
-                        name: url.lastPathComponent,
+                        id: standardizedURL,
+                        url: standardizedURL,
+                        name: standardizedURL.lastPathComponent,
                         kind: .folder,
                         modificationDate: max(modificationDate, childLatestDate),
                         children: childSnapshot.nodes
                     )
                 )
                 files.append(contentsOf: childSnapshot.files)
-            } else if Self.isMarkdownFile(url) {
-                let file = makeFileItem(at: url, modificationDate: modificationDate)
+                markdownMetadataByPath.merge(childSnapshot.markdownMetadataByPath) { _, newest in newest }
+                mergeAssetLookup(&assetLookupByFilename, with: childSnapshot.assetLookupByFilename)
+            } else if Self.isMarkdownFile(standardizedURL) {
+                let metadataKey = metadataCacheKey(for: standardizedURL)
+                let file = makeFileItem(
+                    at: standardizedURL,
+                    modificationDate: modificationDate,
+                    cachedMetadata: cachedMarkdownMetadataByPath[metadataKey]
+                )
                 nodes.append(
                     SidebarNode(
-                        id: url,
-                        url: url,
+                        id: standardizedURL,
+                        url: standardizedURL,
                         name: file.displayName,
                         kind: .file,
                         modificationDate: file.modificationDate
                     )
                 )
                 files.append(file)
-            } else if Self.isImageFile(url) {
+                markdownMetadataByPath[metadataKey] = CachedMarkdownMetadata(
+                    modificationDate: file.modificationDate,
+                    noteTitle: file.noteTitle
+                )
+                addAssetLookupEntry(for: standardizedURL, to: &assetLookupByFilename)
+            } else if Self.isImageFile(standardizedURL) {
                 nodes.append(
                     SidebarNode(
-                        id: url,
-                        url: url,
-                        name: url.lastPathComponent,
+                        id: standardizedURL,
+                        url: standardizedURL,
+                        name: standardizedURL.lastPathComponent,
                         kind: .file,
                         modificationDate: modificationDate
                     )
                 )
+                addAssetLookupEntry(for: standardizedURL, to: &assetLookupByFilename)
+            } else if values?.isRegularFile == true {
+                addAssetLookupEntry(for: standardizedURL, to: &assetLookupByFilename)
             }
         }
 
         return DirectorySnapshot(
             nodes: sortSidebarNodes(nodes, sortOrder: sortOrder),
-            files: files
+            files: sortFileItems(files, sortOrder: sortOrder),
+            markdownMetadataByPath: markdownMetadataByPath,
+            assetLookupByFilename: sortAssetLookup(assetLookupByFilename)
         )
     }
 
-    private nonisolated static func makeFileItem(at url: URL, modificationDate: Date) -> FileItem {
-        let noteTitle = readFileContents(url).flatMap { content in
-            Self.extractTitle(from: normalizedContent(
-                for: url,
-                content: content,
-                persistIfMissingTitle: false
-            ))
+    private nonisolated static func makeFileItem(
+        at url: URL,
+        modificationDate: Date,
+        cachedMetadata: CachedMarkdownMetadata?
+    ) -> FileItem {
+        let noteTitle: String?
+        if let cachedMetadata, cachedMetadata.modificationDate == modificationDate {
+            noteTitle = cachedMetadata.noteTitle
+        } else {
+            noteTitle = readFileContents(url).flatMap { content in
+                Self.extractTitle(from: normalizedContent(
+                    for: url,
+                    content: content,
+                    persistIfMissingTitle: false
+                ))
+            }
         }
+
         return FileItem(
             id: url,
             name: url.lastPathComponent,
@@ -793,6 +919,46 @@ final class Workspace {
             modificationDate: modificationDate,
             noteTitle: noteTitle
         )
+    }
+
+    private nonisolated static func sortFileItems(_ files: [FileItem], sortOrder: SortOrder) -> [FileItem] {
+        files.sorted { lhs, rhs in
+            switch sortOrder {
+            case .byName:
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            case .byDate:
+                if lhs.modificationDate != rhs.modificationDate {
+                    return lhs.modificationDate > rhs.modificationDate
+                }
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            }
+        }
+    }
+
+    private nonisolated static func metadataCacheKey(for url: URL) -> String {
+        url.standardizedFileURL.path
+    }
+
+    private nonisolated static func addAssetLookupEntry(for url: URL, to lookup: inout [String: [URL]]) {
+        lookup[url.lastPathComponent, default: []].append(url.standardizedFileURL)
+    }
+
+    private nonisolated static func mergeAssetLookup(_ target: inout [String: [URL]], with source: [String: [URL]]) {
+        for (fileName, urls) in source {
+            target[fileName, default: []].append(contentsOf: urls)
+        }
+    }
+
+    private nonisolated static func sortAssetLookup(_ lookup: [String: [URL]]) -> [String: [URL]] {
+        lookup.mapValues { urls in
+            Array(Set(urls)).sorted { lhs, rhs in
+                lhs.path.localizedStandardCompare(rhs.path) == .orderedAscending
+            }
+        }
+    }
+
+    private func resortFiles() {
+        files = Self.sortFileItems(files, sortOrder: sortOrder)
     }
 
     private nonisolated static func sortSidebarNodes(_ nodes: [SidebarNode], sortOrder: SortOrder) -> [SidebarNode] {
@@ -872,34 +1038,58 @@ final class Workspace {
     }
 
     private func ensureOpenedFileIsVisible(at url: URL, markdownContent: String?) {
-        let modificationDate = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
+        let standardizedURL = url.standardizedFileURL
+        let modificationDate = (try? standardizedURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
 
-        if Self.isMarkdownFile(url), !files.contains(where: { Self.urlsMatch($0.url, url) }) {
-            files.append(
-                FileItem(
-                    id: url,
-                    name: url.lastPathComponent,
-                    url: url,
-                    modificationDate: modificationDate,
-                    noteTitle: markdownContent.flatMap(Self.extractTitle(from:))
-                )
+        if Self.isMarkdownFile(standardizedURL) {
+            let noteTitle = markdownContent.flatMap(Self.extractTitle(from:))
+            cachedMarkdownMetadataByPath[Self.metadataCacheKey(for: standardizedURL)] = CachedMarkdownMetadata(
+                modificationDate: modificationDate,
+                noteTitle: noteTitle
             )
-        }
 
-        guard !sidebarContainsNode(for: url, in: sidebarNodes) else { return }
+            let fileItem = FileItem(
+                id: standardizedURL,
+                name: standardizedURL.lastPathComponent,
+                url: standardizedURL,
+                modificationDate: modificationDate,
+                noteTitle: noteTitle
+            )
+
+            if let index = files.firstIndex(where: { Self.urlsMatch($0.url, standardizedURL) }) {
+                files[index] = fileItem
+            } else {
+                files.append(fileItem)
+            }
+            resortFiles()
+        }
+        updateAssetLookup(for: standardizedURL)
+
+        guard !sidebarContainsNode(for: standardizedURL, in: sidebarNodes) else { return }
 
         sidebarNodes = Self.sortSidebarNodes(
             sidebarNodes + [
                 SidebarNode(
-                    id: url,
-                    url: url,
-                    name: Self.isMarkdownFile(url) ? url.deletingPathExtension().lastPathComponent : url.lastPathComponent,
+                    id: standardizedURL,
+                    url: standardizedURL,
+                    name: Self.isMarkdownFile(standardizedURL) ? standardizedURL.deletingPathExtension().lastPathComponent : standardizedURL.lastPathComponent,
                     kind: .file,
                     modificationDate: modificationDate
                 )
             ],
             sortOrder: sortOrder
         )
+    }
+
+    private func updateAssetLookup(for url: URL) {
+        let fileName = url.lastPathComponent
+        let standardizedURL = url.standardizedFileURL
+        if assetLookupByFilename[fileName]?.contains(standardizedURL) != true {
+            assetLookupByFilename[fileName, default: []].append(standardizedURL)
+        }
+        assetLookupByFilename[fileName]?.sort {
+            $0.path.localizedStandardCompare($1.path) == .orderedAscending
+        }
     }
 
     private func sidebarContainsNode(for url: URL, in nodes: [SidebarNode]) -> Bool {
@@ -1036,6 +1226,20 @@ final class Workspace {
         let defaults = UserDefaults.standard
         let oldKey = editorSelectionStorageKey(for: oldURL)
         let newKey = editorSelectionStorageKey(for: newURL)
+        let pendingSelection = pendingEditorSelectionsByKey.removeValue(forKey: oldKey)
+
+        editorSelectionPersistTasksByKey[oldKey]?.cancel()
+        editorSelectionPersistTasksByKey.removeValue(forKey: oldKey)
+        editorSelectionPersistTasksByKey[newKey]?.cancel()
+        editorSelectionPersistTasksByKey.removeValue(forKey: newKey)
+
+        if let pendingSelection {
+            pendingEditorSelectionsByKey[newKey] = pendingSelection
+            defaults.set(pendingSelection, forKey: newKey)
+            pendingEditorSelectionsByKey.removeValue(forKey: newKey)
+            defaults.removeObject(forKey: oldKey)
+            return
+        }
 
         guard let persistedSelection = defaults.array(forKey: oldKey) else { return }
 
@@ -1064,22 +1268,33 @@ final class Workspace {
 
         let defaults = UserDefaults.standard
         let prefix = Self.editorSelectionKeyPrefix
-        var keysToRemove: [String] = []
+        var keysToRemove: Set<String> = []
 
         for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(prefix) {
             let path = String(key.dropFirst(prefix.count))
             let storedURL = URL(fileURLWithPath: path)
             if deletedItem(url, isDirectory: true, contains: storedURL) {
-                keysToRemove.append(key)
+                keysToRemove.insert(key)
             }
         }
 
-        return keysToRemove
+        for key in pendingEditorSelectionsByKey.keys where key.hasPrefix(prefix) {
+            let path = String(key.dropFirst(prefix.count))
+            let storedURL = URL(fileURLWithPath: path)
+            if deletedItem(url, isDirectory: true, contains: storedURL) {
+                keysToRemove.insert(key)
+            }
+        }
+
+        return Array(keysToRemove)
     }
 
     private func clearStoredEditorSelections(forKeys keys: [String]) {
         let defaults = UserDefaults.standard
         for key in keys {
+            editorSelectionPersistTasksByKey[key]?.cancel()
+            editorSelectionPersistTasksByKey.removeValue(forKey: key)
+            pendingEditorSelectionsByKey.removeValue(forKey: key)
             defaults.removeObject(forKey: key)
         }
     }
@@ -1151,4 +1366,6 @@ final class Workspace {
 private struct DirectorySnapshot: Sendable {
     let nodes: [SidebarNode]
     let files: [FileItem]
+    let markdownMetadataByPath: [String: CachedMarkdownMetadata]
+    let assetLookupByFilename: [String: [URL]]
 }

@@ -7,10 +7,15 @@ struct MarkdownPreview: View {
     let markdown: String
     let documentURL: URL?
     let vaultURL: URL?
+    let assetLookupByFilename: [String: [URL]]
     let preferences: AppPreferences
 
     private var context: PreviewContext {
-        PreviewContext(documentURL: documentURL, vaultURL: vaultURL)
+        PreviewContext(
+            documentURL: documentURL,
+            vaultURL: vaultURL,
+            assetLookupByFilename: assetLookupByFilename
+        )
     }
 
     private var document: PreviewDocument {
@@ -100,8 +105,17 @@ private struct ConfigurablePreviewCodeBlockStyle: StructuredText.CodeBlockStyle 
 }
 
 private struct HTMLPreviewWebView: NSViewRepresentable {
+    final class Coordinator {
+        var lastHTML: String?
+        var lastBaseURL: URL?
+    }
+
     let html: String
     let baseURL: URL?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -110,6 +124,12 @@ private struct HTMLPreviewWebView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: WKWebView, context: Context) {
+        guard context.coordinator.lastHTML != html || context.coordinator.lastBaseURL != baseURL else {
+            return
+        }
+
+        context.coordinator.lastHTML = html
+        context.coordinator.lastBaseURL = baseURL
         nsView.loadHTMLString(html, baseURL: baseURL)
     }
 }
