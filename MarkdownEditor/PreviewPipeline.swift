@@ -256,6 +256,12 @@ enum MarkdownPreprocessor {
             .replacingOccurrences(of: "\r", with: "\n")
         let lines = normalizedSource.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         let resolver = AssetResolver(context: context)
+        let noteResolver = NoteReferenceResolver(
+            noteURLs: context.assetLookupByFilename.values
+                .flatMap { $0 }
+                .filter(Workspace.isMarkdownFile),
+            vaultURL: context.vaultURL
+        )
 
         var segments: [PreviewSegment] = []
         var markdownBuffer: [String] = []
@@ -316,6 +322,8 @@ enum MarkdownPreprocessor {
                 rewriteInlineSyntax(
                     in: line,
                     resolver: resolver,
+                    noteResolver: noteResolver,
+                    documentURL: context.documentURL,
                     requiresHTMLFallback: &requiresHTMLFallback
                 )
             )
@@ -352,6 +360,8 @@ enum MarkdownPreprocessor {
     private static func rewriteInlineSyntax(
         in line: String,
         resolver: AssetResolver,
+        noteResolver: NoteReferenceResolver,
+        documentURL: URL?,
         requiresHTMLFallback: inout Bool
     ) -> String {
         let characters = Array(line)
@@ -384,6 +394,17 @@ enum MarkdownPreprocessor {
                     from: index,
                     resolver: resolver,
                     requiresHTMLFallback: &requiresHTMLFallback
+                ) {
+                    result += rewrite.rendered
+                    index = rewrite.nextIndex
+                    continue
+                }
+
+                if let rewrite = rewriteObsidianNoteLink(
+                    in: characters,
+                    from: index,
+                    resolver: noteResolver,
+                    documentURL: documentURL
                 ) {
                     result += rewrite.rendered
                     index = rewrite.nextIndex
@@ -461,6 +482,30 @@ enum MarkdownPreprocessor {
         }
 
         return nil
+    }
+
+    private static func rewriteObsidianNoteLink(
+        in characters: [Character],
+        from index: Int,
+        resolver: NoteReferenceResolver,
+        documentURL: URL?
+    ) -> (rendered: String, nextIndex: Int)? {
+        guard let match = MarkdownNoteLinkExtractor.obsidianNoteLink(in: characters, from: index) else {
+            return nil
+        }
+
+        let original = String(characters[index..<match.nextIndex])
+        guard let destination = resolver.resolve(destination: match.destination, from: documentURL) else {
+            return (original, match.nextIndex)
+        }
+
+        return (
+            PreviewMarkdownSyntax.linkMarkdown(
+                label: match.displayName,
+                destination: destination
+            ),
+            match.nextIndex
+        )
     }
 
     private static func rewriteMarkdownImage(

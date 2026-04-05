@@ -60,9 +60,10 @@ enum ItemRenameError: LocalizedError, Equatable {
 private let markdownFileExtensions: Set<String> = ["md", "markdown", "mdown"]
 private let imageFileExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "svg", "tiff", "bmp"]
 
-private struct CachedMarkdownMetadata: Sendable {
+struct CachedMarkdownMetadata: Sendable {
     let modificationDate: Date
     let noteTitle: String?
+    let noteLinks: [NoteLinkReference]
 }
 
 @Observable
@@ -71,7 +72,12 @@ final class Workspace {
     var files: [FileItem] = []
     var sidebarNodes: [SidebarNode] = []
     var selectedFileURL: URL?
-    var text: String = ""
+    var text: String = "" {
+        didSet {
+            refreshNoteGraph()
+        }
+    }
+    var noteGraph: NoteGraphSnapshot = .empty
     var vaultURL: URL?
     var sortOrder: SortOrder {
         didSet {
@@ -151,6 +157,7 @@ final class Workspace {
         sidebarNodes = []
         selectedFileURL = nil
         text = ""
+        noteGraph = .empty
         cachedMarkdownMetadataByPath = [:]
         assetLookupByFilename = [:]
         refreshFilesInBackground(
@@ -184,6 +191,7 @@ final class Workspace {
         sidebarNodes = []
         selectedFileURL = nil
         text = ""
+        noteGraph = .empty
         cachedMarkdownMetadataByPath = [:]
         assetLookupByFilename = [:]
         refreshFilesInBackground(
@@ -204,6 +212,7 @@ final class Workspace {
             sidebarNodes = []
             cachedMarkdownMetadataByPath = [:]
             assetLookupByFilename = [:]
+            noteGraph = .empty
             return
         }
 
@@ -226,6 +235,8 @@ final class Workspace {
                 clearStoredSelectedFileURL()
             }
         }
+
+        refreshNoteGraph()
     }
 
     func selectFile(_ url: URL) {
@@ -528,7 +539,7 @@ final class Workspace {
         return relativePath == file.name && file.name == file.displayName ? nil : relativePath
     }
 
-    private nonisolated static func extractTitle(from content: String) -> String? {
+    nonisolated static func extractTitle(from content: String) -> String? {
         let text = content as NSString
         guard text.length > 0 else { return nil }
 
@@ -582,6 +593,16 @@ final class Workspace {
         }
 
         return nil
+    }
+
+    private func refreshNoteGraph() {
+        noteGraph = NoteGraphBuilder.makeSnapshot(
+            files: files,
+            metadataByPath: cachedMarkdownMetadataByPath,
+            vaultURL: vaultURL,
+            selectedFileURL: selectedFileURL,
+            liveSelectedMarkdown: selectedFileIsMarkdown ? text : nil
+        )
     }
 
     private func validatedRenamedURL(for url: URL, proposedName: String) throws -> URL {
@@ -723,10 +744,12 @@ final class Workspace {
             ?? cachedMarkdownMetadataByPath[metadataKey]?.modificationDate
             ?? Date()
         let noteTitle = Self.extractTitle(from: content)
+        let noteLinks = MarkdownNoteLinkExtractor.references(in: content)
 
         cachedMarkdownMetadataByPath[metadataKey] = CachedMarkdownMetadata(
             modificationDate: date,
-            noteTitle: noteTitle
+            noteTitle: noteTitle,
+            noteLinks: noteLinks
         )
 
         guard let index = files.firstIndex(where: { Self.urlsMatch($0.url, standardizedURL) }) else { return }
@@ -739,6 +762,7 @@ final class Workspace {
             noteTitle: noteTitle
         )
         resortFiles()
+        refreshNoteGraph()
     }
 
     private func refreshFilesInBackground(
@@ -756,6 +780,7 @@ final class Workspace {
             text = ""
             cachedMarkdownMetadataByPath = [:]
             assetLookupByFilename = [:]
+            noteGraph = .empty
             return
         }
 
@@ -801,6 +826,7 @@ final class Workspace {
                 self.selectFile(first.url)
             }
 
+            self.refreshNoteGraph()
             self.isLoadingSnapshot = false
         }
     }
@@ -859,15 +885,16 @@ final class Workspace {
                     SidebarNode(
                         id: standardizedURL,
                         url: standardizedURL,
-                        name: file.displayName,
+                        name: file.file.displayName,
                         kind: .file,
-                        modificationDate: file.modificationDate
+                        modificationDate: file.file.modificationDate
                     )
                 )
-                files.append(file)
+                files.append(file.file)
                 markdownMetadataByPath[metadataKey] = CachedMarkdownMetadata(
-                    modificationDate: file.modificationDate,
-                    noteTitle: file.noteTitle
+                    modificationDate: file.file.modificationDate,
+                    noteTitle: file.file.noteTitle,
+                    noteLinks: file.noteLinks
                 )
                 addAssetLookupEntry(for: standardizedURL, to: &assetLookupByFilename)
             } else if Self.isImageFile(standardizedURL) {
@@ -898,27 +925,34 @@ final class Workspace {
         at url: URL,
         modificationDate: Date,
         cachedMetadata: CachedMarkdownMetadata?
-    ) -> FileItem {
+    ) -> (file: FileItem, noteLinks: [NoteLinkReference]) {
         let noteTitle: String?
+        let noteLinks: [NoteLinkReference]
         if let cachedMetadata, cachedMetadata.modificationDate == modificationDate {
             noteTitle = cachedMetadata.noteTitle
+            noteLinks = cachedMetadata.noteLinks
+        } else if let content = readFileContents(url) {
+            let normalized = normalizedContent(
+                for: url,
+                content: content,
+                persistIfMissingTitle: false
+            )
+            noteTitle = Self.extractTitle(from: normalized)
+            noteLinks = MarkdownNoteLinkExtractor.references(in: normalized)
         } else {
-            noteTitle = readFileContents(url).flatMap { content in
-                Self.extractTitle(from: normalizedContent(
-                    for: url,
-                    content: content,
-                    persistIfMissingTitle: false
-                ))
-            }
+            noteTitle = nil
+            noteLinks = []
         }
 
-        return FileItem(
+        let file = FileItem(
             id: url,
             name: url.lastPathComponent,
             url: url,
             modificationDate: modificationDate,
             noteTitle: noteTitle
         )
+
+        return (file, noteLinks)
     }
 
     private nonisolated static func sortFileItems(_ files: [FileItem], sortOrder: SortOrder) -> [FileItem] {
@@ -1043,9 +1077,11 @@ final class Workspace {
 
         if Self.isMarkdownFile(standardizedURL) {
             let noteTitle = markdownContent.flatMap(Self.extractTitle(from:))
+            let noteLinks = markdownContent.map(MarkdownNoteLinkExtractor.references(in:)) ?? []
             cachedMarkdownMetadataByPath[Self.metadataCacheKey(for: standardizedURL)] = CachedMarkdownMetadata(
                 modificationDate: modificationDate,
-                noteTitle: noteTitle
+                noteTitle: noteTitle,
+                noteLinks: noteLinks
             )
 
             let fileItem = FileItem(

@@ -4,6 +4,7 @@ import SwiftUI
 enum OpenViewMode: String, CaseIterable, Identifiable {
     case editor
     case preview
+    case graph
 
     var id: String { rawValue }
 
@@ -13,6 +14,8 @@ enum OpenViewMode: String, CaseIterable, Identifiable {
             "Editor"
         case .preview:
             "Preview"
+        case .graph:
+            "Graph"
         }
     }
 
@@ -22,6 +25,8 @@ enum OpenViewMode: String, CaseIterable, Identifiable {
             "pencil"
         case .preview:
             "eye"
+        case .graph:
+            "point.3.connected.trianglepath.dotted"
         }
     }
 }

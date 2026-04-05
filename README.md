@@ -10,6 +10,7 @@ It is designed for working in a folder of notes with a plain-text editor, a rend
 - Shows notes and folders in a sidebar
 - Lets you create, edit, save, search, and delete notes
 - Renders Markdown in a native preview
+- Maps note relationships in a graph view
 - Renders Mermaid diagrams
 - Shows image files and inline image embeds
 - Includes Sparkle-based app updates for shipped builds
@@ -45,6 +46,7 @@ It is designed for working in a folder of notes with a plain-text editor, a rend
   - code blocks
 - If a note has no Markdown heading at the top, the app can normalize it by adding a `# Title` based on the file name
 - Sidebar titles use the first heading when available
+- Supports Obsidian-style `[[Wiki Links]]` for note connections
 
 ### Preview
 
@@ -53,8 +55,16 @@ It is designed for working in a folder of notes with a plain-text editor, a rend
 - HTML fallback preview when needed
 - Mermaid diagram rendering
 - Clickable links in preview
+- Obsidian-style note links render as clickable internal note links in preview
 - Image attachment loading relative to the current note or vault
 - Direct preview for image files selected in the sidebar
+
+### Graph View
+
+- Switch from editor or preview into a vault graph view
+- Visualizes note-to-note connections from `[[Wiki Links]]` and local markdown links
+- Centers the selected note and highlights connected notes
+- Click any node in the graph to open that note
 
 ### Inline Image Editing
 

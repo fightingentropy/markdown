@@ -339,6 +339,15 @@ final class SyntaxHighlighter {
                     continue
                 }
             } else if character == 91,
+                      let obsidianNoteRange = obsidianNoteRange(
+                        startingAt: location,
+                        in: text,
+                        limit: end
+                      ) {
+                storage.addAttributes(styles.linkAttributes, range: obsidianNoteRange)
+                location = NSMaxRange(obsidianNoteRange)
+                continue
+            } else if character == 91,
                       let linkRange = markdownLinkRange(
                         startingAt: location,
                         in: text,
@@ -670,6 +679,33 @@ final class SyntaxHighlighter {
             if isNewline(text.character(at: closing)) {
                 return nil
             }
+            closing += 1
+        }
+
+        return nil
+    }
+
+    private func obsidianNoteRange(
+        startingAt location: Int,
+        in text: NSString,
+        limit: Int
+    ) -> NSRange? {
+        guard location + 3 < limit else { return nil }
+        guard text.character(at: location) == 91,
+              text.character(at: location + 1) == 91 else {
+            return nil
+        }
+
+        var closing = location + 2
+        while closing + 1 < limit {
+            if text.character(at: closing) == 93, text.character(at: closing + 1) == 93 {
+                return NSRange(location: location, length: closing + 2 - location)
+            }
+
+            if isNewline(text.character(at: closing)) {
+                return nil
+            }
+
             closing += 1
         }
 

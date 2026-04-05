@@ -270,6 +270,8 @@ struct ContentView: View {
             editorView
         case .preview:
             previewView
+        case .graph:
+            graphView
         }
     }
 
@@ -284,6 +286,11 @@ struct ContentView: View {
                 workspace.persistEditorSelection(selection, for: documentURL)
             }
         )
+    }
+
+    private var graphView: some View {
+        NoteGraphView(workspace: workspace)
+            .id(workspace.selectedFileURL)
     }
 
     private func restoreEditorFocusAfterPaletteDismiss() {
