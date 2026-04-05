@@ -130,7 +130,6 @@ struct NoteGraphView: View {
     private func graphCanvas(in size: CGSize) -> some View {
         ZStack {
             Canvas { context, canvasSize in
-                drawBackgroundGrid(in: &context, size: canvasSize)
                 drawEdges(in: &context, size: canvasSize)
             }
             .allowsHitTesting(false)
@@ -141,30 +140,6 @@ struct NoteGraphView: View {
                 }
             }
         }
-    }
-
-    private func drawBackgroundGrid(in context: inout GraphicsContext, size: CGSize) {
-        let center = CGPoint(x: size.width / 2 + viewport.offset.width, y: size.height / 2 + viewport.offset.height)
-        let baseRadius = min(size.width, size.height) * 0.19 * viewport.zoom
-        let strokeColor = Color.primary.opacity(0.045)
-
-        for ring in 1...4 {
-            let radius = baseRadius * CGFloat(ring)
-            let rect = CGRect(
-                x: center.x - radius,
-                y: center.y - radius,
-                width: radius * 2,
-                height: radius * 2
-            )
-            context.stroke(Path(ellipseIn: rect), with: .color(strokeColor), lineWidth: 1)
-        }
-
-        var crosshair = Path()
-        crosshair.move(to: CGPoint(x: center.x, y: 0))
-        crosshair.addLine(to: CGPoint(x: center.x, y: size.height))
-        crosshair.move(to: CGPoint(x: 0, y: center.y))
-        crosshair.addLine(to: CGPoint(x: size.width, y: center.y))
-        context.stroke(crosshair, with: .color(strokeColor), lineWidth: 1)
     }
 
     private func drawEdges(in context: inout GraphicsContext, size: CGSize) {

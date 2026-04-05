@@ -667,32 +667,53 @@ enum NoteGraphLayoutEngine {
             return NoteGraphLayout(positions: [node.id: .zero])
         }
 
+        if snapshot.edges.isEmpty {
+            return scatterLayout(
+                for: snapshot.nodes,
+                pinnedNodeID: snapshot.selectedNodeID,
+                relayoutSeed: relayoutSeed
+            )
+        }
+
         let nodes = snapshot.nodes
         let indexedNodes = Dictionary(uniqueKeysWithValues: nodes.enumerated().map { ($1.id, $0) })
         let pinnedNodeID = snapshot.selectedNodeID
-        let depths = makeDepthMap(for: snapshot, pinnedNodeID: pinnedNodeID)
+        let components = connectedComponents(for: snapshot)
+        let componentByNode = Dictionary(uniqueKeysWithValues: components.enumerated().flatMap { componentIndex, component in
+            component.map { ($0, componentIndex) }
+        })
+        let componentAnchors = makeComponentAnchors(
+            for: components,
+            pinnedNodeID: pinnedNodeID,
+            relayoutSeed: relayoutSeed
+        )
         var positions = initialPositions(
             for: nodes,
             pinnedNodeID: pinnedNodeID,
-            depths: depths,
+            componentByNode: componentByNode,
+            componentAnchors: componentAnchors,
+            components: components,
             relayoutSeed: relayoutSeed
         )
-        var temperature: CGFloat = 0.32
-        let area: CGFloat = 4
-        let optimalDistance = sqrt(area / CGFloat(max(nodes.count, 1)))
+        var velocities = Array(repeating: CGVector.zero, count: nodes.count)
+        var temperature: CGFloat = 0.11
+        let idealEdgeLength = max(0.34, 1.22 / sqrt(CGFloat(max(nodes.count, 1))))
+        let maxRadius: CGFloat = 2.4
+        let selectedComponentIndex = pinnedNodeID.flatMap { componentByNode[$0] }
 
-        for _ in 0..<140 {
-            var displacement = Array(repeating: CGVector(dx: 0, dy: 0), count: nodes.count)
+        for _ in 0..<220 {
+            var displacement = Array(repeating: CGVector.zero, count: nodes.count)
 
             for firstIndex in nodes.indices {
                 for secondIndex in nodes.indices where secondIndex > firstIndex {
                     let deltaX = positions[firstIndex].x - positions[secondIndex].x
                     let deltaY = positions[firstIndex].y - positions[secondIndex].y
-                    let distance = max(0.025, hypot(deltaX, deltaY))
-                    let force = (optimalDistance * optimalDistance) / distance
+                    let distance = max(0.045, hypot(deltaX, deltaY))
+                    let sameComponent = componentByNode[nodes[firstIndex].id] == componentByNode[nodes[secondIndex].id]
+                    let repulsion = sameComponent ? 0.016 / (distance * distance) : 0.009 / (distance * distance)
                     let directionX = deltaX / distance
                     let directionY = deltaY / distance
-                    let vector = CGVector(dx: directionX * force, dy: directionY * force)
+                    let vector = CGVector(dx: directionX * repulsion, dy: directionY * repulsion)
                     displacement[firstIndex].dx += vector.dx
                     displacement[firstIndex].dy += vector.dy
                     displacement[secondIndex].dx -= vector.dx
@@ -708,8 +729,8 @@ enum NoteGraphLayoutEngine {
 
                 let deltaX = positions[sourceIndex].x - positions[targetIndex].x
                 let deltaY = positions[sourceIndex].y - positions[targetIndex].y
-                let distance = max(0.025, hypot(deltaX, deltaY))
-                let force = (distance * distance) / max(optimalDistance, 0.01)
+                let distance = max(0.045, hypot(deltaX, deltaY))
+                let force = (distance - idealEdgeLength) * 0.11
                 let directionX = deltaX / distance
                 let directionY = deltaY / distance
                 let vector = CGVector(dx: directionX * force, dy: directionY * force)
@@ -725,21 +746,37 @@ enum NoteGraphLayoutEngine {
 
                 if node.id == pinnedNodeID {
                     positions[index] = .zero
+                    velocities[index] = .zero
                     continue
                 }
 
-                displacement[index].dx -= positions[index].x * 0.15
-                displacement[index].dy -= positions[index].y * 0.15
+                let componentIndex = componentByNode[node.id] ?? 0
+                let componentAnchor = componentAnchors[componentIndex] ?? .zero
+                let anchorStrength: CGFloat = componentIndex == selectedComponentIndex ? 0.055 : 0.04
+                displacement[index].dx += (componentAnchor.x - positions[index].x) * anchorStrength
+                displacement[index].dy += (componentAnchor.y - positions[index].y) * anchorStrength
 
-                let distance = max(0.001, hypot(displacement[index].dx, displacement[index].dy))
-                let limitedDistance = min(temperature, distance)
-                positions[index].x += (displacement[index].dx / distance) * limitedDistance
-                positions[index].y += (displacement[index].dy / distance) * limitedDistance
-                positions[index].x = min(max(positions[index].x, -1.4), 1.4)
-                positions[index].y = min(max(positions[index].y, -1.4), 1.4)
+                // Keep isolated or weakly-connected components inside a circular field without boxing them in.
+                displacement[index].dx += -positions[index].x * 0.012
+                displacement[index].dy += -positions[index].y * 0.012
+
+                velocities[index].dx = (velocities[index].dx + displacement[index].dx) * 0.84
+                velocities[index].dy = (velocities[index].dy + displacement[index].dy) * 0.84
+
+                let velocityMagnitude = max(0.001, hypot(velocities[index].dx, velocities[index].dy))
+                let limitedDistance = min(temperature, velocityMagnitude)
+                positions[index].x += (velocities[index].dx / velocityMagnitude) * limitedDistance
+                positions[index].y += (velocities[index].dy / velocityMagnitude) * limitedDistance
+
+                let radius = hypot(positions[index].x, positions[index].y)
+                if radius > maxRadius {
+                    let scale = maxRadius / radius
+                    positions[index].x *= scale
+                    positions[index].y *= scale
+                }
             }
 
-            temperature *= 0.965
+            temperature *= 0.989
         }
 
         let normalizedPositions = normalized(positions, pinnedNodeID: pinnedNodeID, nodes: nodes)
@@ -747,55 +784,180 @@ enum NoteGraphLayoutEngine {
         return NoteGraphLayout(positions: mappedPositions)
     }
 
-    private static func makeDepthMap(
-        for snapshot: NoteGraphSnapshot,
-        pinnedNodeID: URL?
-    ) -> [URL: Int] {
-        guard let pinnedNodeID else { return [:] }
+    private static func connectedComponents(
+        for snapshot: NoteGraphSnapshot
+    ) -> [[URL]] {
+        let nodeIDs = snapshot.nodes.map(\.id)
+        var adjacency: [URL: Set<URL>] = Dictionary(uniqueKeysWithValues: nodeIDs.map { ($0, []) })
 
-        var adjacency: [URL: Set<URL>] = [:]
         for edge in snapshot.edges {
             adjacency[edge.source, default: []].insert(edge.target)
             adjacency[edge.target, default: []].insert(edge.source)
         }
 
-        var depths: [URL: Int] = [pinnedNodeID: 0]
-        var queue: [URL] = [pinnedNodeID]
+        var remaining = Set(nodeIDs)
+        var components: [[URL]] = []
 
-        while !queue.isEmpty {
-            let nodeID = queue.removeFirst()
-            let nextDepth = depths[nodeID, default: 0] + 1
+        while let start = remaining.first {
+            var stack = [start]
+            var component: [URL] = []
+            remaining.remove(start)
 
-            for neighbor in adjacency[nodeID, default: []] where depths[neighbor] == nil {
-                depths[neighbor] = nextDepth
-                queue.append(neighbor)
+            while let nodeID = stack.popLast() {
+                component.append(nodeID)
+
+                for neighbor in adjacency[nodeID, default: []] where remaining.contains(neighbor) {
+                    remaining.remove(neighbor)
+                    stack.append(neighbor)
+                }
             }
+
+            components.append(component)
         }
 
-        return depths
+        return components.sorted { lhs, rhs in
+            if lhs.count != rhs.count {
+                return lhs.count > rhs.count
+            }
+            return lhs.first?.path.localizedStandardCompare(rhs.first?.path ?? "") == .orderedAscending
+        }
+    }
+
+    private static func makeComponentAnchors(
+        for components: [[URL]],
+        pinnedNodeID: URL?,
+        relayoutSeed: Int
+    ) -> [Int: CGPoint] {
+        let selectedComponentIndex = pinnedNodeID.flatMap { pinnedNodeID in
+            components.firstIndex(where: { $0.contains(pinnedNodeID) })
+        }
+
+        var anchors: [Int: CGPoint] = [:]
+        if let selectedComponentIndex {
+            anchors[selectedComponentIndex] = .zero
+        }
+
+        let otherComponentIndices = components.indices.filter { $0 != selectedComponentIndex }
+        let goldenAngle = CGFloat.pi * (3 - sqrt(5))
+
+        for (offset, componentIndex) in otherComponentIndices.enumerated() {
+            let baseAngle = CGFloat(offset + 1) * goldenAngle
+            let jitter = (random01(for: "component-\(componentIndex)", seed: relayoutSeed, salt: 1) - 0.5) * 0.75
+            let angle = baseAngle + jitter
+            let radius = 0.95 + CGFloat(offset / 6) * 0.55 + sqrt(CGFloat(max(components[componentIndex].count, 1))) * 0.09
+            anchors[componentIndex] = CGPoint(
+                x: cos(angle) * radius,
+                y: sin(angle) * radius
+            )
+        }
+
+        if anchors.isEmpty {
+            anchors[0] = .zero
+        }
+
+        return anchors
+    }
+
+    private static func scatterLayout(
+        for nodes: [NoteGraphNode],
+        pinnedNodeID: URL?,
+        relayoutSeed: Int
+    ) -> NoteGraphLayout {
+        var positions = nodes.map { node in
+            if node.id == pinnedNodeID {
+                return CGPoint.zero
+            }
+
+            let angle = random01(for: node.id.path, seed: relayoutSeed, salt: 1) * (.pi * 2)
+            let radius = 0.32 + sqrt(random01(for: node.id.path, seed: relayoutSeed, salt: 2)) * 1.65
+            return CGPoint(
+                x: cos(angle) * radius,
+                y: sin(angle) * radius
+            )
+        }
+        var velocities = Array(repeating: CGVector.zero, count: nodes.count)
+        var temperature: CGFloat = 0.075
+        let maxRadius: CGFloat = 2.1
+
+        for _ in 0..<140 {
+            var displacement = Array(repeating: CGVector.zero, count: nodes.count)
+
+            for firstIndex in nodes.indices {
+                for secondIndex in nodes.indices where secondIndex > firstIndex {
+                    let deltaX = positions[firstIndex].x - positions[secondIndex].x
+                    let deltaY = positions[firstIndex].y - positions[secondIndex].y
+                    let distance = max(0.05, hypot(deltaX, deltaY))
+                    let repulsion = 0.02 / (distance * distance)
+                    let directionX = deltaX / distance
+                    let directionY = deltaY / distance
+                    let vector = CGVector(dx: directionX * repulsion, dy: directionY * repulsion)
+                    displacement[firstIndex].dx += vector.dx
+                    displacement[firstIndex].dy += vector.dy
+                    displacement[secondIndex].dx -= vector.dx
+                    displacement[secondIndex].dy -= vector.dy
+                }
+            }
+
+            for index in nodes.indices {
+                if nodes[index].id == pinnedNodeID {
+                    positions[index] = .zero
+                    velocities[index] = .zero
+                    continue
+                }
+
+                displacement[index].dx += -positions[index].x * 0.016
+                displacement[index].dy += -positions[index].y * 0.016
+
+                velocities[index].dx = (velocities[index].dx + displacement[index].dx) * 0.82
+                velocities[index].dy = (velocities[index].dy + displacement[index].dy) * 0.82
+
+                let velocityMagnitude = max(0.001, hypot(velocities[index].dx, velocities[index].dy))
+                let limitedDistance = min(temperature, velocityMagnitude)
+                positions[index].x += (velocities[index].dx / velocityMagnitude) * limitedDistance
+                positions[index].y += (velocities[index].dy / velocityMagnitude) * limitedDistance
+
+                let radius = hypot(positions[index].x, positions[index].y)
+                if radius > maxRadius {
+                    let scale = maxRadius / radius
+                    positions[index].x *= scale
+                    positions[index].y *= scale
+                }
+            }
+
+            temperature *= 0.988
+        }
+
+        let normalizedPositions = normalized(
+            positions,
+            pinnedNodeID: pinnedNodeID,
+            nodes: nodes
+        )
+        return NoteGraphLayout(
+            positions: Dictionary(uniqueKeysWithValues: zip(nodes.map(\.id), normalizedPositions))
+        )
     }
 
     private static func initialPositions(
         for nodes: [NoteGraphNode],
         pinnedNodeID: URL?,
-        depths: [URL: Int],
+        componentByNode: [URL: Int],
+        componentAnchors: [Int: CGPoint],
+        components: [[URL]],
         relayoutSeed: Int
     ) -> [CGPoint] {
-        let goldenAngle = CGFloat.pi * (3 - sqrt(5))
-        let maximumDepth = max(depths.values.max() ?? 0, 1)
-
-        return nodes.enumerated().map { index, node in
+        nodes.map { node in
             if node.id == pinnedNodeID {
                 return .zero
             }
 
-            let jitter = jitterValue(for: node.id, seed: relayoutSeed)
-            let angle = CGFloat(index) * goldenAngle + jitter * 1.7
-            let normalizedDepth = CGFloat(depths[node.id, default: maximumDepth + 1]) / CGFloat(maximumDepth + 1)
-            let ring = max(0.28, min(1.1, 0.24 + normalizedDepth * 0.78))
+            let componentIndex = componentByNode[node.id] ?? 0
+            let componentAnchor = componentAnchors[componentIndex] ?? .zero
+            let clusterRadius = 0.18 + sqrt(CGFloat(max(components[componentIndex].count, 1))) * 0.055
+            let angle = random01(for: node.id.path, seed: relayoutSeed, salt: 3) * (.pi * 2)
+            let radius = sqrt(random01(for: node.id.path, seed: relayoutSeed, salt: 4)) * clusterRadius
             return CGPoint(
-                x: cos(angle) * ring,
-                y: sin(angle) * ring
+                x: componentAnchor.x + cos(angle) * radius,
+                y: componentAnchor.y + sin(angle) * radius
             )
         }
     }
@@ -805,33 +967,42 @@ enum NoteGraphLayoutEngine {
         pinnedNodeID: URL?,
         nodes: [NoteGraphNode]
     ) -> [CGPoint] {
-        let sourcePositions = positions
-        let xValues = sourcePositions.map(\.x)
-        let yValues = sourcePositions.map(\.y)
-        let minX = xValues.min() ?? -1
-        let maxX = xValues.max() ?? 1
-        let minY = yValues.min() ?? -1
-        let maxY = yValues.max() ?? 1
-        let width = max(maxX - minX, 0.01)
-        let height = max(maxY - minY, 0.01)
-        let scale = 1.8 / max(width, height)
-        let center = CGPoint(x: (minX + maxX) / 2, y: (minY + maxY) / 2)
-
-        return sourcePositions.enumerated().map { index, point in
-            if nodes[index].id == pinnedNodeID {
-                return .zero
+        if let pinnedNodeID {
+            let adjusted = positions.enumerated().map { index, point in
+                nodes[index].id == pinnedNodeID ? CGPoint.zero : point
             }
+            let maxRadius = adjusted
+                .enumerated()
+                .filter { nodes[$0.offset].id != pinnedNodeID }
+                .map { hypot($0.element.x, $0.element.y) }
+                .max() ?? 1
+            let scale = 1.68 / max(maxRadius, 0.01)
 
-            return CGPoint(
-                x: (point.x - center.x) * scale,
-                y: (point.y - center.y) * scale
-            )
+            return adjusted.enumerated().map { index, point in
+                nodes[index].id == pinnedNodeID
+                    ? .zero
+                    : CGPoint(x: point.x * scale, y: point.y * scale)
+            }
+        }
+
+        let centroid = CGPoint(
+            x: positions.map(\.x).reduce(0, +) / CGFloat(max(positions.count, 1)),
+            y: positions.map(\.y).reduce(0, +) / CGFloat(max(positions.count, 1))
+        )
+        let recentered = positions.map {
+            CGPoint(x: $0.x - centroid.x, y: $0.y - centroid.y)
+        }
+        let maxRadius = recentered.map { hypot($0.x, $0.y) }.max() ?? 1
+        let scale = 1.68 / max(maxRadius, 0.01)
+
+        return recentered.map { point in
+            CGPoint(x: point.x * scale, y: point.y * scale)
         }
     }
 
-    private static func jitterValue(for url: URL, seed: Int) -> CGFloat {
+    private static func random01(for key: String, seed: Int, salt: Int) -> CGFloat {
         var hash: UInt64 = 14_695_981_039_346_656_037
-        for byte in (url.path + "#\(seed)").utf8 {
+        for byte in "\(key)#\(seed)#\(salt)".utf8 {
             hash ^= UInt64(byte)
             hash &*= 1_099_511_628_211
         }
