@@ -105,9 +105,19 @@ private struct ConfigurablePreviewCodeBlockStyle: StructuredText.CodeBlockStyle 
 }
 
 private struct HTMLPreviewWebView: NSViewRepresentable {
-    final class Coordinator {
+    final class Coordinator: NSObject, WKScriptMessageHandler {
         var lastHTML: String?
         var lastBaseURL: URL?
+
+        func userContentController(
+            _ userContentController: WKUserContentController,
+            didReceive message: WKScriptMessage
+        ) {
+            guard message.name == "openLink",
+                  let urlString = message.body as? String,
+                  let url = URL(string: urlString) else { return }
+            NSWorkspace.shared.open(url)
+        }
     }
 
     let html: String
@@ -120,6 +130,27 @@ private struct HTMLPreviewWebView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.preferences.setValue(true, forKey: "developerExtrasEnabled")
+
+        let script = WKUserScript(
+            source: """
+            document.addEventListener('click', function(e) {
+                var target = e.target;
+                while (target && target.tagName !== 'A') {
+                    target = target.parentElement;
+                }
+                if (target && target.href && target.href.startsWith('http')) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    window.webkit.messageHandlers.openLink.postMessage(target.href);
+                }
+            }, true);
+            """,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true
+        )
+        configuration.userContentController.addUserScript(script)
+        configuration.userContentController.add(context.coordinator, name: "openLink")
+
         return WKWebView(frame: .zero, configuration: configuration)
     }
 

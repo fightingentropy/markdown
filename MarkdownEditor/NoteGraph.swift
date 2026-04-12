@@ -45,6 +45,18 @@ struct NoteGraphSnapshot: Sendable, Equatable {
         return nodes.first(where: { $0.id == selectedNodeID })
     }
 
+    func backlinks(to targetID: URL?) -> [NoteGraphNode] {
+        guard let targetID else { return [] }
+
+        let sourceIDs = Set(edges.compactMap { edge -> URL? in
+            edge.target == targetID ? edge.source : nil
+        })
+
+        return nodes
+            .filter { sourceIDs.contains($0.id) }
+            .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+
     func neighbors(of nodeID: URL?) -> [NoteGraphNode] {
         guard let nodeID else { return [] }
 
