@@ -265,6 +265,10 @@ struct ZoomableImageScrollView: NSViewRepresentable {
             _zoomScale = zoomScale
         }
 
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+        }
+
         @objc
         func handleEndMagnify(_ notification: Notification) {
             updateZoomScale(from: notification.object)
