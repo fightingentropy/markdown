@@ -212,6 +212,65 @@ enum PreviewStylesheet {
         margin: 1em 0;
     }
 
+    .youtube-card {
+        display: block;
+        border: none;
+        border-radius: 12px;
+        overflow: hidden;
+        margin: 0.8em 0;
+        background: rgba(0,0,0,0.04);
+        text-decoration: none;
+        transition: none;
+    }
+
+    .youtube-card:hover {
+        border-bottom: none;
+    }
+
+    .youtube-thumb-wrap {
+        position: relative;
+        width: 100%;
+        aspect-ratio: 16/9;
+        overflow: hidden;
+        background: #000;
+    }
+
+    .youtube-thumb {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        border-radius: 0;
+        margin: 0;
+    }
+
+    .youtube-play {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        opacity: 0.85;
+        transition: opacity 0.15s, transform 0.15s;
+    }
+
+    .youtube-card:hover .youtube-play {
+        opacity: 1;
+    }
+
+    .youtube-title {
+        display: block;
+        padding: 10px 14px;
+        font-size: 0.9em;
+        font-weight: 500;
+        line-height: 1.4;
+        color: #1d1d1f;
+    }
+
+    @media (prefers-color-scheme: dark) {
+        .youtube-card { background: rgba(255,255,255,0.06); }
+        .youtube-card:hover { border-bottom: none; }
+        .youtube-title { color: #f5f5f7; }
+    }
+
     .mermaid-diagram {
         text-align: center;
         margin: 1.2em 0;

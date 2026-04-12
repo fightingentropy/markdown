@@ -250,6 +250,10 @@ struct AssetResolver {
     }
 }
 
+private let youtubeURLPattern = try! NSRegularExpression(
+    pattern: #"(?:youtube\.com/watch\?[^\s"]*v=|youtu\.be/|youtube\.com/embed/)([a-zA-Z0-9_-]{11})"#
+)
+
 enum MarkdownPreprocessor {
     static func preprocess(_ markdown: String, context: PreviewContext) -> PreviewDocument {
         let normalizedSource = markdown.replacingOccurrences(of: "\r\n", with: "\n")
@@ -357,6 +361,11 @@ enum MarkdownPreprocessor {
         return String(marker)
     }
 
+    static func containsYouTubeURL(_ text: String) -> Bool {
+        let range = NSRange(location: 0, length: (text as NSString).length)
+        return youtubeURLPattern.firstMatch(in: text, range: range) != nil
+    }
+
     private static func rewriteInlineSyntax(
         in line: String,
         resolver: AssetResolver,
@@ -364,6 +373,10 @@ enum MarkdownPreprocessor {
         documentURL: URL?,
         requiresHTMLFallback: inout Bool
     ) -> String {
+        if !requiresHTMLFallback && containsYouTubeURL(line) {
+            requiresHTMLFallback = true
+        }
+
         let characters = Array(line)
         var result = ""
         var index = 0
@@ -616,7 +629,58 @@ enum HTMLPreviewRenderer {
             widthAdjustedHTML = html
         }
 
-        return transformParagraphBlocks(in: widthAdjustedHTML)
+        let paragraphTransformed = transformParagraphBlocks(in: widthAdjustedHTML)
+        return transformYouTubeLinks(in: paragraphTransformed)
+    }
+
+    private static func extractYouTubeVideoID(from url: String) -> String? {
+        let range = NSRange(location: 0, length: (url as NSString).length)
+        guard let match = youtubeURLPattern.firstMatch(in: url, range: range) else { return nil }
+        let idRange = match.range(at: 1)
+        guard idRange.location != NSNotFound else { return nil }
+        return (url as NSString).substring(with: idRange)
+    }
+
+    private static func transformYouTubeLinks(in html: String) -> String {
+        // Match <a href="...youtube...">title</a> links
+        guard let linkRegex = try? NSRegularExpression(
+            pattern: #"<a\s+href="((?:https?://)?(?:www\.)?(?:youtube\.com/watch\?[^\s"]*v=[a-zA-Z0-9_-]{11}[^\s"]*|youtu\.be/[a-zA-Z0-9_-]{11}[^\s"]*))">(.*?)</a>"#
+        ) else { return html }
+
+        let nsHTML = html as NSString
+        let range = NSRange(location: 0, length: nsHTML.length)
+        var result = html
+
+        for match in linkRegex.matches(in: html, range: range).reversed() {
+            let urlRange = match.range(at: 1)
+            let titleRange = match.range(at: 2)
+            guard urlRange.location != NSNotFound, titleRange.location != NSNotFound else { continue }
+
+            let url = nsHTML.substring(with: urlRange)
+            let title = nsHTML.substring(with: titleRange)
+            guard let videoID = extractYouTubeVideoID(from: url) else { continue }
+
+            let displayTitle = title == url ? "" : title
+            let thumbnailURL = "https://img.youtube.com/vi/\(videoID)/hqdefault.jpg"
+
+            var card = """
+            <a href="\(url)" class="youtube-card">
+            <div class="youtube-thumb-wrap">
+            <img class="youtube-thumb" src="\(thumbnailURL)" alt="">
+            <div class="youtube-play"><svg viewBox="0 0 68 48" width="68" height="48"><path d="M66.52 7.74c-.78-2.93-2.49-5.41-5.42-6.19C55.79.13 34 0 34 0S12.21.13 6.9 1.55C3.97 2.33 2.27 4.81 1.48 7.74.06 13.05 0 24 0 24s.06 10.95 1.48 16.26c.78 2.93 2.49 5.41 5.42 6.19C12.21 47.87 34 48 34 48s21.79-.13 27.1-1.55c2.93-.78 4.64-3.26 5.42-6.19C67.94 34.95 68 24 68 24s-.06-10.95-1.48-16.26z" fill="red"/><path d="M45 24 27 14v20" fill="white"/></svg></div>
+            </div>
+            """
+
+            if !displayTitle.isEmpty {
+                card += "<span class=\"youtube-title\">\(displayTitle)</span>"
+            }
+
+            card += "</a>"
+
+            result = (result as NSString).replacingCharacters(in: match.range, with: card)
+        }
+
+        return result
     }
 
     private static func transformParagraphBlocks(in html: String) -> String {

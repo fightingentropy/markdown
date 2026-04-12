@@ -131,13 +131,40 @@ struct NoteGraphView: View {
         ZStack {
             Canvas { context, canvasSize in
                 drawEdges(in: &context, size: canvasSize)
+                drawNodes(in: &context, size: canvasSize)
             }
             .allowsHitTesting(false)
 
-            ForEach(snapshot.nodes) { node in
+            ForEach(labeledNodes) { node in
                 if let position = layout.positions[node.id] {
-                    graphNode(node, position: transformed(position, in: size))
+                    nodeLabel(node, position: transformed(position, in: size))
                 }
+            }
+
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture { location in
+                    handleNodeTap(at: location, in: size)
+                }
+                .allowsHitTesting(true)
+        }
+    }
+
+    private var labeledNodes: [NoteGraphNode] {
+        let ids = visibleLabelNodeIDs
+        return snapshot.nodes.filter { ids.contains($0.id) }
+    }
+
+    private func handleNodeTap(at location: CGPoint, in size: CGSize) {
+        let tapRadius: CGFloat = 16
+        for node in snapshot.nodes {
+            guard let position = layout.positions[node.id] else { continue }
+            let screenPos = transformed(position, in: size)
+            let dx = location.x - screenPos.x
+            let dy = location.y - screenPos.y
+            if dx * dx + dy * dy <= tapRadius * tapRadius {
+                workspace.selectFile(node.url)
+                return
             }
         }
     }
@@ -162,50 +189,53 @@ struct NoteGraphView: View {
         }
     }
 
-    private func graphNode(_ node: NoteGraphNode, position: CGPoint) -> some View {
-        let size = nodeDiameter(for: node)
-        let isSelected = snapshot.selectedNodeID == node.id
-        let isHovered = hoveredNodeID == node.id
-        let shouldShowLabel = visibleLabelNodeIDs.contains(node.id)
+    private func drawNodes(in context: inout GraphicsContext, size: CGSize) {
+        for node in snapshot.nodes {
+            guard let position = layout.positions[node.id] else { continue }
+            let screenPos = transformed(position, in: size)
+            let diameter = nodeDiameter(for: node)
+            let isSelected = snapshot.selectedNodeID == node.id
+            let rect = CGRect(
+                x: screenPos.x - diameter / 2,
+                y: screenPos.y - diameter / 2,
+                width: diameter,
+                height: diameter
+            )
 
-        return Button {
-            workspace.selectFile(node.url)
-        } label: {
-            ZStack(alignment: .top) {
-                Circle()
-                    .fill(nodeFill(for: node))
-                    .frame(width: size, height: size)
-                    .overlay {
-                        Circle()
-                            .strokeBorder(nodeStroke(for: node), lineWidth: isSelected ? 2.4 : 1)
-                    }
-                    .shadow(color: .black.opacity(isSelected ? 0.28 : 0.12), radius: isSelected ? 12 : 6, y: 4)
-
-                if shouldShowLabel {
-                    Text(node.title)
-                        .font(isSelected ? .headline : .caption.weight(.medium))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(.ultraThinMaterial, in: Capsule(style: .continuous))
-                        .overlay {
-                            Capsule(style: .continuous)
-                                .strokeBorder(.white.opacity(0.08))
-                        }
-                        .offset(y: size * 0.86)
-                }
+            if isSelected {
+                let shadowRect = rect.insetBy(dx: -6, dy: -6)
+                context.fill(
+                    Circle().path(in: shadowRect),
+                    with: .color(Color.accentColor.opacity(0.18))
+                )
             }
-            .contentShape(Rectangle())
+
+            context.fill(Circle().path(in: rect), with: .color(nodeFill(for: node)))
+            context.stroke(
+                Circle().path(in: rect),
+                with: .color(nodeStroke(for: node)),
+                style: StrokeStyle(lineWidth: isSelected ? 2.4 : 1)
+            )
         }
-        .buttonStyle(.plain)
-        .position(position)
-        .scaleEffect(isHovered ? 1.08 : 1)
-        .animation(.spring(response: 0.22, dampingFraction: 0.82), value: isHovered)
-        .onHover { isHovering in
-            hoveredNodeID = isHovering ? node.id : (hoveredNodeID == node.id ? nil : hoveredNodeID)
-        }
-        .help(node.relativePath)
+    }
+
+    private func nodeLabel(_ node: NoteGraphNode, position: CGPoint) -> some View {
+        let isSelected = snapshot.selectedNodeID == node.id
+        let size = nodeDiameter(for: node)
+
+        return Text(node.title)
+            .font(isSelected ? .headline : .caption.weight(.medium))
+            .foregroundStyle(.primary)
+            .lineLimit(1)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+            .overlay {
+                Capsule(style: .continuous)
+                    .strokeBorder(.white.opacity(0.08))
+            }
+            .position(x: position.x, y: position.y + size * 0.86)
+            .allowsHitTesting(false)
     }
 
     private func selectedNodePanel(_ selectedNode: NoteGraphNode) -> some View {
