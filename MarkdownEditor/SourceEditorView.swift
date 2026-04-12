@@ -299,6 +299,7 @@ struct SourceEditorView: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = false
         textView.delegate = coordinator
         textView.modifiedLinkDelegate = coordinator
+        textView.textStorage?.delegate = coordinator
     }
 
     private func updateTextLayout(for scrollView: NSScrollView, textView: NSTextView) {
@@ -315,7 +316,7 @@ struct SourceEditorView: NSViewRepresentable {
     }
 
     @MainActor
-    final class Coordinator: NSObject, NSTextViewDelegate, SourceTextViewDelegate {
+    final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate, SourceTextViewDelegate {
         private struct AppearanceSignature: Equatable {
             let fontChoice: MonospacedFontChoice
             let fontSize: Double
@@ -327,6 +328,7 @@ struct SourceEditorView: NSViewRepresentable {
         private var isApplyingExternalText = false
         private var lastAppearanceSignature: AppearanceSignature?
         private let highlighter: SyntaxHighlighter
+        private var pendingEditedRange: NSRange?
         private weak var observedClipView: NSClipView?
         private var currentDocumentIdentity: String?
         private var lastSelectionRange: NSRange?
@@ -334,6 +336,12 @@ struct SourceEditorView: NSViewRepresentable {
         init(_ parent: SourceEditorView) {
             self.parent = parent
             self.highlighter = SyntaxHighlighter(preferences: parent.preferences)
+        }
+
+        deinit {
+            if let observedClipView {
+                NotificationCenter.default.removeObserver(self, name: NSView.frameDidChangeNotification, object: observedClipView)
+            }
         }
 
         func observeSizeChanges(of scrollView: NSScrollView) {
@@ -470,15 +478,30 @@ struct SourceEditorView: NSViewRepresentable {
             }
         }
 
+        nonisolated func textStorage(
+            _ textStorage: NSTextStorage,
+            didProcessEditing editedMask: NSTextStorageEditActions,
+            range editedRange: NSRange,
+            changeInLength delta: Int
+        ) {
+            guard editedMask.contains(.editedCharacters) else { return }
+            MainActor.assumeIsolated {
+                pendingEditedRange = editedRange
+            }
+        }
+
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             guard !isApplyingExternalText else { return }
+
+            let editedRange = pendingEditedRange
+            pendingEditedRange = nil
 
             parent.text = textView.string
             highlight(
                 textView,
                 preservingViewport: false,
-                editedRange: textView.textStorage?.editedRange
+                editedRange: editedRange
             )
         }
 

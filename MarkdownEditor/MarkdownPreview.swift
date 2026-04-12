@@ -118,6 +118,10 @@ private struct HTMLPreviewWebView: NSViewRepresentable {
                   let url = URL(string: urlString) else { return }
             NSWorkspace.shared.open(url)
         }
+
+        func tearDown(_ webView: WKWebView) {
+            webView.configuration.userContentController.removeScriptMessageHandler(forName: "openLink")
+        }
     }
 
     let html: String
@@ -162,5 +166,9 @@ private struct HTMLPreviewWebView: NSViewRepresentable {
         context.coordinator.lastHTML = html
         context.coordinator.lastBaseURL = baseURL
         nsView.loadHTMLString(html, baseURL: baseURL)
+    }
+
+    static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
+        coordinator.tearDown(nsView)
     }
 }
