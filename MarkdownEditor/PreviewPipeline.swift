@@ -548,6 +548,44 @@ enum MarkdownPreprocessor {
 enum HTMLPreviewRenderer {
     private static let gfmExtensionNames = ["table", "strikethrough", "autolink"]
 
+    // Pre-compiled regexes used in the post-processing hot path.
+    // Compiling NSRegularExpression is relatively expensive; re-compiling on
+    // every render (which happens on every keystroke in the editor) was
+    // repeatedly rebuilding these. Cache them once at first use.
+    private static let obsidianWidthTitlePattern = try! NSRegularExpression(
+        pattern: #"title="codex-obsidian-width-(\d+)""#
+    )
+    private static let youtubeAnchorPattern = try! NSRegularExpression(
+        pattern: #"<a\s+href="((?:https?://)?(?:www\.)?(?:youtube\.com/watch\?[^\s"]*v=[a-zA-Z0-9_-]{11}[^\s"]*|youtu\.be/[a-zA-Z0-9_-]{11}[^\s"]*))">(.*?)</a>"#
+    )
+    private static let paragraphBlockPattern = try! NSRegularExpression(
+        pattern: #"<p>((?s:.*?))</p>"#
+    )
+    private static let bareURLPattern = try! NSRegularExpression(
+        pattern: #"(?<![=\"'])https?://[^\s<\"]+"#
+    )
+    private static let strikethroughPattern = try! NSRegularExpression(
+        pattern: #"~~(.+?)~~"#
+    )
+    private static let tableAlignmentPattern = try! NSRegularExpression(
+        pattern: #"^[\s|:\-]+$"#
+    )
+
+    // Cache of rendered mermaid SVGs keyed by the mermaid source text.
+    // The preview pipeline re-runs on every text change; diagrams are
+    // expensive to stringify and the common case is that a diagram is
+    // unchanged between successive renders.
+    //
+    // `NSCache` is documented thread-safe, but the Swift 6 compiler does not
+    // (yet) recognise it as `Sendable`, so the `nonisolated(unsafe)`
+    // annotation opts out of strict-concurrency checking for this one
+    // reference. The cache itself handles locking internally.
+    nonisolated(unsafe) private static let mermaidSVGCache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 128
+        return cache
+    }()
+
     static func render(document: PreviewDocument) -> String {
         document.segments.map(render).joined(separator: "\n")
     }
@@ -569,7 +607,13 @@ enum HTMLPreviewRenderer {
                 )
             }
 
-            return "<div class=\"mermaid-diagram\">\(MermaidRenderer.renderToSVG(diagram))</div>"
+            let key = source as NSString
+            if let cached = mermaidSVGCache.object(forKey: key) {
+                return cached as String
+            }
+            let rendered = "<div class=\"mermaid-diagram\">\(MermaidRenderer.renderToSVG(diagram))</div>"
+            mermaidSVGCache.setObject(rendered as NSString, forKey: key)
+            return rendered
         }
     }
 
@@ -616,18 +660,12 @@ enum HTMLPreviewRenderer {
     }
 
     private static func applyAppSpecificPostProcessing(to html: String) -> String {
-        let pattern = #"title="codex-obsidian-width-(\d+)""#
-        let widthAdjustedHTML: String
-        if let regex = try? NSRegularExpression(pattern: pattern) {
-            let range = NSRange(location: 0, length: (html as NSString).length)
-            widthAdjustedHTML = regex.stringByReplacingMatches(
-                in: html,
-                range: range,
-                withTemplate: "width=\"$1\""
-            )
-        } else {
-            widthAdjustedHTML = html
-        }
+        let range = NSRange(location: 0, length: (html as NSString).length)
+        let widthAdjustedHTML = obsidianWidthTitlePattern.stringByReplacingMatches(
+            in: html,
+            range: range,
+            withTemplate: "width=\"$1\""
+        )
 
         let paragraphTransformed = transformParagraphBlocks(in: widthAdjustedHTML)
         return transformYouTubeLinks(in: paragraphTransformed)
@@ -642,16 +680,13 @@ enum HTMLPreviewRenderer {
     }
 
     private static func transformYouTubeLinks(in html: String) -> String {
-        // Match <a href="...youtube...">title</a> links
-        guard let linkRegex = try? NSRegularExpression(
-            pattern: #"<a\s+href="((?:https?://)?(?:www\.)?(?:youtube\.com/watch\?[^\s"]*v=[a-zA-Z0-9_-]{11}[^\s"]*|youtu\.be/[a-zA-Z0-9_-]{11}[^\s"]*))">(.*?)</a>"#
-        ) else { return html }
-
         let nsHTML = html as NSString
         let range = NSRange(location: 0, length: nsHTML.length)
-        var result = html
+        let matches = youtubeAnchorPattern.matches(in: html, range: range)
+        guard !matches.isEmpty else { return html }
 
-        for match in linkRegex.matches(in: html, range: range).reversed() {
+        var result = html
+        for match in matches.reversed() {
             let urlRange = match.range(at: 1)
             let titleRange = match.range(at: 2)
             guard urlRange.location != NSNotFound, titleRange.location != NSNotFound else { continue }
@@ -684,14 +719,12 @@ enum HTMLPreviewRenderer {
     }
 
     private static func transformParagraphBlocks(in html: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: #"<p>((?s:.*?))</p>"#) else {
-            return html
-        }
-
         let nsHTML = html as NSString
         let range = NSRange(location: 0, length: nsHTML.length)
+        let matches = paragraphBlockPattern.matches(in: html, range: range)
+        guard !matches.isEmpty else { return html }
+
         var transformed = html
-        let matches = regex.matches(in: html, range: range)
 
         for match in matches.reversed() {
             let contentRange = match.range(at: 1)
@@ -719,8 +752,12 @@ enum HTMLPreviewRenderer {
     private static func renderTableParagraphIfNeeded(from paragraphContent: String) -> String? {
         let lines = paragraphContent.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         guard lines.count >= 2,
-              lines[0].contains("|"),
-              lines[1].range(of: #"^[\s|:\-]+$"#, options: .regularExpression) != nil else {
+              lines[0].contains("|") else {
+            return nil
+        }
+        let alignmentLine = lines[1] as NSString
+        let alignmentRange = NSRange(location: 0, length: alignmentLine.length)
+        guard tableAlignmentPattern.firstMatch(in: lines[1], range: alignmentRange) != nil else {
             return nil
         }
 
@@ -754,15 +791,13 @@ enum HTMLPreviewRenderer {
     }
 
     private static func autolinkBareURLs(in string: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: #"(?<![=\"'])https?://[^\s<\"]+"#) else {
-            return string
-        }
-
         let nsString = string as NSString
         let range = NSRange(location: 0, length: nsString.length)
-        var result = string
+        let matches = bareURLPattern.matches(in: string, range: range)
+        guard !matches.isEmpty else { return string }
 
-        for match in regex.matches(in: string, range: range).reversed() {
+        var result = string
+        for match in matches.reversed() {
             let url = nsString.substring(with: match.range)
             let replacement = "<a href=\"\(url)\">\(url)</a>"
             result = (result as NSString).replacingCharacters(in: match.range, with: replacement)
@@ -772,15 +807,13 @@ enum HTMLPreviewRenderer {
     }
 
     private static func replaceStrikethrough(in string: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: #"~~(.+?)~~"#) else {
-            return string
-        }
-
         let nsString = string as NSString
         let range = NSRange(location: 0, length: nsString.length)
-        var result = string
+        let matches = strikethroughPattern.matches(in: string, range: range)
+        guard !matches.isEmpty else { return string }
 
-        for match in regex.matches(in: string, range: range).reversed() {
+        var result = string
+        for match in matches.reversed() {
             let innerRange = match.range(at: 1)
             guard innerRange.location != NSNotFound else {
                 continue

@@ -9,18 +9,22 @@ struct CommandPaletteView: View {
     let onDismiss: () -> Void
 
     @State private var query = ""
+    // Debounced mirror of `query` used by the result filter so that a single
+    // keystroke doesn't force a full O(files * string-compare) rescan on
+    // every character — visible as input lag on larger vaults.
+    @State private var activeQuery = ""
     @FocusState private var isSearchFieldFocused: Bool
 
     private var filteredFiles: [FileItem] {
         let files = workspace.sortedFiles
-        if query.isEmpty {
+        if activeQuery.isEmpty {
             return files
         }
 
         return files.filter { file in
-            workspace.title(for: file).localizedStandardContains(query) ||
-            file.displayName.localizedStandardContains(query) ||
-            file.name.localizedStandardContains(query)
+            workspace.title(for: file).localizedStandardContains(activeQuery) ||
+            file.displayName.localizedStandardContains(activeQuery) ||
+            file.name.localizedStandardContains(activeQuery)
         }
     }
 
@@ -98,6 +102,21 @@ struct CommandPaletteView: View {
         }
         .onExitCommand {
             dismiss()
+        }
+        .task(id: query) {
+            // Treat empty queries as immediate so the default file list
+            // appears without flicker. Otherwise wait ~120ms so a burst of
+            // keystrokes collapses into a single filter pass.
+            if query.isEmpty {
+                activeQuery = ""
+                return
+            }
+            do {
+                try await Task.sleep(nanoseconds: 120_000_000)
+            } catch {
+                return
+            }
+            activeQuery = query
         }
     }
 
