@@ -1,9 +1,16 @@
 import Foundation
+import Security
 
 @Observable
 @MainActor
 final class AssistantSettings {
     static let supportedModels: [AssistantModel] = [
+        AssistantModel(
+            id: "claude-subscription",
+            displayName: "Claude (Subscription)",
+            endpoint: URL(string: "cli:claude")!,
+            apiStyle: .claudeCodeCLI
+        ),
         AssistantModel(
             id: "gpt-5.4",
             displayName: "GPT-5.4",
@@ -105,20 +112,28 @@ final class AssistantSettings {
         }
     }
 
+    /// True when the assistant is ready to take a request for the currently
+    /// selected model — either because the user provided an API key, or
+    /// because the active model uses a local credential source (the
+    /// `claude` CLI / Claude subscription) that doesn't need one.
     var isConfigured: Bool {
-        !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if let model = Self.model(for: selectedModel), !model.requiresAPIKey {
+            return true
+        }
+        return !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private let userDefaults: UserDefaults
 
-    // Keychain identifiers used for the assistant API key. The service is
-    // scoped to the bundle identifier so multiple builds (e.g. local dev
-    // install vs. shipped build) do not trample each other.
-    private static let keychainService: String = {
+    // The app stores the OpenAI API key in `UserDefaults`. A prior build
+    // briefly stored it in the Keychain — these identifiers exist only so
+    // we can migrate that value back into `UserDefaults` and wipe the
+    // Keychain slot on launch. No new writes are ever made to the Keychain.
+    private static let legacyKeychainService: String = {
         let bundleID = Bundle.main.bundleIdentifier ?? "com.md.MarkdownEditor"
         return "\(bundleID).assistant"
     }()
-    private static let keychainAccount = "openai.apiKey"
+    private static let legacyKeychainAccount = "openai.apiKey"
 
     private static let apiKeyDefaultsKey = "assistant.apiKey"
     private static let modelDefaultsKey = "assistant.selectedModel"
@@ -144,35 +159,19 @@ final class AssistantSettings {
     ) {
         self.userDefaults = userDefaults
 
-        // Prefer Keychain-stored API keys. If the key is still only present
-        // in the legacy `UserDefaults` location (pre-migration installs),
-        // move it into the Keychain and scrub the plist entry so the secret
-        // stops living in plain text on disk.
-        if let keychainKey = KeychainStore.readString(
-            service: Self.keychainService,
-            account: Self.keychainAccount
-        ) {
-            self.apiKey = keychainKey
-            if userDefaults.object(forKey: Self.apiKeyDefaultsKey) != nil {
-                userDefaults.removeObject(forKey: Self.apiKeyDefaultsKey)
-            }
-        } else if let legacyKey = userDefaults.string(forKey: Self.apiKeyDefaultsKey) {
-            let trimmed = legacyKey.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty,
-               KeychainStore.writeString(
-                trimmed,
-                service: Self.keychainService,
-                account: Self.keychainAccount
-               ) {
-                userDefaults.removeObject(forKey: Self.apiKeyDefaultsKey)
-                self.apiKey = trimmed
-            } else {
-                // Keychain write failed (e.g. boot before first unlock on a
-                // headless runner). Keep the legacy value in memory so the
-                // user's assistant still works this session; the next write
-                // attempt will try again.
-                self.apiKey = legacyKey
-            }
+        // Migrate any value left behind in the Keychain by the earlier
+        // build back into `UserDefaults`, then delete the Keychain entry
+        // unconditionally. After this one-shot cleanup the app never
+        // touches the Keychain again.
+        let keychainLeftover = Self.readLegacyKeychainValue()
+        Self.deleteLegacyKeychainValue()
+
+        if let storedKey = userDefaults.string(forKey: Self.apiKeyDefaultsKey),
+           !storedKey.isEmpty {
+            self.apiKey = storedKey
+        } else if let keychainLeftover, !keychainLeftover.isEmpty {
+            self.apiKey = keychainLeftover
+            userDefaults.set(keychainLeftover, forKey: Self.apiKeyDefaultsKey)
         } else {
             self.apiKey = ""
         }
@@ -222,35 +221,60 @@ final class AssistantSettings {
 
     private func persistAPIKey() {
         let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Always clear the legacy `UserDefaults` slot so we don't leave a
-        // stale copy on disk after a rewrite.
-        if userDefaults.object(forKey: Self.apiKeyDefaultsKey) != nil {
-            userDefaults.removeObject(forKey: Self.apiKeyDefaultsKey)
-        }
+        // Belt-and-suspenders: if a legacy Keychain entry was somehow
+        // re-created (e.g. the user rolled forward and back between
+        // builds), remove it every time we touch the key.
+        Self.deleteLegacyKeychainValue()
 
         if trimmed.isEmpty {
-            KeychainStore.delete(
-                service: Self.keychainService,
-                account: Self.keychainAccount
-            )
+            userDefaults.removeObject(forKey: Self.apiKeyDefaultsKey)
             return
         }
 
-        KeychainStore.writeString(
-            trimmed,
-            service: Self.keychainService,
-            account: Self.keychainAccount
-        )
-
+        userDefaults.set(trimmed, forKey: Self.apiKeyDefaultsKey)
         if apiKey != trimmed {
             apiKey = trimmed
         }
+    }
+
+    // MARK: - One-shot Keychain cleanup
+
+    private static func readLegacyKeychainValue() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: legacyKeychainService,
+            kSecAttrAccount as String: legacyKeychainAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess,
+              let data = result as? Data,
+              let string = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return string
+    }
+
+    private static func deleteLegacyKeychainValue() {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: legacyKeychainService,
+            kSecAttrAccount as String: legacyKeychainAccount
+        ]
+        SecItemDelete(query as CFDictionary)
     }
 }
 
 struct AssistantModel: Identifiable, Equatable {
     enum APIStyle: Equatable {
+        /// OpenAI-compatible `POST /v1/chat/completions` with an API key.
         case chatCompletions
+        /// Runs the locally installed `claude` CLI (Claude Code) which
+        /// authenticates against the user's Claude subscription — no API
+        /// key is required.
+        case claudeCodeCLI
     }
 
     let id: String
@@ -271,6 +295,18 @@ struct AssistantModel: Identifiable, Equatable {
         self.endpoint = endpoint
         self.apiStyle = apiStyle
         self.supportedReasoningEfforts = supportedReasoningEfforts
+    }
+
+    /// Whether the user needs to supply an API key for this model. CLI-
+    /// based models (e.g. the Claude subscription bridge) authenticate via
+    /// the local CLI's stored credentials and don't need one.
+    var requiresAPIKey: Bool {
+        switch apiStyle {
+        case .chatCompletions:
+            return true
+        case .claudeCodeCLI:
+            return false
+        }
     }
 }
 

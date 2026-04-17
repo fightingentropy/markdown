@@ -89,8 +89,15 @@ final class NoteAssistant {
             return
         }
 
+        guard let model = AssistantSettings.model(for: settings.selectedModel) else {
+            errorMessage = "Selected assistant model is not available."
+            return
+        }
+
         guard settings.isConfigured else {
-            errorMessage = "Add your OpenAI API key in Settings first."
+            errorMessage = model.requiresAPIKey
+                ? "Add your OpenAI API key in Settings first."
+                : "Assistant isn't available right now."
             return
         }
 
@@ -107,13 +114,6 @@ final class NoteAssistant {
         draft = ""
         errorMessage = nil
         isSending = true
-        guard let model = AssistantSettings.model(for: settings.selectedModel) else {
-            errorMessage = "Selected assistant model is not available."
-            messages.removeAll { $0.id == assistantMessage.id || $0.id == userMessage.id }
-            draft = prompt
-            isSending = false
-            return
-        }
         let configuration = AssistantRequestConfiguration(
             apiKey: settings.apiKey,
             model: model,
@@ -123,29 +123,20 @@ final class NoteAssistant {
         )
 
         do {
-            let streamedReply = try await NoteAssistantClient().streamReply(
-                to: requestMessages,
-                context: context,
-                configuration: configuration
-            ) { [weak self] partialReply in
-                guard let self else { return }
-                self.updateAssistantMessage(id: assistantMessage.id, text: partialReply)
-            }
-            guard currentContext?.fileURL == context.fileURL else {
-                isSending = false
-                return
-            }
-            if streamedReply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let fallbackReply = try await NoteAssistantClient().reply(
-                    to: requestMessages,
+            switch model.apiStyle {
+            case .chatCompletions:
+                try await runChatCompletions(
+                    requestMessages: requestMessages,
                     context: context,
-                    configuration: configuration
+                    configuration: configuration,
+                    assistantMessageID: assistantMessage.id
                 )
-                guard currentContext?.fileURL == context.fileURL else {
-                    isSending = false
-                    return
-                }
-                updateAssistantMessage(id: assistantMessage.id, text: fallbackReply)
+            case .claudeCodeCLI:
+                try await runClaudeSubscription(
+                    requestMessages: requestMessages,
+                    context: context,
+                    assistantMessageID: assistantMessage.id
+                )
             }
         } catch {
             guard currentContext?.fileURL == context.fileURL else {
@@ -164,6 +155,51 @@ final class NoteAssistant {
         }
 
         isSending = false
+    }
+
+    private func runChatCompletions(
+        requestMessages: [NoteAssistantMessage],
+        context: NoteAssistantContext,
+        configuration: AssistantRequestConfiguration,
+        assistantMessageID: UUID
+    ) async throws {
+        let streamedReply = try await NoteAssistantClient().streamReply(
+            to: requestMessages,
+            context: context,
+            configuration: configuration
+        ) { [weak self] partialReply in
+            guard let self else { return }
+            self.updateAssistantMessage(id: assistantMessageID, text: partialReply)
+        }
+        guard currentContext?.fileURL == context.fileURL else { return }
+
+        if streamedReply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let fallbackReply = try await NoteAssistantClient().reply(
+                to: requestMessages,
+                context: context,
+                configuration: configuration
+            )
+            guard currentContext?.fileURL == context.fileURL else { return }
+            updateAssistantMessage(id: assistantMessageID, text: fallbackReply)
+        }
+    }
+
+    private func runClaudeSubscription(
+        requestMessages: [NoteAssistantMessage],
+        context: NoteAssistantContext,
+        assistantMessageID: UUID
+    ) async throws {
+        let prompts = ClaudeSubscriptionPromptBuilder.build(
+            messages: requestMessages,
+            context: context
+        )
+        _ = try await ClaudeSubscriptionClient().streamReply(
+            prompt: prompts.userPrompt,
+            systemPrompt: prompts.systemPrompt
+        ) { [weak self] partialReply in
+            guard let self else { return }
+            self.updateAssistantMessage(id: assistantMessageID, text: partialReply)
+        }
     }
 
     private func updateAssistantMessage(id: UUID, text: String) {
@@ -189,21 +225,24 @@ private struct NoteAssistantClient {
         configuration: AssistantRequestConfiguration,
         onDelta: @escaping @MainActor (String) -> Void
     ) async throws -> String {
+        guard configuration.model.apiStyle == .chatCompletions else {
+            throw NoteAssistantError.invalidResponse(
+                "This model cannot be used over the chat-completions API."
+            )
+        }
+
         var request = URLRequest(url: configuration.model.endpoint)
         request.httpMethod = "POST"
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         request.addValue("Bearer \(configuration.apiKey)", forHTTPHeaderField: "Authorization")
 
-        switch configuration.model.apiStyle {
-        case .chatCompletions:
-            let requestBody = ChatCompletionsRequest(
-                model: configuration.model.id,
-                messages: makeChatMessages(messages: messages, context: context),
-                reasoningEffort: configuration.reasoningEffort?.rawValue,
-                stream: true
-            )
-            request.httpBody = try JSONEncoder().encode(requestBody)
-        }
+        let requestBody = ChatCompletionsRequest(
+            model: configuration.model.id,
+            messages: makeChatMessages(messages: messages, context: context),
+            reasoningEffort: configuration.reasoningEffort?.rawValue,
+            stream: true
+        )
+        request.httpBody = try JSONEncoder().encode(requestBody)
 
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -218,10 +257,7 @@ private struct NoteAssistantClient {
             )
         }
 
-        switch configuration.model.apiStyle {
-        case .chatCompletions:
-            return try await consumeChatCompletionsStream(bytes: bytes, onDelta: onDelta)
-        }
+        return try await consumeChatCompletionsStream(bytes: bytes, onDelta: onDelta)
     }
 
     func reply(
@@ -229,21 +265,24 @@ private struct NoteAssistantClient {
         context: NoteAssistantContext,
         configuration: AssistantRequestConfiguration
     ) async throws -> String {
+        guard configuration.model.apiStyle == .chatCompletions else {
+            throw NoteAssistantError.invalidResponse(
+                "This model cannot be used over the chat-completions API."
+            )
+        }
+
         var request = URLRequest(url: configuration.model.endpoint)
         request.httpMethod = "POST"
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         request.addValue("Bearer \(configuration.apiKey)", forHTTPHeaderField: "Authorization")
 
-        switch configuration.model.apiStyle {
-        case .chatCompletions:
-            let requestBody = ChatCompletionsRequest(
-                model: configuration.model.id,
-                messages: makeChatMessages(messages: messages, context: context),
-                reasoningEffort: configuration.reasoningEffort?.rawValue,
-                stream: false
-            )
-            request.httpBody = try JSONEncoder().encode(requestBody)
-        }
+        let requestBody = ChatCompletionsRequest(
+            model: configuration.model.id,
+            messages: makeChatMessages(messages: messages, context: context),
+            reasoningEffort: configuration.reasoningEffort?.rawValue,
+            stream: false
+        )
+        request.httpBody = try JSONEncoder().encode(requestBody)
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -257,15 +296,12 @@ private struct NoteAssistantClient {
             )
         }
 
-        switch configuration.model.apiStyle {
-        case .chatCompletions:
-            let decoded = try JSONDecoder().decode(ChatCompletionsResponse.self, from: data)
-            let text = decoded.outputText.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else {
-                throw NoteAssistantError.invalidResponse("OpenAI returned an empty reply.")
-            }
-            return text
+        let decoded = try JSONDecoder().decode(ChatCompletionsResponse.self, from: data)
+        let text = decoded.outputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            throw NoteAssistantError.invalidResponse("OpenAI returned an empty reply.")
         }
+        return text
     }
 
     private func makeChatMessages(
@@ -430,5 +466,59 @@ private enum NoteAssistantError: LocalizedError {
         case .invalidResponse(let message):
             return message
         }
+    }
+}
+
+/// Serialises the in-memory chat history + note context into the two-part
+/// prompt shape the `claude` CLI wants: a system-prompt addendum carrying
+/// the note body, and a user-facing prompt that includes prior turns as
+/// plain text (since a one-shot `claude -p` invocation doesn't carry a
+/// multi-turn session across calls).
+enum ClaudeSubscriptionPromptBuilder {
+    struct Prompts {
+        let systemPrompt: String
+        let userPrompt: String
+    }
+
+    static func build(
+        messages: [NoteAssistantMessage],
+        context: NoteAssistantContext
+    ) -> Prompts {
+        let systemPrompt = """
+        You are a concise note assistant embedded in a macOS Markdown editor. \
+        Answer questions using the current markdown file as the primary source of \
+        truth. If the answer is not in the file, say so clearly. Prefer short \
+        direct answers, but use bullets when it improves clarity. Do not call \
+        any tools — respond with plain markdown text only.
+
+        Current file path: \(context.fileURL.path)
+        Current file title: \(context.title)
+
+        Current markdown file contents:
+        \(context.markdown)
+        """
+
+        // Every message up to (but not including) the last user message is
+        // prior context; the final user message is the prompt to answer. The
+        // caller always appends the latest user message before invoking us.
+        guard let latestUser = messages.last(where: { $0.role == .user }) else {
+            return Prompts(systemPrompt: systemPrompt, userPrompt: "")
+        }
+
+        let priorMessages = messages
+            .prefix(while: { $0.id != latestUser.id })
+            .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+        if priorMessages.isEmpty {
+            return Prompts(systemPrompt: systemPrompt, userPrompt: latestUser.text)
+        }
+
+        var transcript = "Previous conversation (for context):\n\n"
+        for message in priorMessages {
+            let speaker = message.role == .user ? "User" : "Assistant"
+            transcript += "\(speaker): \(message.text)\n\n"
+        }
+        transcript += "Current user message:\n\(latestUser.text)"
+        return Prompts(systemPrompt: systemPrompt, userPrompt: transcript)
     }
 }

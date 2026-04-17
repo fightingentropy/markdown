@@ -40,7 +40,7 @@ struct AppSettingsView: View {
             case .preview:
                 return "Rendered note presentation"
             case .assistant:
-                return "OpenAI connection and launcher tuning"
+                return "Assistant connection and launcher tuning"
             }
         }
 
@@ -173,13 +173,18 @@ struct AppSettingsView: View {
             statusPill(preferences.previewCodeFontChoice.title, systemImage: "curlybraces", tint: .secondary)
             statusPill("\(Int(preferences.previewPageWidth)) px page", systemImage: "rectangle", tint: .secondary)
         case .assistant:
+            let currentModel = AssistantSettings.model(for: assistantSettings.selectedModel)
             if assistantSettings.isConfigured {
-                statusPill("Key loaded", systemImage: "checkmark.circle.fill", tint: .green)
+                if currentModel?.requiresAPIKey == false {
+                    statusPill("Using Claude subscription", systemImage: "person.crop.circle.badge.checkmark", tint: .green)
+                } else {
+                    statusPill("Key loaded", systemImage: "checkmark.circle.fill", tint: .green)
+                }
             } else {
                 statusPill("Assistant disabled", systemImage: "exclamationmark.circle", tint: .orange)
             }
 
-            if let currentModel = AssistantSettings.model(for: assistantSettings.selectedModel) {
+            if let currentModel {
                 statusPill(currentModel.displayName, systemImage: "cpu", tint: selectedSection.accent)
 
                 if !currentModel.supportedReasoningEfforts.isEmpty {
@@ -354,30 +359,45 @@ struct AppSettingsView: View {
     }
 
     private var connectionSection: some View {
-        settingsCard(
+        let currentModel = AssistantSettings.model(for: assistantSettings.selectedModel)
+        let usesSubscription = currentModel?.requiresAPIKey == false
+
+        return settingsCard(
             title: "Assistant Connection",
-            description: "Store your OpenAI API key in this app on this Mac."
+            description: usesSubscription
+                ? "Claude (Subscription) uses the local Claude Code CLI — no API key needed."
+                : "Store your OpenAI API key in this app on this Mac."
         ) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 12) {
-                    if assistantSettings.isConfigured {
+                    if usesSubscription {
+                        statusPill("Using Claude subscription", systemImage: "person.crop.circle.badge.checkmark", tint: .green)
+                    } else if assistantSettings.isConfigured {
                         statusPill("Key saved in app", systemImage: "checkmark.circle.fill", tint: .green)
                     } else {
                         statusPill("Assistant disabled", systemImage: "exclamationmark.circle", tint: .orange)
                     }
                 }
 
-                SecureField("API key", text: $assistantSettings.apiKey)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($focusedField, equals: .apiKey)
-
-                HStack(spacing: 12) {
-                    Link("Create or manage API keys", destination: AssistantSettings.authURL)
-
-                    Text(assistantSettings.isConfigured ? "Saved in the app’s local settings." : "The assistant stays disabled until a key is entered.")
+                if usesSubscription {
+                    Text("The assistant will run the `claude` command-line tool under your Claude subscription. Install Claude Code if you haven't already.")
                         .foregroundStyle(.secondary)
+                        .font(.caption)
+                    Link("Install Claude Code", destination: URL(string: "https://claude.com/claude-code")!)
+                        .font(.caption)
+                } else {
+                    SecureField("API key", text: $assistantSettings.apiKey)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($focusedField, equals: .apiKey)
+
+                    HStack(spacing: 12) {
+                        Link("Create or manage API keys", destination: AssistantSettings.authURL)
+
+                        Text(assistantSettings.isConfigured ? "Saved in the app’s local settings." : "The assistant stays disabled until a key is entered.")
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
                 }
-                .font(.caption)
             }
         }
     }
@@ -385,7 +405,7 @@ struct AppSettingsView: View {
     private var modelSection: some View {
         settingsCard(
             title: "Assistant Model",
-            description: "Choose which OpenAI model the assistant should use for note questions."
+            description: "Pick which model answers note questions — your Claude subscription or an OpenAI API model."
         ) {
             VStack(alignment: .leading, spacing: 14) {
                 Picker("Assistant model", selection: $assistantSettings.selectedModel) {
