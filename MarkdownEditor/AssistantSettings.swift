@@ -111,6 +111,15 @@ final class AssistantSettings {
 
     private let userDefaults: UserDefaults
 
+    // Keychain identifiers used for the assistant API key. The service is
+    // scoped to the bundle identifier so multiple builds (e.g. local dev
+    // install vs. shipped build) do not trample each other.
+    private static let keychainService: String = {
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.md.MarkdownEditor"
+        return "\(bundleID).assistant"
+    }()
+    private static let keychainAccount = "openai.apiKey"
+
     private static let apiKeyDefaultsKey = "assistant.apiKey"
     private static let modelDefaultsKey = "assistant.selectedModel"
     private static let reasoningEffortDefaultsKey = "assistant.reasoningEffort"
@@ -134,7 +143,40 @@ final class AssistantSettings {
         userDefaults: UserDefaults = .standard
     ) {
         self.userDefaults = userDefaults
-        self.apiKey = userDefaults.string(forKey: Self.apiKeyDefaultsKey) ?? ""
+
+        // Prefer Keychain-stored API keys. If the key is still only present
+        // in the legacy `UserDefaults` location (pre-migration installs),
+        // move it into the Keychain and scrub the plist entry so the secret
+        // stops living in plain text on disk.
+        if let keychainKey = KeychainStore.readString(
+            service: Self.keychainService,
+            account: Self.keychainAccount
+        ) {
+            self.apiKey = keychainKey
+            if userDefaults.object(forKey: Self.apiKeyDefaultsKey) != nil {
+                userDefaults.removeObject(forKey: Self.apiKeyDefaultsKey)
+            }
+        } else if let legacyKey = userDefaults.string(forKey: Self.apiKeyDefaultsKey) {
+            let trimmed = legacyKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty,
+               KeychainStore.writeString(
+                trimmed,
+                service: Self.keychainService,
+                account: Self.keychainAccount
+               ) {
+                userDefaults.removeObject(forKey: Self.apiKeyDefaultsKey)
+                self.apiKey = trimmed
+            } else {
+                // Keychain write failed (e.g. boot before first unlock on a
+                // headless runner). Keep the legacy value in memory so the
+                // user's assistant still works this session; the next write
+                // attempt will try again.
+                self.apiKey = legacyKey
+            }
+        } else {
+            self.apiKey = ""
+        }
+
         let storedModel = userDefaults.string(forKey: Self.modelDefaultsKey)
         if let storedModel, Self.model(for: storedModel) != nil {
             self.selectedModel = storedModel
@@ -180,13 +222,28 @@ final class AssistantSettings {
 
     private func persistAPIKey() {
         let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
+        // Always clear the legacy `UserDefaults` slot so we don't leave a
+        // stale copy on disk after a rewrite.
+        if userDefaults.object(forKey: Self.apiKeyDefaultsKey) != nil {
             userDefaults.removeObject(forKey: Self.apiKeyDefaultsKey)
-        } else {
-            userDefaults.set(trimmed, forKey: Self.apiKeyDefaultsKey)
-            if apiKey != trimmed {
-                apiKey = trimmed
-            }
+        }
+
+        if trimmed.isEmpty {
+            KeychainStore.delete(
+                service: Self.keychainService,
+                account: Self.keychainAccount
+            )
+            return
+        }
+
+        KeychainStore.writeString(
+            trimmed,
+            service: Self.keychainService,
+            account: Self.keychainAccount
+        )
+
+        if apiKey != trimmed {
+            apiKey = trimmed
         }
     }
 }
