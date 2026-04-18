@@ -165,8 +165,6 @@ struct ContentView: View {
                         )
 
                         BacklinksSection(workspace: workspace)
-
-                        TagsSection(workspace: workspace)
                     }
                     .listStyle(.sidebar)
                     .contentMargins(.top, 0, for: .scrollContent)
