@@ -27,7 +27,6 @@ struct NoteGraphView: View {
         let base = rawSnapshot
         guard !filter.isEmpty else { return base }
 
-        let allowedTag = filter.selectedTag?.lowercased()
         let searchQuery = filter.titleSearch.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let allowedIDs = Set(base.nodes.compactMap { node -> URL? in
@@ -37,11 +36,6 @@ struct NoteGraphView: View {
                !node.title.localizedStandardContains(searchQuery),
                !node.relativePath.localizedStandardContains(searchQuery) {
                 return nil
-            }
-
-            if let allowedTag {
-                let tags = workspace.tags(for: node.url).map { $0.lowercased() }
-                guard tags.contains(allowedTag) else { return nil }
             }
 
             return node.id
@@ -60,11 +54,6 @@ struct NoteGraphView: View {
             selectedNodeID: filteredSelected,
             connectedNodeIDs: filteredConnected
         )
-    }
-
-    private var availableTags: [String] {
-        Array(Set(workspace.tagIndex().map(\.tag)))
-            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
     private var visibleLabelNodeIDs: Set<URL> {
@@ -429,33 +418,6 @@ struct NoteGraphView: View {
                 .controlSize(.small)
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Tag")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Menu {
-                    Button("Any") { filter.selectedTag = nil }
-                    if !availableTags.isEmpty {
-                        Divider()
-                        ForEach(availableTags, id: \.self) { tag in
-                            Button(tag) { filter.selectedTag = tag }
-                        }
-                    }
-                } label: {
-                    HStack {
-                        Text(filter.selectedTag ?? "Any")
-                            .foregroundStyle(filter.selectedTag == nil ? .secondary : .primary)
-                        Spacer()
-                        Image(systemName: "chevron.down")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .menuStyle(.borderlessButton)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-            }
         }
         .padding(14)
         .frame(width: 240, alignment: .leading)
@@ -659,10 +621,9 @@ struct NoteGraphView: View {
 struct GraphFilter: Equatable {
     var minDegree: Int = 0
     var titleSearch: String = ""
-    var selectedTag: String?
 
     var isEmpty: Bool {
-        minDegree == 0 && titleSearch.isEmpty && selectedTag == nil
+        minDegree == 0 && titleSearch.isEmpty
     }
 }
 

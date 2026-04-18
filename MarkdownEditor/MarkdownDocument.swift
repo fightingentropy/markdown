@@ -65,7 +65,6 @@ struct CachedMarkdownMetadata: Sendable {
     let noteTitle: String?
     let noteLinks: [NoteLinkReference]
     let noteBody: String
-    let noteTags: [String]
 }
 
 @Observable
@@ -635,47 +634,6 @@ final class Workspace {
         return cachedMarkdownMetadataByPath[key]?.noteBody
     }
 
-    /// Tags declared in `url`'s body, with live editor contents preferred
-    /// for the currently selected file.
-    func tags(for url: URL) -> [String] {
-        let standardized = url.resolvingSymlinksInPath().standardizedFileURL
-        if let selectedFileURL,
-           Self.urlsMatch(selectedFileURL, standardized),
-           selectedFileIsMarkdown {
-            return MarkdownTagExtractor.tags(in: text)
-        }
-        let key = Self.metadataCacheKey(for: standardized)
-        return cachedMarkdownMetadataByPath[key]?.noteTags ?? []
-    }
-
-    /// Grouped tag index: tag name → files that use it. Keys are lowercased
-    /// so `#Project` and `#project` group together; values preserve each
-    /// file's original display title casing.
-    func tagIndex() -> [(tag: String, files: [FileItem])] {
-        var groups: [String: (canonical: String, files: [FileItem])] = [:]
-
-        for file in files {
-            let fileTags = tags(for: file.url)
-            guard !fileTags.isEmpty else { continue }
-
-            var seenInFile: Set<String> = []
-            for tag in fileTags {
-                let key = tag.lowercased()
-                guard seenInFile.insert(key).inserted else { continue }
-
-                if var entry = groups[key] {
-                    entry.files.append(file)
-                    groups[key] = entry
-                } else {
-                    groups[key] = (canonical: tag, files: [file])
-                }
-            }
-        }
-
-        return groups.values
-            .map { (tag: $0.canonical, files: $0.files) }
-            .sorted { $0.tag.localizedStandardCompare($1.tag) == .orderedAscending }
-    }
 
     private func validatedRenamedURL(for url: URL, proposedName: String) throws -> URL {
         let trimmedName = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -817,14 +775,12 @@ final class Workspace {
             ?? Date()
         let noteTitle = Self.extractTitle(from: content)
         let noteLinks = MarkdownNoteLinkExtractor.references(in: content)
-        let noteTags = MarkdownTagExtractor.tags(in: content)
 
         cachedMarkdownMetadataByPath[metadataKey] = CachedMarkdownMetadata(
             modificationDate: date,
             noteTitle: noteTitle,
             noteLinks: noteLinks,
-            noteBody: content,
-            noteTags: noteTags
+            noteBody: content
         )
 
         guard let index = files.firstIndex(where: { Self.urlsMatch($0.url, standardizedURL) }) else { return }
@@ -970,8 +926,7 @@ final class Workspace {
                     modificationDate: file.file.modificationDate,
                     noteTitle: file.file.noteTitle,
                     noteLinks: file.noteLinks,
-                    noteBody: file.noteBody,
-                    noteTags: file.noteTags
+                    noteBody: file.noteBody
                 )
                 addAssetLookupEntry(for: standardizedURL, to: &assetLookupByFilename)
             } else if Self.isImageFile(standardizedURL) {
@@ -1002,16 +957,14 @@ final class Workspace {
         at url: URL,
         modificationDate: Date,
         cachedMetadata: CachedMarkdownMetadata?
-    ) -> (file: FileItem, noteLinks: [NoteLinkReference], noteBody: String, noteTags: [String]) {
+    ) -> (file: FileItem, noteLinks: [NoteLinkReference], noteBody: String) {
         let noteTitle: String?
         let noteLinks: [NoteLinkReference]
         let noteBody: String
-        let noteTags: [String]
         if let cachedMetadata, cachedMetadata.modificationDate == modificationDate {
             noteTitle = cachedMetadata.noteTitle
             noteLinks = cachedMetadata.noteLinks
             noteBody = cachedMetadata.noteBody
-            noteTags = cachedMetadata.noteTags
         } else if let content = readFileContents(url) {
             let normalized = normalizedContent(
                 for: url,
@@ -1021,12 +974,10 @@ final class Workspace {
             noteTitle = Self.extractTitle(from: normalized)
             noteLinks = MarkdownNoteLinkExtractor.references(in: normalized)
             noteBody = normalized
-            noteTags = MarkdownTagExtractor.tags(in: normalized)
         } else {
             noteTitle = nil
             noteLinks = []
             noteBody = ""
-            noteTags = []
         }
 
         let file = FileItem(
@@ -1037,7 +988,7 @@ final class Workspace {
             noteTitle: noteTitle
         )
 
-        return (file, noteLinks, noteBody, noteTags)
+        return (file, noteLinks, noteBody)
     }
 
     private nonisolated static func sortFileItems(_ files: [FileItem], sortOrder: SortOrder) -> [FileItem] {
@@ -1163,13 +1114,11 @@ final class Workspace {
         if Self.isMarkdownFile(standardizedURL) {
             let noteTitle = markdownContent.flatMap(Self.extractTitle(from:))
             let noteLinks = markdownContent.map(MarkdownNoteLinkExtractor.references(in:)) ?? []
-            let noteTags = markdownContent.map(MarkdownTagExtractor.tags(in:)) ?? []
             cachedMarkdownMetadataByPath[Self.metadataCacheKey(for: standardizedURL)] = CachedMarkdownMetadata(
                 modificationDate: modificationDate,
                 noteTitle: noteTitle,
                 noteLinks: noteLinks,
-                noteBody: markdownContent ?? "",
-                noteTags: noteTags
+                noteBody: markdownContent ?? ""
             )
 
             let fileItem = FileItem(
