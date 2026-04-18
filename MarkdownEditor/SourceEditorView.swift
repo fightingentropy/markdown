@@ -186,9 +186,28 @@ final class EditorController {
         ) {
             textView.setSelectedRange(match)
             textView.scrollRangeToVisible(match)
-            textView.showFindIndicator(for: match)
+            flashFindIndicator(for: match, in: textView)
         } else {
             NSSound.beep()
+        }
+    }
+
+    /// Shows the native yellow find indicator reliably. `showFindIndicator`
+    /// silently no-ops when the range hasn't been typeset yet, so we force
+    /// layout for the match range first and then defer the call to the next
+    /// runloop pass so `scrollRangeToVisible`'s scroll/animation has a chance
+    /// to settle before the indicator is drawn.
+    private func flashFindIndicator(for range: NSRange, in textView: NSTextView) {
+        if let layoutManager = textView.layoutManager {
+            layoutManager.ensureLayout(forCharacterRange: range)
+        }
+
+        // Fire on the next runloop tick so any pending scroll has settled.
+        // `showFindIndicator` is idempotent; calling it twice is harmless and
+        // guarantees the animation even when the first call raced layout.
+        textView.showFindIndicator(for: range)
+        DispatchQueue.main.async { [weak textView] in
+            textView?.showFindIndicator(for: range)
         }
     }
 
