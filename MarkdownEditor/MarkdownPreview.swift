@@ -18,11 +18,8 @@ struct MarkdownPreview: View {
         )
     }
 
-    private var document: PreviewDocument {
-        MarkdownPreprocessor.preprocess(markdown, context: context)
-    }
-
     var body: some View {
+        let document = MarkdownPreprocessor.preprocessCached(markdown, context: context)
         switch document.preferredRenderMode {
         case .native:
             NativeMarkdownPreview(markdown: markdown, context: context, preferences: preferences)
@@ -104,6 +101,60 @@ private struct ConfigurablePreviewCodeBlockStyle: StructuredText.CodeBlockStyle 
     }
 }
 
+/// Serves bundled KaTeX assets to the preview WKWebView via a custom URL
+/// scheme so LaTeX rendering works completely offline. Resources live under
+/// `MarkdownEditor/Resources/katex/` in the app bundle.
+final class KaTeXBundleSchemeHandler: NSObject, WKURLSchemeHandler {
+    static let scheme = "katex-asset"
+
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        guard let url = urlSchemeTask.request.url else {
+            urlSchemeTask.didFailWithError(URLError(.badURL))
+            return
+        }
+
+        // Path component is of the form `/katex.min.css` or `/fonts/XYZ.woff2`.
+        let trimmedPath = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !trimmedPath.isEmpty,
+              !trimmedPath.contains(".."),
+              let resourceURL = Bundle.main.url(forResource: "katex/\(trimmedPath)", withExtension: nil),
+              let data = try? Data(contentsOf: resourceURL) else {
+            urlSchemeTask.didFailWithError(URLError(.resourceUnavailable))
+            return
+        }
+
+        let response = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: [
+                "Content-Type": Self.mimeType(for: url.pathExtension),
+                "Content-Length": "\(data.count)",
+                "Cache-Control": "public, max-age=31536000, immutable",
+            ]
+        )!
+
+        urlSchemeTask.didReceive(response)
+        urlSchemeTask.didReceive(data)
+        urlSchemeTask.didFinish()
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
+        // No async work to cancel.
+    }
+
+    private static func mimeType(for pathExtension: String) -> String {
+        switch pathExtension.lowercased() {
+        case "css": return "text/css; charset=utf-8"
+        case "js": return "application/javascript; charset=utf-8"
+        case "woff2": return "font/woff2"
+        case "woff": return "font/woff"
+        case "ttf": return "font/ttf"
+        default: return "application/octet-stream"
+        }
+    }
+}
+
 private struct HTMLPreviewWebView: NSViewRepresentable {
     final class Coordinator: NSObject, WKScriptMessageHandler {
         var lastHTML: String?
@@ -134,6 +185,10 @@ private struct HTMLPreviewWebView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        configuration.setURLSchemeHandler(
+            KaTeXBundleSchemeHandler(),
+            forURLScheme: KaTeXBundleSchemeHandler.scheme
+        )
 
         let script = WKUserScript(
             source: """

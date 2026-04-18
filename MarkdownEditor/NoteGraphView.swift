@@ -10,12 +10,61 @@ struct NoteGraphView: View {
     @State private var viewport = GraphViewport()
     @State private var hoveredNodeID: URL?
     @State private var isComputingLayout = false
+    @State private var filter = GraphFilter()
+    @State private var isFilterBarPresented = false
 
     private let minimumZoom: CGFloat = 0.65
     private let maximumZoom: CGFloat = 2.8
 
-    private var snapshot: NoteGraphSnapshot {
+    private var rawSnapshot: NoteGraphSnapshot {
         workspace.noteGraph
+    }
+
+    /// Graph snapshot with active filters applied. Edges are trimmed to only
+    /// those whose endpoints both survived the filter so orphan edges don't
+    /// get drawn.
+    private var snapshot: NoteGraphSnapshot {
+        let base = rawSnapshot
+        guard !filter.isEmpty else { return base }
+
+        let allowedTag = filter.selectedTag?.lowercased()
+        let searchQuery = filter.titleSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let allowedIDs = Set(base.nodes.compactMap { node -> URL? in
+            guard node.degree >= filter.minDegree else { return nil }
+
+            if !searchQuery.isEmpty,
+               !node.title.localizedStandardContains(searchQuery),
+               !node.relativePath.localizedStandardContains(searchQuery) {
+                return nil
+            }
+
+            if let allowedTag {
+                let tags = workspace.tags(for: node.url).map { $0.lowercased() }
+                guard tags.contains(allowedTag) else { return nil }
+            }
+
+            return node.id
+        })
+
+        let filteredNodes = base.nodes.filter { allowedIDs.contains($0.id) }
+        let filteredEdges = base.edges.filter {
+            allowedIDs.contains($0.source) && allowedIDs.contains($0.target)
+        }
+        let filteredSelected = base.selectedNodeID.flatMap { allowedIDs.contains($0) ? $0 : nil }
+        let filteredConnected = base.connectedNodeIDs.intersection(allowedIDs)
+
+        return NoteGraphSnapshot(
+            nodes: filteredNodes,
+            edges: filteredEdges,
+            selectedNodeID: filteredSelected,
+            connectedNodeIDs: filteredConnected
+        )
+    }
+
+    private var availableTags: [String] {
+        Array(Set(workspace.tagIndex().map(\.tag)))
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
     private var visibleLabelNodeIDs: Set<URL> {
@@ -273,45 +322,146 @@ struct NoteGraphView: View {
     }
 
     private var controlsPanel: some View {
-        HStack(spacing: 10) {
-            graphControlButton(systemImage: "minus.magnifyingglass", help: "Zoom Out") {
-                adjustZoom(to: viewport.zoom * 0.88)
+        VStack(alignment: .trailing, spacing: 10) {
+            HStack(spacing: 10) {
+                graphControlButton(systemImage: "minus.magnifyingglass", help: "Zoom Out") {
+                    adjustZoom(to: viewport.zoom * 0.88)
+                }
+
+                Text("\(Int(viewport.zoom * 100))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 52)
+
+                graphControlButton(systemImage: "plus.magnifyingglass", help: "Zoom In") {
+                    adjustZoom(to: viewport.zoom * 1.12)
+                }
+
+                Divider()
+                    .frame(height: 22)
+
+                graphControlButton(systemImage: "scope", help: "Center Graph") {
+                    withAnimation(.spring(response: 0.22, dampingFraction: 0.84)) {
+                        viewport.reset()
+                    }
+                }
+
+                graphControlButton(systemImage: "arrow.clockwise", help: "Relayout Graph") {
+                    relayoutSeed += 1
+                    scheduleLayout()
+                }
+
+                Divider()
+                    .frame(height: 22)
+
+                graphControlButton(
+                    systemImage: filter.isEmpty
+                        ? "line.3.horizontal.decrease.circle"
+                        : "line.3.horizontal.decrease.circle.fill",
+                    help: filter.isEmpty ? "Filter Graph" : "Active filter — click to edit"
+                ) {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        isFilterBarPresented.toggle()
+                    }
+                }
+
+                if isComputingLayout {
+                    ProgressView()
+                        .controlSize(.small)
+                        .padding(.leading, 2)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+            .overlay {
+                Capsule(style: .continuous)
+                    .strokeBorder(.white.opacity(0.08))
             }
 
-            Text("\(Int(viewport.zoom * 100))%")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 52)
-
-            graphControlButton(systemImage: "plus.magnifyingglass", help: "Zoom In") {
-                adjustZoom(to: viewport.zoom * 1.12)
+            if isFilterBarPresented {
+                filterPanel
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
+        }
+    }
 
-            Divider()
-                .frame(height: 22)
-
-            graphControlButton(systemImage: "scope", help: "Center Graph") {
-                withAnimation(.spring(response: 0.22, dampingFraction: 0.84)) {
-                    viewport.reset()
+    private var filterPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Filter")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                if !filter.isEmpty {
+                    Button("Clear") { filter = GraphFilter() }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
                 }
             }
 
-            graphControlButton(systemImage: "arrow.clockwise", help: "Relayout Graph") {
-                relayoutSeed += 1
-                scheduleLayout()
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Search")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("Title or path", text: $filter.titleSearch)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
             }
 
-            if isComputingLayout {
-                ProgressView()
-                    .controlSize(.small)
-                    .padding(.leading, 2)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Min connections")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(filter.minDegree)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                Slider(
+                    value: Binding(
+                        get: { Double(filter.minDegree) },
+                        set: { filter.minDegree = Int($0.rounded()) }
+                    ),
+                    in: 0...10,
+                    step: 1
+                )
+                .controlSize(.small)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Tag")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Menu {
+                    Button("Any") { filter.selectedTag = nil }
+                    if !availableTags.isEmpty {
+                        Divider()
+                        ForEach(availableTags, id: \.self) { tag in
+                            Button(tag) { filter.selectedTag = tag }
+                        }
+                    }
+                } label: {
+                    HStack {
+                        Text(filter.selectedTag ?? "Any")
+                            .foregroundStyle(filter.selectedTag == nil ? .secondary : .primary)
+                        Spacer()
+                        Image(systemName: "chevron.down")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+        .padding(14)
+        .frame(width: 240, alignment: .leading)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay {
-            Capsule(style: .continuous)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(.white.opacity(0.08))
         }
     }
@@ -503,6 +653,16 @@ struct NoteGraphView: View {
                 viewport.zoom = min(max(viewport.lastCommittedZoom * value, minimumZoom), maximumZoom)
                 viewport.commitZoom()
             }
+    }
+}
+
+struct GraphFilter: Equatable {
+    var minDegree: Int = 0
+    var titleSearch: String = ""
+    var selectedTag: String?
+
+    var isEmpty: Bool {
+        minDegree == 0 && titleSearch.isEmpty && selectedTag == nil
     }
 }
 

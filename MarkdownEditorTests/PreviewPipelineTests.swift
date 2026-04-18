@@ -175,6 +175,51 @@ final class PreviewPipelineTests: XCTestCase {
         }
     }
 
+    func testPreprocessorEncodesInlineAndBlockMathAsTokens() throws {
+        let fixture = try makeFixture()
+        let markdown = """
+        Inline $$a^2 + b^2 = c^2$$ example.
+
+        $$
+        \\int_0^\\infty e^{-x} dx = 1
+        $$
+
+        Also \\(\\alpha + \\beta\\) and \\[\\sum_i i\\].
+        """
+
+        let document = MarkdownPreprocessor.preprocess(markdown, context: fixture.context)
+
+        XCTAssertTrue(document.requiresHTMLFallback, "Math requires HTML fallback for KaTeX")
+        let body = document.normalizedMarkdown
+        XCTAssertTrue(body.contains(MathTokenCoder.displayPrefix), "Expected display math token")
+        XCTAssertTrue(body.contains(MathTokenCoder.inlinePrefix), "Expected inline math token")
+        XCTAssertFalse(body.contains("$$a^2"), "Original delimiters should be replaced")
+        XCTAssertFalse(body.contains("\\("), "Inline LaTeX delimiters should be replaced")
+    }
+
+    func testPreprocessorPreservesMathInsideCodeSpans() throws {
+        let fixture = try makeFixture()
+        let markdown = "Code `$$a^2$$` stays as literal."
+
+        let document = MarkdownPreprocessor.preprocess(markdown, context: fixture.context)
+
+        XCTAssertFalse(document.requiresHTMLFallback, "Math tokens inside code must not trigger fallback")
+        XCTAssertTrue(document.normalizedMarkdown.contains("`$$a^2$$`"))
+    }
+
+    func testHTMLRendererSubstitutesMathTokensWithSpans() throws {
+        let fixture = try makeFixture()
+        let markdown = "Inline $$x + y$$ example."
+
+        let document = MarkdownPreprocessor.preprocess(markdown, context: fixture.context)
+        let html = HTMLPreviewRenderer.render(document: document)
+
+        XCTAssertTrue(html.contains("<span class=\"math-display\">x + y</span>"),
+                      "Expected KaTeX target span; got: \(html)")
+        XCTAssertFalse(html.contains(MathTokenCoder.displayPrefix),
+                       "All tokens should be substituted in final HTML")
+    }
+
     func testPreprocessorDoesNotRewriteObsidianEmbedsInsideCode() throws {
         let fixture = try makeFixture()
         let markdown = """

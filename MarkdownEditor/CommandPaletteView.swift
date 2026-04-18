@@ -4,6 +4,13 @@ enum PaletteResult: Equatable {
     case file(URL)
 }
 
+private struct PaletteMatch: Identifiable {
+    let file: FileItem
+    let bodySnippet: String?
+
+    var id: URL { file.id }
+}
+
 struct CommandPaletteView: View {
     let workspace: Workspace
     let onDismiss: () -> Void
@@ -15,22 +22,34 @@ struct CommandPaletteView: View {
     @State private var activeQuery = ""
     @FocusState private var isSearchFieldFocused: Bool
 
-    private var filteredFiles: [FileItem] {
+    private var filteredMatches: [PaletteMatch] {
         let files = workspace.sortedFiles
         if activeQuery.isEmpty {
-            return files
+            return files.map { PaletteMatch(file: $0, bodySnippet: nil) }
         }
 
-        return files.filter { file in
-            workspace.title(for: file).localizedStandardContains(activeQuery) ||
-            file.displayName.localizedStandardContains(activeQuery) ||
-            file.name.localizedStandardContains(activeQuery)
+        return files.compactMap { file in
+            let title = workspace.title(for: file)
+            let matchesTitle = title.localizedStandardContains(activeQuery) ||
+                file.displayName.localizedStandardContains(activeQuery) ||
+                file.name.localizedStandardContains(activeQuery)
+
+            if matchesTitle {
+                return PaletteMatch(file: file, bodySnippet: nil)
+            }
+
+            guard let body = workspace.noteBody(for: file.url),
+                  let snippet = Self.matchSnippet(in: body, for: activeQuery) else {
+                return nil
+            }
+
+            return PaletteMatch(file: file, bodySnippet: snippet)
         }
     }
 
     private var primaryResult: PaletteResult? {
-        if let file = filteredFiles.first {
-            return .file(file.id)
+        if let match = filteredMatches.first {
+            return .file(match.id)
         }
 
         return nil
@@ -65,19 +84,19 @@ struct CommandPaletteView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 20) {
                         paletteSection("Notes") {
-                            if filteredFiles.isEmpty {
+                            if filteredMatches.isEmpty {
                                 Text("No matching notes")
                                     .foregroundStyle(.secondary)
                                     .padding(.top, 4)
                             } else {
-                                ForEach(filteredFiles) { file in
+                                ForEach(filteredMatches) { match in
                                     paletteButton(
-                                        title: workspace.title(for: file),
-                                        subtitle: workspace.relativePath(for: file),
-                                        systemImage: file.url == workspace.selectedFileURL ? "doc.text.fill" : "doc.text",
-                                        isSelected: primaryResult == .file(file.id)
+                                        title: workspace.title(for: match.file),
+                                        subtitle: match.bodySnippet ?? workspace.relativePath(for: match.file),
+                                        systemImage: match.file.url == workspace.selectedFileURL ? "doc.text.fill" : "doc.text",
+                                        isSelected: primaryResult == .file(match.file.id)
                                     ) {
-                                        workspace.selectFile(file.url)
+                                        workspace.selectFile(match.file.url)
                                         dismiss()
                                     }
                                 }
@@ -176,11 +195,41 @@ struct CommandPaletteView: View {
     private func activatePrimaryResult() {
         switch primaryResult {
         case .file(let id):
-            guard let file = filteredFiles.first(where: { $0.id == id }) else { return }
-            workspace.selectFile(file.url)
+            guard let match = filteredMatches.first(where: { $0.id == id }) else { return }
+            workspace.selectFile(match.file.url)
             dismiss()
         case nil:
             break
         }
+    }
+
+    private static func matchSnippet(in body: String, for query: String) -> String? {
+        guard !body.isEmpty, !query.isEmpty else { return nil }
+        guard let matchRange = body.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) else {
+            return nil
+        }
+
+        // Expand to the enclosing line so the snippet reads naturally.
+        let lineRange = body.lineRange(for: matchRange)
+        let rawLine = body[lineRange].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawLine.isEmpty else { return nil }
+
+        let maxLength = 140
+        guard rawLine.count > maxLength else { return rawLine }
+
+        // Keep the match roughly centered in the snippet window.
+        let matchOffset = body.distance(from: lineRange.lowerBound, to: matchRange.lowerBound)
+        let windowStart = max(0, matchOffset - maxLength / 2)
+        let startIndex = rawLine.index(rawLine.startIndex, offsetBy: min(windowStart, rawLine.count))
+        let endIndex = rawLine.index(startIndex, offsetBy: min(maxLength, rawLine.distance(from: startIndex, to: rawLine.endIndex)))
+        var snippet = String(rawLine[startIndex..<endIndex])
+
+        if startIndex != rawLine.startIndex {
+            snippet = "…" + snippet
+        }
+        if endIndex != rawLine.endIndex {
+            snippet += "…"
+        }
+        return snippet
     }
 }

@@ -4,6 +4,47 @@ import XCTest
 @testable import Markdown
 
 final class NoteGraphTests: XCTestCase {
+    func testTagExtractorFindsTopLevelAndNestedTags() {
+        let markdown = """
+        # Heading
+
+        Top: #alpha and #Project/Frontend
+        Nested-only: #work/backend.
+
+        Same tag twice: #alpha should dedupe.
+        """
+
+        let tags = MarkdownTagExtractor.tags(in: markdown)
+
+        XCTAssertEqual(tags, ["alpha", "Project/Frontend", "work/backend"])
+    }
+
+    func testTagExtractorIgnoresCodeAndURLs() {
+        let markdown = """
+        Inline `#incode` is not a tag.
+        Neither is https://example.com#section.
+        Price is $5 and#inline is not a tag.
+
+        ```
+        #alsoinfencedblock
+        ```
+
+        Real one: #real
+        """
+
+        let tags = MarkdownTagExtractor.tags(in: markdown)
+
+        XCTAssertEqual(tags, ["real"])
+    }
+
+    func testTagExtractorRequiresLetterLead() {
+        let markdown = "#123 is not a tag, but #v2 is."
+
+        let tags = MarkdownTagExtractor.tags(in: markdown)
+
+        XCTAssertEqual(tags, ["v2"])
+    }
+
     func testMarkdownNoteLinkExtractorIgnoresEmbedsAndCode() {
         let markdown = """
         [[Alpha]]
@@ -55,7 +96,9 @@ final class NoteGraphTests: XCTestCase {
                 CachedMarkdownMetadata(
                     modificationDate: Date(),
                     noteTitle: Workspace.extractTitle(from: content),
-                    noteLinks: MarkdownNoteLinkExtractor.references(in: content)
+                    noteLinks: MarkdownNoteLinkExtractor.references(in: content),
+                    noteBody: content,
+                    noteTags: MarkdownTagExtractor.tags(in: content)
                 )
             )
         })
