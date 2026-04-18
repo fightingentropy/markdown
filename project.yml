@@ -27,7 +27,11 @@ targets:
     type: application
     platform: macOS
     sources:
-      - MarkdownEditor
+      - path: MarkdownEditor
+        excludes:
+          - "Resources/katex/**"
+      - path: MarkdownEditor/Resources/katex
+        type: folder
     dependencies:
       - package: Sparkle
         product: Sparkle

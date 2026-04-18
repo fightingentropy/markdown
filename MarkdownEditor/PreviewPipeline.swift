@@ -254,7 +254,70 @@ private let youtubeURLPattern = try! NSRegularExpression(
     pattern: #"(?:youtube\.com/watch\?[^\s"]*v=|youtu\.be/|youtube\.com/embed/)([a-zA-Z0-9_-]{11})"#
 )
 
+/// Encodes LaTeX source into an ASCII-only placeholder token that survives
+/// cmark and our HTML-escape pass unchanged. The token is replaced with a
+/// KaTeX-targeted `<span>` in post-processing.
+enum MathTokenCoder {
+    static let inlinePrefix = "MATHXINLINESTART"
+    static let inlineSuffix = "MATHXINLINEEND"
+    static let displayPrefix = "MATHXDISPLAYSTART"
+    static let displaySuffix = "MATHXDISPLAYEND"
+
+    static func encode(_ latex: String, display: Bool) -> String {
+        let hex = Data(latex.utf8).map { String(format: "%02x", $0) }.joined()
+        return display
+            ? displayPrefix + hex + displaySuffix
+            : inlinePrefix + hex + inlineSuffix
+    }
+
+    static func decode(hex: String) -> String {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(hex.count / 2)
+        var iter = hex.unicodeScalars.makeIterator()
+        while let first = iter.next(), let second = iter.next() {
+            guard let byte = UInt8("\(first)\(second)", radix: 16) else { return "" }
+            bytes.append(byte)
+        }
+        return String(bytes: bytes, encoding: .utf8) ?? ""
+    }
+}
+
+private final class PreviewDocumentBox {
+    let document: PreviewDocument
+    init(_ document: PreviewDocument) { self.document = document }
+}
+
 enum MarkdownPreprocessor {
+    // Cache of recent `PreviewDocument` values keyed by document path and
+    // markdown contents. The preview pipeline runs on every body evaluation —
+    // at least twice per render (once to choose the render mode, once inside
+    // the native markup parser) — so reusing unchanged parses avoids redundant
+    // O(doc-length) scanning on every keystroke.
+    nonisolated(unsafe) private static let preprocessCache: NSCache<NSString, PreviewDocumentBox> = {
+        let cache = NSCache<NSString, PreviewDocumentBox>()
+        cache.countLimit = 8
+        return cache
+    }()
+
+    static func preprocessCached(_ markdown: String, context: PreviewContext) -> PreviewDocument {
+        let key = cacheKey(for: markdown, context: context)
+        if let cached = preprocessCache.object(forKey: key) {
+            return cached.document
+        }
+        let document = preprocess(markdown, context: context)
+        preprocessCache.setObject(PreviewDocumentBox(document), forKey: key)
+        return document
+    }
+
+    private static func cacheKey(for markdown: String, context: PreviewContext) -> NSString {
+        var hasher = Hasher()
+        hasher.combine(markdown)
+        hasher.combine(context.documentURL)
+        hasher.combine(context.vaultURL)
+        let digest = hasher.finalize()
+        return "\(context.documentURL?.path ?? "")|\(markdown.utf8.count)|\(digest)" as NSString
+    }
+
     static func preprocess(_ markdown: String, context: PreviewContext) -> PreviewDocument {
         let normalizedSource = markdown.replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
@@ -318,6 +381,32 @@ enum MarkdownPreprocessor {
                     if candidate.trimmingCharacters(in: .whitespaces).hasPrefix(fence) {
                         break
                     }
+                }
+                continue
+            }
+
+            // Block math: `$$` on its own line opens a display-math block that
+            // closes on the next standalone `$$`. Emitted as a placeholder
+            // token so cmark leaves the LaTeX source untouched.
+            if trimmed == "$$" {
+                index += 1
+                var mathLines: [String] = []
+                while index < lines.count {
+                    let candidate = lines[index]
+                    if candidate.trimmingCharacters(in: .whitespaces) == "$$" {
+                        index += 1
+                        break
+                    }
+                    mathLines.append(candidate)
+                    index += 1
+                }
+
+                let source = mathLines.joined(separator: "\n")
+                if !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    markdownBuffer.append("")
+                    markdownBuffer.append(MathTokenCoder.encode(source, display: true))
+                    markdownBuffer.append("")
+                    requiresHTMLFallback = true
                 }
                 continue
             }
@@ -402,6 +491,16 @@ enum MarkdownPreprocessor {
             }
 
             if activeInlineCodeFenceLength == nil {
+                if let rewrite = rewriteMathSpan(
+                    in: characters,
+                    from: index
+                ) {
+                    result += rewrite.rendered
+                    index = rewrite.nextIndex
+                    requiresHTMLFallback = true
+                    continue
+                }
+
                 if let rewrite = rewriteObsidianEmbed(
                     in: characters,
                     from: index,
@@ -440,6 +539,77 @@ enum MarkdownPreprocessor {
         }
 
         return result
+    }
+
+    /// Detects inline LaTeX math on a single line and replaces the delimited
+    /// span with a placeholder token. We support the unambiguous delimiters
+    /// `$$...$$`, `\(...\)`, and `\[...\]` — single-dollar `$...$` is skipped
+    /// intentionally because it collides with currency values (`cost $5`).
+    private static func rewriteMathSpan(
+        in characters: [Character],
+        from index: Int
+    ) -> (rendered: String, nextIndex: Int)? {
+        guard index < characters.count else { return nil }
+
+        if characters[index] == "$",
+           index + 1 < characters.count,
+           characters[index + 1] == "$" {
+            return consumeMath(
+                in: characters,
+                contentStart: index + 2,
+                closing: ["$", "$"],
+                display: true
+            )
+        }
+
+        if characters[index] == "\\",
+           index + 1 < characters.count {
+            switch characters[index + 1] {
+            case "(":
+                return consumeMath(
+                    in: characters,
+                    contentStart: index + 2,
+                    closing: ["\\", ")"],
+                    display: false
+                )
+            case "[":
+                return consumeMath(
+                    in: characters,
+                    contentStart: index + 2,
+                    closing: ["\\", "]"],
+                    display: true
+                )
+            default:
+                return nil
+            }
+        }
+
+        return nil
+    }
+
+    private static func consumeMath(
+        in characters: [Character],
+        contentStart: Int,
+        closing: [Character],
+        display: Bool
+    ) -> (rendered: String, nextIndex: Int)? {
+        guard closing.count == 2 else { return nil }
+
+        var cursor = contentStart
+        while cursor + 1 < characters.count {
+            if characters[cursor] == closing[0],
+               characters[cursor + 1] == closing[1] {
+                let latex = String(characters[contentStart..<cursor])
+                guard !latex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return nil
+                }
+                let nextIndex = cursor + 2
+                return (MathTokenCoder.encode(latex, display: display), nextIndex)
+            }
+            cursor += 1
+        }
+
+        return nil
     }
 
     private static func rewriteObsidianEmbed(
@@ -570,6 +740,15 @@ enum HTMLPreviewRenderer {
     private static let tableAlignmentPattern = try! NSRegularExpression(
         pattern: #"^[\s|:\-]+$"#
     )
+    private static let mathInlineTokenPattern = try! NSRegularExpression(
+        pattern: "\(MathTokenCoder.inlinePrefix)([0-9a-fA-F]+)\(MathTokenCoder.inlineSuffix)"
+    )
+    private static let mathDisplayTokenPattern = try! NSRegularExpression(
+        pattern: "\(MathTokenCoder.displayPrefix)([0-9a-fA-F]+)\(MathTokenCoder.displaySuffix)"
+    )
+    private static let mathDisplayParagraphPattern = try! NSRegularExpression(
+        pattern: "<p>\\s*(<span class=\"math-display\">[^<]*</span>)\\s*</p>"
+    )
 
     // Cache of rendered mermaid SVGs keyed by the mermaid source text.
     // The preview pipeline re-runs on every text change; diagrams are
@@ -668,7 +847,49 @@ enum HTMLPreviewRenderer {
         )
 
         let paragraphTransformed = transformParagraphBlocks(in: widthAdjustedHTML)
-        return transformYouTubeLinks(in: paragraphTransformed)
+        let youtubeTransformed = transformYouTubeLinks(in: paragraphTransformed)
+        return transformMathTokens(in: youtubeTransformed)
+    }
+
+    private static func transformMathTokens(in html: String) -> String {
+        var result = substituteMathTokens(in: html, pattern: mathInlineTokenPattern, cssClass: "math-inline")
+        result = substituteMathTokens(in: result, pattern: mathDisplayTokenPattern, cssClass: "math-display")
+
+        // Unwrap `<p>` wrappers that cmark adds around a standalone display
+        // block so the `<span class="math-display">` flows at block level
+        // without an intervening paragraph.
+        let nsResult = result as NSString
+        let range = NSRange(location: 0, length: nsResult.length)
+        return mathDisplayParagraphPattern.stringByReplacingMatches(
+            in: result,
+            range: range,
+            withTemplate: "$1"
+        )
+    }
+
+    private static func substituteMathTokens(
+        in html: String,
+        pattern: NSRegularExpression,
+        cssClass: String
+    ) -> String {
+        let nsHTML = html as NSString
+        let matches = pattern.matches(
+            in: html,
+            range: NSRange(location: 0, length: nsHTML.length)
+        )
+        guard !matches.isEmpty else { return html }
+
+        var result = html
+        for match in matches.reversed() {
+            let hexRange = match.range(at: 1)
+            guard hexRange.location != NSNotFound else { continue }
+            let hex = (result as NSString).substring(with: hexRange)
+            let latex = MathTokenCoder.decode(hex: hex)
+            let escaped = escapeHTML(latex)
+            let replacement = "<span class=\"\(cssClass)\">\(escaped)</span>"
+            result = (result as NSString).replacingCharacters(in: match.range, with: replacement)
+        }
+        return result
     }
 
     private static func extractYouTubeVideoID(from url: String) -> String? {
@@ -961,7 +1182,7 @@ struct NativePreviewMarkupParser: MarkupParser {
     let context: PreviewContext
 
     func attributedString(for input: String) throws -> AttributedString {
-        let document = MarkdownPreprocessor.preprocess(input, context: context)
+        let document = MarkdownPreprocessor.preprocessCached(input, context: context)
         guard document.preferredRenderMode == .native else {
             return AttributedString()
         }

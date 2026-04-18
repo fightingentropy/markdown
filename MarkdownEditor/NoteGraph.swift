@@ -265,7 +265,15 @@ enum MarkdownNoteLinkExtractor {
         return (destination, displayName)
     }
 
-    private static func sanitizedMarkdown(_ markdown: String) -> String {
+    /// Returns `markdown` with content inside fenced code blocks and inline
+    /// code spans replaced by spaces so downstream scanners can walk prose
+    /// without tripping on code samples. Positions of remaining characters
+    /// are preserved so offsets stay valid.
+    static func sanitizedMarkdown(_ markdown: String) -> String {
+        codeStrippedMarkdown(markdown)
+    }
+
+    private static func codeStrippedMarkdown(_ markdown: String) -> String {
         let lines = markdown.split(
             separator: "\n",
             omittingEmptySubsequences: false
@@ -354,6 +362,60 @@ enum MarkdownNoteLinkExtractor {
             cursor += 1
         }
         return cursor
+    }
+}
+
+/// Extracts Obsidian-style `#tag` hashtags from note bodies. Tags must start
+/// with a letter (so `#123` isn't a tag) and may contain letters, digits,
+/// `_`, `-`, and `/` (for nested tags like `#project/frontend`). A `#` is
+/// only considered a tag when it sits at the start of a line or follows
+/// whitespace, which keeps URL fragments (`https://x.com#section`) and
+/// in-word hashes from triggering false positives.
+enum MarkdownTagExtractor {
+    /// Returns the unique tags in `markdown`, sorted case-insensitively.
+    /// Tags inside fenced code blocks or inline code spans are ignored.
+    static func tags(in markdown: String) -> [String] {
+        let sanitized = MarkdownNoteLinkExtractor.sanitizedMarkdown(markdown)
+        let characters = Array(sanitized)
+        var seen: Set<String> = []
+        var result: [String] = []
+        var index = 0
+
+        while index < characters.count {
+            guard characters[index] == "#" else {
+                index += 1
+                continue
+            }
+
+            let precededByWordChar = index > 0 && isTagBody(characters[index - 1])
+            guard !precededByWordChar else {
+                index += 1
+                continue
+            }
+
+            var cursor = index + 1
+            guard cursor < characters.count, characters[cursor].isLetter else {
+                index += 1
+                continue
+            }
+
+            while cursor < characters.count, isTagBody(characters[cursor]) {
+                cursor += 1
+            }
+
+            let tag = String(characters[(index + 1)..<cursor])
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/-"))
+            if !tag.isEmpty, seen.insert(tag.lowercased()).inserted {
+                result.append(tag)
+            }
+            index = cursor
+        }
+
+        return result.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    private static func isTagBody(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || character == "_" || character == "-" || character == "/"
     }
 }
 

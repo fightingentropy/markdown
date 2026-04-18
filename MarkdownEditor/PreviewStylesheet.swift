@@ -2,18 +2,50 @@
 enum PreviewStylesheet {
 
     static func page(body: String, preferences: AppPreferences) -> String {
-        """
+        let needsMath = body.contains("class=\"math-inline\"") || body.contains("class=\"math-display\"")
+        let mathAssets = needsMath ? mathAssetsHTML : ""
+
+        return """
         <!DOCTYPE html>
         <html>
         <head>
         <meta charset="utf-8">
         <meta name="color-scheme" content="light dark">
         <style>\(css(using: preferences))</style>
+        \(mathAssets)
         </head>
-        <body>\(body)</body>
+        <body>\(body)\(needsMath ? mathBootstrapScript : "")</body>
         </html>
         """
     }
+
+    // KaTeX 0.16.11 served from the app bundle via a custom URL scheme
+    // registered on the preview's WKWebView (see KaTeXBundleSchemeHandler).
+    // Rendering works fully offline.
+    private static let mathAssetsHTML = """
+    <link rel="stylesheet" href="katex-asset:///katex.min.css">
+    <script defer src="katex-asset:///katex.min.js"></script>
+    """
+
+    private static let mathBootstrapScript = """
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        if (typeof katex === 'undefined') { return; }
+        function renderAll(selector, displayMode) {
+            document.querySelectorAll(selector).forEach(function(el) {
+                try {
+                    katex.render(el.textContent, el, { displayMode: displayMode, throwOnError: false });
+                    el.classList.add('katex-rendered');
+                } catch (e) {
+                    console.error('KaTeX render failed:', e);
+                }
+            });
+        }
+        renderAll('.math-inline', false);
+        renderAll('.math-display', true);
+    });
+    </script>
+    """
 
     static func css(using preferences: AppPreferences) -> String {
         let previewFontFamily = preferences.previewFontChoice.cssFontFamily
@@ -279,6 +311,26 @@ enum PreviewStylesheet {
     .mermaid-diagram svg {
         max-width: 100%;
         height: auto;
+    }
+
+    .math-display {
+        display: block;
+        text-align: center;
+        margin: 1.2em 0;
+        overflow-x: auto;
+        overflow-y: hidden;
+    }
+
+    .math-inline {
+        display: inline;
+    }
+
+    /* Fallback rendering before KaTeX loads (or if it fails to load) so
+       LaTeX source is at least legible. */
+    .math-display:not(.katex-rendered),
+    .math-inline:not(.katex-rendered) {
+        font-family: \(previewCodeFontFamily);
+        font-size: 0.95em;
     }
     """
     }
