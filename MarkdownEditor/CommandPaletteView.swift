@@ -28,23 +28,29 @@ struct CommandPaletteView: View {
             return files.map { PaletteMatch(file: $0, bodySnippet: nil) }
         }
 
-        return files.compactMap { file in
+        var titleMatches: [PaletteMatch] = []
+        var bodyMatches: [PaletteMatch] = []
+
+        for file in files {
             let title = workspace.title(for: file)
             let matchesTitle = title.localizedStandardContains(activeQuery) ||
                 file.displayName.localizedStandardContains(activeQuery) ||
                 file.name.localizedStandardContains(activeQuery)
 
             if matchesTitle {
-                return PaletteMatch(file: file, bodySnippet: nil)
+                titleMatches.append(PaletteMatch(file: file, bodySnippet: nil))
+                continue
             }
 
             guard let body = workspace.noteBody(for: file.url),
                   let snippet = Self.matchSnippet(in: body, for: activeQuery) else {
-                return nil
+                continue
             }
 
-            return PaletteMatch(file: file, bodySnippet: snippet)
+            bodyMatches.append(PaletteMatch(file: file, bodySnippet: snippet))
         }
+
+        return titleMatches + bodyMatches
     }
 
     private var primaryResult: PaletteResult? {
