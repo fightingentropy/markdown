@@ -145,6 +145,7 @@ struct SidebarFolderRow: View {
     @Binding var expandedFolderURLs: Set<URL>
     let onRenameRequested: (RenameRequest) -> Void
     @State private var isDropTargeted = false
+    @State private var showDeleteConfirmation = false
 
     var body: some View {
         DisclosureGroup(isExpanded: expansionBinding) {
@@ -158,6 +159,7 @@ struct SidebarFolderRow: View {
             HStack(spacing: 8) {
                 Image(systemName: "folder")
                     .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
 
                 Text(node.name)
                     .lineLimit(1)
@@ -166,6 +168,8 @@ struct SidebarFolderRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(node.name), folder")
             .onTapGesture {
                 withAnimation(.easeInOut(duration: 0.15)) {
                     expansionBinding.wrappedValue.toggle()
@@ -195,7 +199,7 @@ struct SidebarFolderRow: View {
                 Divider()
 
                 Button(role: .destructive) {
-                    workspace.deleteItem(node.url)
+                    showDeleteConfirmation = true
                 } label: {
                     Label("Delete", systemImage: "trash")
                 }
@@ -208,6 +212,18 @@ struct SidebarFolderRow: View {
                 ) {
                     expandedFolderURLs.insert(node.url)
                 }
+            }
+            .confirmationDialog(
+                "Move “\(node.name)” and its contents to Trash?",
+                isPresented: $showDeleteConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Move to Trash", role: .destructive) {
+                    workspace.deleteItem(node.url)
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This moves the folder and everything inside it to the Trash. You can recover items from Finder.")
             }
         }
         .listRowInsets(sidebarRowInsets)
@@ -233,6 +249,11 @@ struct SidebarFolderRow: View {
 struct SidebarAssetRow: View {
     let node: SidebarNode
     let workspace: Workspace
+    @State private var showDeleteConfirmation = false
+
+    private var isSelected: Bool {
+        node.url == workspace.selectedFileURL
+    }
 
     var body: some View {
         Button {
@@ -241,6 +262,7 @@ struct SidebarAssetRow: View {
             HStack(spacing: 8) {
                 Image(systemName: "photo")
                     .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
 
                 Text(node.name)
                     .lineLimit(1)
@@ -250,6 +272,9 @@ struct SidebarAssetRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 2)
             .contentShape(Rectangle())
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(node.name), asset")
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
         }
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
@@ -259,12 +284,22 @@ struct SidebarAssetRow: View {
         }
         .contextMenu {
             Button(role: .destructive) {
-                workspace.deleteItem(node.url)
+                showDeleteConfirmation = true
             } label: {
                 Label("Delete", systemImage: "trash")
             }
         }
-        .listRowBackground(node.url == workspace.selectedFileURL ? Color.accentColor.opacity(0.14) : Color.clear)
+        .confirmationDialog(
+            "Move “\(node.name)” to Trash?",
+            isPresented: $showDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Move to Trash", role: .destructive) {
+                workspace.deleteItem(node.url)
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .listRowBackground(isSelected ? Color.accentColor.opacity(0.14) : Color.clear)
     }
 }
 
@@ -274,14 +309,20 @@ struct SidebarFileRow: View {
     let file: FileItem
     let workspace: Workspace
     let onRenameRequested: () -> Void
+    @State private var showDeleteConfirmation = false
+
+    private var isSelected: Bool {
+        file.url == workspace.selectedFileURL
+    }
 
     var body: some View {
         Button {
             workspace.selectFile(file.url)
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: file.url == workspace.selectedFileURL ? "doc.text.fill" : "doc.text")
+                Image(systemName: isSelected ? "doc.text.fill" : "doc.text")
                     .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
 
                 Text(workspace.title(for: file))
                     .lineLimit(1)
@@ -296,6 +337,9 @@ struct SidebarFileRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 2)
             .contentShape(Rectangle())
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(workspace.title(for: file))
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
         }
         .buttonStyle(.plain)
         .listRowInsets(sidebarRowInsets)
@@ -310,7 +354,7 @@ struct SidebarFileRow: View {
             }
 
             Button("Delete", role: .destructive) {
-                workspace.deleteItem(file.url)
+                showDeleteConfirmation = true
             }
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
@@ -322,12 +366,22 @@ struct SidebarFileRow: View {
             .tint(.accentColor)
 
             Button(role: .destructive) {
-                workspace.deleteItem(file.url)
+                showDeleteConfirmation = true
             } label: {
                 Label("Delete", systemImage: "trash")
             }
         }
-        .listRowBackground(file.url == workspace.selectedFileURL ? Color.accentColor.opacity(0.14) : Color.clear)
+        .confirmationDialog(
+            "Move “\(workspace.title(for: file))” to Trash?",
+            isPresented: $showDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Move to Trash", role: .destructive) {
+                workspace.deleteItem(file.url)
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .listRowBackground(isSelected ? Color.accentColor.opacity(0.14) : Color.clear)
     }
 }
 
@@ -368,6 +422,7 @@ struct BacklinksSection: View {
                         HStack(spacing: 8) {
                             Image(systemName: "link")
                                 .foregroundStyle(.secondary)
+                                .accessibilityHidden(true)
 
                             Text(node.title)
                                 .lineLimit(1)
@@ -377,6 +432,8 @@ struct BacklinksSection: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 2)
                         .contentShape(Rectangle())
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("\(node.title), backlink")
                     }
                     .buttonStyle(.plain)
                     .listRowInsets(sidebarRowInsets)
@@ -622,5 +679,8 @@ enum SidebarExpansionPersistence {
 }
 
 func isMD(_ url: URL) -> Bool {
-    ["md", "markdown", "mdown", "txt"].contains(url.pathExtension.lowercased())
+    // Keep this in sync with `Workspace.isMarkdownFile`'s supported extensions.
+    // `.txt` is intentionally excluded: it is not opened end-to-end, so accepting
+    // it here would let a drop succeed visually but silently do nothing.
+    ["md", "markdown", "mdown"].contains(url.pathExtension.lowercased())
 }

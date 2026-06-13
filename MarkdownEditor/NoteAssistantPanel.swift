@@ -27,6 +27,9 @@ struct NoteAssistantPanel: View {
         .onChange(of: assistant.isPresented) { _, isPresented in
             guard isPresented else {
                 focusedField = nil
+                // Closing the panel mid-stream tears down the in-flight
+                // request so the subprocess / URLSession task stops promptly.
+                assistant.stopStreaming()
                 return
             }
 
@@ -56,6 +59,7 @@ struct NoteAssistantPanel: View {
         }
         .buttonStyle(.plain)
         .help("Open Note Assistant")
+        .accessibilityLabel("Open Note Assistant")
     }
 
     private var launcherContent: some View {
@@ -99,6 +103,7 @@ struct NoteAssistantPanel: View {
 
                 Image(systemName: "sparkles")
                     .foregroundStyle(Color.accentColor)
+                    .accessibilityHidden(true)
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -139,6 +144,7 @@ struct NoteAssistantPanel: View {
             }
             .buttonStyle(.plain)
             .help("Close Assistant")
+            .accessibilityLabel("Close Assistant")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
@@ -206,24 +212,39 @@ struct NoteAssistantPanel: View {
                         submit()
                     }
 
-                Button {
-                    submit()
-                } label: {
-                    if assistant.isSending {
-                        ProgressView()
-                            .controlSize(.small)
-                            .frame(width: 42, height: 42)
-                    } else {
+                if assistant.isSending {
+                    Button {
+                        assistant.stopStreaming()
+                    } label: {
+                        ZStack {
+                            Circle()
+                                .fill(Color.white.opacity(0.05))
+                                .frame(width: 42, height: 42)
+                            ProgressView()
+                                .controlSize(.small)
+                            Image(systemName: "stop.fill")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop")
+                    .accessibilityLabel("Stop response")
+                } else {
+                    Button {
+                        submit()
+                    } label: {
                         Image(systemName: "arrow.up")
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(canSubmit ? .white : .secondary)
                             .frame(width: 42, height: 42)
                             .background(canSubmit ? Color.accentColor : Color.white.opacity(0.05), in: Circle())
                     }
+                    .buttonStyle(.plain)
+                    .disabled(!canSubmit)
+                    .help("Send")
+                    .accessibilityLabel("Send message")
                 }
-                .buttonStyle(.plain)
-                .disabled(!canSubmit)
-                .help("Send")
             }
         }
         .padding(14)
@@ -242,9 +263,7 @@ struct NoteAssistantPanel: View {
 
     private func submit() {
         guard canSubmit else { return }
-        Task {
-            await assistant.sendCurrentDraft(using: settings)
-        }
+        assistant.send(using: settings)
     }
 
     private func requestComposerFocus() {

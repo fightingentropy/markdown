@@ -40,7 +40,13 @@ final class AppUpdater {
         canCheckForUpdates = controller.updater.canCheckForUpdates
         updateCheckObserver = controller.updater.publisher(for: \.canCheckForUpdates)
             .receive(on: RunLoop.main)
-            .assign(to: \.canCheckForUpdates, on: self)
+            .sink { [weak self] canCheck in
+                // Delivery is hopped onto the main run loop above, so it is safe
+                // to assume MainActor isolation when mutating this @MainActor state.
+                MainActor.assumeIsolated {
+                    self?.canCheckForUpdates = canCheck
+                }
+            }
         #endif
     }
 

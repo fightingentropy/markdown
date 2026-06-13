@@ -19,17 +19,23 @@ struct NoteAssistantMessage: Identifiable, Hashable {
     let createdAt: Date
     let renderedMarkdown: AttributedString?
 
+    /// `isFinal` gates the (relatively expensive) markdown parse. While a
+    /// reply is still streaming we leave `renderedMarkdown` nil so the bubble
+    /// renders the raw accumulated text via its plain-`Text` fallback; the
+    /// AttributedString is built exactly once when the stream completes.
+    /// Parsing on every delta is O(n^2) on the main actor for long replies.
     init(
         id: UUID = UUID(),
         role: Role,
         text: String,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        isFinal: Bool = true
     ) {
         self.id = id
         self.role = role
         self.text = text
         self.createdAt = createdAt
-        if role == .assistant, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if isFinal, role == .assistant, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             self.renderedMarkdown = try? AttributedString(
                 markdown: text,
                 options: AttributedString.MarkdownParsingOptions(
@@ -51,6 +57,17 @@ final class NoteAssistant {
     var isSending = false
     var errorMessage: String?
     @ObservationIgnored private(set) var currentContext: NoteAssistantContext?
+    /// The in-flight request. Held so we can cancel it when the user switches
+    /// files, closes the panel, resets the chat, or hits the stop control.
+    /// Cancelling propagates through the streaming clients' `onTermination`
+    /// hooks, which lets the `assistant` subprocess / URLSession task tear down
+    /// instead of running to completion in the background.
+    @ObservationIgnored private var sendTask: Task<Void, Never>?
+    /// Monotonic token identifying the active request. A cancelled/stale task
+    /// only clears shared state (`sendTask`, `isSending`) if its generation is
+    /// still current, so a late-finishing old request can't clobber a newer
+    /// one that started right after a file switch or reset.
+    @ObservationIgnored private var sendGeneration = 0
 
     func updateContext(fileURL: URL?, title: String, markdown: String) {
         guard let fileURL else {
@@ -72,9 +89,44 @@ final class NoteAssistant {
     }
 
     func reset() {
+        cancelSending()
         messages.removeAll()
         draft = ""
         errorMessage = nil
+        isSending = false
+    }
+
+    /// Cancels the in-flight request (if any) without otherwise clearing the
+    /// transcript. Used by the composer's stop control and whenever the panel
+    /// is dismissed while a reply is streaming.
+    func stopStreaming() {
+        guard isSending else { return }
+        cancelSending()
+        isSending = false
+    }
+
+    private func cancelSending() {
+        sendTask?.cancel()
+        sendTask = nil
+        sendGeneration &+= 1
+    }
+
+    /// Synchronous entry point used by the UI. Owns the streaming `Task` so it
+    /// can be cancelled from `reset()` / `stopStreaming()`.
+    func send(using settings: AssistantSettings) {
+        sendTask?.cancel()
+        sendGeneration &+= 1
+        let generation = sendGeneration
+        sendTask = Task { [weak self] in
+            await self?.sendCurrentDraft(using: settings, generation: generation)
+        }
+    }
+
+    /// Clears `sendTask`/`isSending` only if `generation` is still the active
+    /// request — guards against a stale task tearing down a newer one.
+    private func finishRequest(generation: Int) {
+        guard generation == sendGeneration else { return }
+        sendTask = nil
         isSending = false
     }
 
@@ -82,15 +134,17 @@ final class NoteAssistant {
         isPresented.toggle()
     }
 
-    func sendCurrentDraft(using settings: AssistantSettings) async {
+    func sendCurrentDraft(using settings: AssistantSettings, generation: Int = -1) async {
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else {
             errorMessage = "Enter a question first."
+            finishRequest(generation: generation)
             return
         }
 
         guard let model = AssistantSettings.model(for: settings.selectedModel) else {
             errorMessage = "Selected assistant model is not available."
+            finishRequest(generation: generation)
             return
         }
 
@@ -98,11 +152,13 @@ final class NoteAssistant {
             errorMessage = model.requiresAPIKey
                 ? "Add your OpenAI API key in Settings first."
                 : "Assistant isn't available right now."
+            finishRequest(generation: generation)
             return
         }
 
         guard let context = currentContext else {
             errorMessage = "Open a note first so the assistant has file context."
+            finishRequest(generation: generation)
             return
         }
 
@@ -138,23 +194,53 @@ final class NoteAssistant {
                     assistantMessageID: assistantMessage.id
                 )
             }
+            // Build the markdown AttributedString exactly once, now that the
+            // reply is complete (it was rendered as raw text while streaming).
+            finalizeAssistantMessage(id: assistantMessage.id)
+        } catch let error where Self.isCancellation(error) {
+            // The request was cancelled (file switch / panel close / stop).
+            // `URLSession` surfaces this as `URLError(.cancelled)` rather than
+            // `CancellationError`, so both are treated the same here. Leave
+            // whatever partial text arrived in place and finalize it so it
+            // still renders as markdown; don't surface an error.
+            finalizeAssistantMessage(id: assistantMessage.id)
+            removeEmptyAssistantMessage(
+                assistantMessageID: assistantMessage.id,
+                userMessageID: userMessage.id,
+                prompt: prompt
+            )
+            finishRequest(generation: generation)
+            return
         } catch {
             guard currentContext?.fileURL == context.fileURL else {
-                isSending = false
+                finishRequest(generation: generation)
                 return
             }
             errorMessage = error.localizedDescription
-            let partialReply = assistantMessageText(for: assistantMessage.id)
-            if partialReply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                messages.removeAll { $0.id == assistantMessage.id }
-                if messages.last?.id == userMessage.id {
-                    messages.removeLast()
-                    draft = prompt
-                }
-            }
+            removeEmptyAssistantMessage(
+                assistantMessageID: assistantMessage.id,
+                userMessageID: userMessage.id,
+                prompt: prompt
+            )
         }
 
-        isSending = false
+        finishRequest(generation: generation)
+    }
+
+    private func removeEmptyAssistantMessage(
+        assistantMessageID: UUID,
+        userMessageID: UUID,
+        prompt: String
+    ) {
+        let partialReply = assistantMessageText(for: assistantMessageID)
+        guard partialReply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        messages.removeAll { $0.id == assistantMessageID }
+        if messages.last?.id == userMessageID {
+            messages.removeLast()
+            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                draft = prompt
+            }
+        }
     }
 
     private func runChatCompletions(
@@ -209,16 +295,57 @@ final class NoteAssistant {
             id: existing.id,
             role: existing.role,
             text: text,
-            createdAt: existing.createdAt
+            createdAt: existing.createdAt,
+            isFinal: false
+        )
+    }
+
+    /// Re-creates the message with `isFinal: true` so its markdown is parsed
+    /// once after streaming completes (or is cancelled).
+    private func finalizeAssistantMessage(id: UUID) {
+        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        let existing = messages[index]
+        guard existing.renderedMarkdown == nil else { return }
+        messages[index] = NoteAssistantMessage(
+            id: existing.id,
+            role: existing.role,
+            text: existing.text,
+            createdAt: existing.createdAt,
+            isFinal: true
         )
     }
 
     private func assistantMessageText(for id: UUID) -> String {
         messages.first(where: { $0.id == id })?.text ?? ""
     }
+
+    /// True for both Swift structured-concurrency cancellation and the
+    /// `URLError(.cancelled)` that `URLSession` raises when its task is
+    /// cancelled, so cancelling a request never looks like a real failure.
+    private static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+        if let urlError = error as? URLError, urlError.code == .cancelled {
+            return true
+        }
+        return false
+    }
 }
 
 private struct NoteAssistantClient {
+    /// Dedicated session with explicit timeouts so a stalled OpenAI
+    /// connection fails instead of leaving the assistant spinning forever.
+    /// `timeoutIntervalForRequest` bounds the gap between bytes (important for
+    /// the SSE stream, where the body stays open), while
+    /// `timeoutIntervalForResource` caps the whole exchange.
+    private static let session: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 300
+        return URLSession(configuration: configuration)
+    }()
+
     func streamReply(
         to messages: [NoteAssistantMessage],
         context: NoteAssistantContext,
@@ -233,18 +360,19 @@ private struct NoteAssistantClient {
 
         var request = URLRequest(url: configuration.model.endpoint)
         request.httpMethod = "POST"
+        request.timeoutInterval = 60
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         request.addValue("Bearer \(configuration.apiKey)", forHTTPHeaderField: "Authorization")
 
         let requestBody = ChatCompletionsRequest(
             model: configuration.model.id,
             messages: makeChatMessages(messages: messages, context: context),
-            reasoningEffort: configuration.reasoningEffort?.rawValue,
+            reasoningEffort: configuration.requestReasoningEffort,
             stream: true
         )
         request.httpBody = try JSONEncoder().encode(requestBody)
 
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        let (bytes, response) = try await Self.session.bytes(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw NoteAssistantError.invalidResponse("No HTTP response received.")
         }
@@ -273,18 +401,19 @@ private struct NoteAssistantClient {
 
         var request = URLRequest(url: configuration.model.endpoint)
         request.httpMethod = "POST"
+        request.timeoutInterval = 60
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         request.addValue("Bearer \(configuration.apiKey)", forHTTPHeaderField: "Authorization")
 
         let requestBody = ChatCompletionsRequest(
             model: configuration.model.id,
             messages: makeChatMessages(messages: messages, context: context),
-            reasoningEffort: configuration.reasoningEffort?.rawValue,
+            reasoningEffort: configuration.requestReasoningEffort,
             stream: false
         )
         request.httpBody = try JSONEncoder().encode(requestBody)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await Self.session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw NoteAssistantError.invalidResponse("No HTTP response received.")
         }
@@ -315,10 +444,13 @@ private struct NoteAssistantClient {
             """
         )
 
+        // Send only the file name, never the absolute path. The full path
+        // leaks the macOS username and directory structure to a third party
+        // (OpenAI) and isn't needed to answer questions about the note.
         let contextMessage = ChatCompletionsRequest.Message(
             role: "system",
             content: """
-            Current file path: \(context.fileURL.path)
+            Current file name: \(context.fileURL.lastPathComponent)
             Current file title: \(context.title)
 
             Current markdown file contents:
@@ -393,6 +525,20 @@ private struct AssistantRequestConfiguration {
     let apiKey: String
     let model: AssistantModel
     let reasoningEffort: AssistantReasoningEffort?
+
+    /// The `reasoning_effort` value to put in the chat-completions request
+    /// body, or nil to omit the field entirely. We only ever send it for
+    /// models that actually advertise reasoning support (non-empty
+    /// `supportedReasoningEfforts`) and only for an effort that model lists,
+    /// so non-reasoning models never receive an invalid `reasoning_effort`.
+    var requestReasoningEffort: String? {
+        guard !model.supportedReasoningEfforts.isEmpty,
+              let effort = reasoningEffort,
+              model.supportedReasoningEfforts.contains(effort) else {
+            return nil
+        }
+        return effort.rawValue
+    }
 }
 
 private struct ChatCompletionsRequest: Encodable {
@@ -491,7 +637,7 @@ enum assistantSubscriptionPromptBuilder {
         direct answers, but use bullets when it improves clarity. Do not call \
         any tools — respond with plain markdown text only.
 
-        Current file path: \(context.fileURL.path)
+        Current file name: \(context.fileURL.lastPathComponent)
         Current file title: \(context.title)
 
         Current markdown file contents:

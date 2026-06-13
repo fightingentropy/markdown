@@ -15,6 +15,7 @@ struct assistantSubscriptionClient {
         case cliNotFound
         case processFailed(code: Int32, stderr: String)
         case emptyReply
+        case timedOut
 
         var errorDescription: String? {
             switch self {
@@ -31,6 +32,8 @@ struct assistantSubscriptionClient {
                 return "The assistant CLI failed: \(trimmed)"
             case .emptyReply:
                 return "The assistant CLI finished without returning a reply."
+            case .timedOut:
+                return "The assistant CLI timed out before returning a reply."
             }
         }
     }
@@ -51,13 +54,23 @@ struct assistantSubscriptionClient {
         // `Pipe`, and `FileHandle` APIs that aren't `Sendable`), so we keep
         // it entirely inside a detached task and bridge progress back via a
         // Sendable `AsyncThrowingStream<String, Error>`.
+        //
+        // `Task.detached` does NOT inherit the caller's cancellation, so we
+        // hold the worker task in a box and cancel it explicitly both from the
+        // stream's `onTermination` (consumer torn down) and from a task
+        // cancellation handler (parent request cancelled on file switch /
+        // panel close / stop). Cancelling makes `runProcess` see
+        // `Task.isCancelled` and terminate the subprocess instead of letting
+        // it run to completion in the background.
+        let workerBox = WorkerTaskBox()
         let stream = AsyncThrowingStream<ProgressEvent, Error> { continuation in
             let task = Task.detached(priority: .userInitiated) {
                 do {
                     try Self.runProcess(
                         executable: executable,
                         prompt: prompt,
-                        systemPrompt: systemPrompt
+                        systemPrompt: systemPrompt,
+                        terminationBox: workerBox
                     ) { event in
                         continuation.yield(event)
                     }
@@ -66,47 +79,76 @@ struct assistantSubscriptionClient {
                     continuation.finish(throwing: error)
                 }
             }
+            workerBox.task = task
             continuation.onTermination = { @Sendable _ in
                 task.cancel()
+                workerBox.terminate()
             }
         }
 
-        var accumulated = ""
-        for try await event in stream {
-            switch event {
-            case .deltaText(let text):
-                accumulated += text
-                await onDelta(accumulated)
-            case .finalResult(let final):
-                // The CLI always emits a trailing `{"type":"result",...}` line
-                // with the full reply. If we somehow missed the incremental
-                // events (e.g. partial-messages disabled on an older CLI
-                // build), this keeps the final reply consistent.
-                if accumulated.isEmpty, !final.isEmpty {
-                    accumulated = final
+        return try await withTaskCancellationHandler {
+            var accumulated = ""
+            // Tracks whether the trailing `result` payload was authoritative
+            // and non-empty. When it is, an empty final reply is a *valid*
+            // empty model answer, not a failure, so we don't raise
+            // `.emptyReply`.
+            var sawNonEmptyResult = false
+            var sawAuthoritativeResult = false
+            for try await event in stream {
+                switch event {
+                case .deltaText(let text):
+                    accumulated += text
                     await onDelta(accumulated)
+                case .finalResult(let final):
+                    // The CLI emits a trailing `{"type":"result",...}` line
+                    // with the full reply. Treat it as authoritative: prefer
+                    // it over the incrementally accumulated text whenever it is
+                    // non-empty (this also covers older CLI builds where
+                    // partial-messages were dropped). An explicitly empty
+                    // result is a legitimate empty answer and is left as-is.
+                    sawAuthoritativeResult = true
+                    if !final.isEmpty {
+                        accumulated = final
+                        sawNonEmptyResult = true
+                        await onDelta(accumulated)
+                    }
+                case .reportedError(let message):
+                    throw ClientError.processFailed(code: -1, stderr: message)
                 }
             }
-        }
 
-        let trimmed = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw ClientError.emptyReply
+            let trimmed = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Only treat an empty reply as a failure when the CLI never gave us
+            // an authoritative (non-error) result to confirm it was intentional.
+            guard !trimmed.isEmpty || (sawAuthoritativeResult && !sawNonEmptyResult) else {
+                throw ClientError.emptyReply
+            }
+            return accumulated
+        } onCancel: {
+            workerBox.task?.cancel()
+            workerBox.terminate()
         }
-        return accumulated
     }
 
     // MARK: - Subprocess
 
-    private enum ProgressEvent: Sendable {
+    enum ProgressEvent: Sendable, Equatable {
         case deltaText(String)
         case finalResult(String)
+        case reportedError(String)
     }
+
+    /// Wall-clock ceiling for a single CLI invocation. The `assistant` CLI is
+    /// interactive and can block on auth or a wedged network connection, so
+    /// we terminate it (then escalate to SIGKILL) if it overruns. Surfaced as
+    /// a timeout error rather than hanging the assistant indefinitely.
+    private static let processTimeout: TimeInterval = 120
 
     private static func runProcess(
         executable: URL,
         prompt: String,
         systemPrompt: String?,
+        terminationBox: WorkerTaskBox,
         emit: (ProgressEvent) -> Void
     ) throws {
         let process = Process()
@@ -129,6 +171,54 @@ struct assistantSubscriptionClient {
         process.standardError = stderrPipe
 
         try process.run()
+
+        // Let a cancellation (file switch / panel close / stop) terminate the
+        // process directly, which unblocks the synchronous stdout read below
+        // immediately instead of waiting for the next byte or the watchdog.
+        // Signal by PID so the `@Sendable` hook never captures the non-Sendable
+        // `Process`.
+        let cancelPID = process.processIdentifier
+        terminationBox.terminateAction = {
+            kill(cancelPID, SIGTERM)
+        }
+        defer { terminationBox.terminateAction = nil }
+
+        // Drain stderr concurrently on a background readability handler.
+        // Reading it only after the process exits (as the old code did) could
+        // deadlock: a verbose/erroring CLI that fills the 64KB stderr pipe
+        // buffer blocks on write while we are still blocked reading stdout.
+        let stderrCollector = StderrCollector()
+        let stderrHandle = stderrPipe.fileHandleForReading
+        stderrHandle.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+            } else {
+                stderrCollector.append(data)
+            }
+        }
+
+        // Wall-clock watchdog: terminate (then SIGKILL) the process if it
+        // overruns, so a wedged/auth-blocked CLI can't hang the request. We
+        // signal by PID (a Sendable `Int32`) rather than capturing the
+        // non-Sendable `Process` inside the `@Sendable` timer handler.
+        let pid = process.processIdentifier
+        let timedOut = TimeoutFlag()
+        let watchdog = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+        watchdog.schedule(deadline: .now() + Self.processTimeout)
+        watchdog.setEventHandler {
+            timedOut.set()
+            kill(pid, SIGTERM)
+            // Give it a moment to honor SIGTERM, then force-kill.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                kill(pid, SIGKILL)
+            }
+        }
+        watchdog.resume()
+        defer {
+            watchdog.cancel()
+            stderrHandle.readabilityHandler = nil
+        }
 
         let stdoutHandle = stdoutPipe.fileHandleForReading
         var buffer = Data()
@@ -158,29 +248,35 @@ struct assistantSubscriptionClient {
                 guard let line = String(data: lineData, encoding: .utf8),
                       !line.isEmpty else { continue }
 
-                if let delta = Self.extractDelta(from: line) {
+                switch Self.parseLine(line) {
+                case .deltaText(let delta):
                     emit(.deltaText(delta))
-                } else if let final = Self.extractFinalResult(from: line) {
+                case .finalResult(let final):
                     emit(.finalResult(final))
-                } else if let apiError = Self.extractReportedError(from: line) {
+                case .reportedError(let message):
                     process.terminate()
-                    throw ClientError.processFailed(code: -1, stderr: apiError)
+                    throw ClientError.processFailed(code: -1, stderr: message)
+                case nil:
+                    continue
                 }
             }
         }
 
         process.waitUntilExit()
 
+        if timedOut.isSet {
+            throw ClientError.timedOut
+        }
+
         guard process.terminationStatus == 0 else {
-            let data = (try? stderrPipe.fileHandleForReading.readToEnd()) ?? Data()
-            let stderr = String(data: data, encoding: .utf8) ?? ""
+            let stderr = stderrCollector.string
             throw ClientError.processFailed(code: process.terminationStatus, stderr: stderr)
         }
     }
 
     // MARK: - JSON line parsing
 
-    private struct StreamEnvelope: Decodable {
+    struct StreamEnvelope: Decodable {
         let type: String
         let event: Event?
         let result: String?
@@ -204,48 +300,63 @@ struct assistantSubscriptionClient {
         }
     }
 
-    private static func extractDelta(from line: String) -> String? {
+    /// Decodes a single NDJSON line into a typed `ProgressEvent`, deciding
+    /// once per line whether it is a text delta, an authoritative `result`, or
+    /// an error result. Returns nil for unrecognized / non-content lines.
+    /// `internal` and deterministic so it can be unit-tested without a process.
+    static func parseLine(_ line: String) -> ProgressEvent? {
         guard let data = line.data(using: .utf8),
-              let env = try? JSONDecoder().decode(StreamEnvelope.self, from: data),
-              env.type == "stream_event",
-              let event = env.event,
-              event.type == "content_block_delta",
-              let delta = event.delta,
-              delta.type == "text_delta",
-              let text = delta.text else {
+              let env = try? JSONDecoder().decode(StreamEnvelope.self, from: data) else {
             return nil
         }
-        return text
-    }
 
-    private static func extractFinalResult(from line: String) -> String? {
-        guard let data = line.data(using: .utf8),
-              let env = try? JSONDecoder().decode(StreamEnvelope.self, from: data),
-              env.type == "result",
-              env.isError != true,
-              let result = env.result else {
+        switch env.type {
+        case "stream_event":
+            guard let event = env.event,
+                  event.type == "content_block_delta",
+                  let delta = event.delta,
+                  delta.type == "text_delta",
+                  let text = delta.text else {
+                return nil
+            }
+            return .deltaText(text)
+        case "result":
+            // A `result` with `is_error == true` is an error regardless of
+            // whether it carries result text; otherwise it is the final reply.
+            if env.isError == true {
+                return .reportedError(env.result ?? "assistant Code CLI reported an error.")
+            }
+            return .finalResult(env.result ?? "")
+        default:
             return nil
         }
-        return result
-    }
-
-    private static func extractReportedError(from line: String) -> String? {
-        guard let data = line.data(using: .utf8),
-              let env = try? JSONDecoder().decode(StreamEnvelope.self, from: data),
-              env.type == "result",
-              env.isError == true else {
-            return nil
-        }
-        return env.result ?? "assistant Code CLI reported an error."
     }
 
     // MARK: - Locating `assistant`
 
-    /// Finds the `assistant` CLI by probing the common install locations and,
-    /// if nothing is found there, asking the user's login shell. GUI apps
-    /// launched from Finder inherit a minimal `PATH`, so we can't rely on
-    /// `/usr/bin/env` to locate it.
+    /// Caches the resolved CLI URL across calls so the (potentially slow,
+    /// rc-file-sourcing) login-shell probe runs at most once per launch
+    /// rather than on every cold request.
+    private static let locatedExecutable = ResolvedExecutableCache()
+
+    /// Finds the `assistant` CLI by probing the common install locations first
+    /// and, only if nothing is found there, asking the user's login shell as
+    /// a best-effort fallback. GUI apps launched from Finder inherit a minimal
+    /// `PATH`, so we can't rely on `/usr/bin/env` to locate it. The result is
+    /// cached so the login shell is sourced at most once per launch.
     private static func locateExecutable() -> URL? {
+        if let cached = locatedExecutable.value {
+            return cached
+        }
+
+        let resolved = Self.resolveExecutable()
+        if let resolved {
+            locatedExecutable.value = resolved
+        }
+        return resolved
+    }
+
+    private static func resolveExecutable() -> URL? {
         let fileManager = FileManager.default
         let home = fileManager.homeDirectoryForCurrentUser.path
         let candidates: [String] = [
@@ -256,16 +367,35 @@ struct assistantSubscriptionClient {
             "/usr/local/bin/assistant",
             "/usr/bin/assistant"
         ]
-        for path in candidates where fileManager.isExecutableFile(atPath: path) {
+        for path in candidates where Self.isUsableExecutable(path) {
             return URL(fileURLWithPath: path)
         }
 
+        // Best-effort fallback: ask the login shell where `assistant` lives, then
+        // re-validate the result on our side. We only trust the path if it is
+        // a regular, executable file named `assistant` — never executing whatever
+        // arbitrary string the shell prints, which could be a side effect or a
+        // PATH-injected binary.
         if let resolved = Self.resolveViaLoginShell(),
-           fileManager.isExecutableFile(atPath: resolved) {
+           Self.isUsableExecutable(resolved) {
             return URL(fileURLWithPath: resolved)
         }
 
         return nil
+    }
+
+    /// Validates that `path` points at a regular, executable file actually
+    /// named `assistant`, guarding against the login shell returning a directory,
+    /// a non-executable, or some other unexpected string.
+    private static func isUsableExecutable(_ path: String) -> Bool {
+        let fileManager = FileManager.default
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory),
+              !isDirectory.boolValue,
+              fileManager.isExecutableFile(atPath: path) else {
+            return false
+        }
+        return URL(fileURLWithPath: path).lastPathComponent == "assistant"
     }
 
     private static func resolveViaLoginShell() -> String? {
@@ -284,12 +414,131 @@ struct assistantSubscriptionClient {
             return nil
         }
 
+        // Bound the probe with a wall-clock timeout: a login shell that blocks
+        // (e.g. a wedged rc file) must not hang the request indefinitely.
+        let timedOut = TimeoutFlag()
+        let watchdog = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+        watchdog.schedule(deadline: .now() + 10)
+        watchdog.setEventHandler {
+            timedOut.set()
+            process.terminate()
+            DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
+                if process.isRunning {
+                    kill(process.processIdentifier, SIGKILL)
+                }
+            }
+        }
+        watchdog.resume()
+        defer { watchdog.cancel() }
+
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
+        guard !timedOut.isSet, process.terminationStatus == 0 else { return nil }
 
+        // `command -v` can emit multiple lines; trust only the first path-like
+        // token so an rc file's stray stdout can't smuggle in an alternate
+        // path on a later line.
         let output = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first(where: { $0.hasPrefix("/") })
         return (output?.isEmpty == false) ? output : nil
+    }
+}
+
+// MARK: - Sendable helpers
+
+/// Holds the detached worker `Task` and a terminate hook so cancellation can
+/// both cancel the task and SIGTERM the subprocess (the latter unblocks the
+/// synchronous stdout read immediately).
+private final class WorkerTaskBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _task: Task<Void, Never>?
+    private var _terminateAction: (@Sendable () -> Void)?
+
+    var task: Task<Void, Never>? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _task
+        }
+        set {
+            lock.lock()
+            _task = newValue
+            lock.unlock()
+        }
+    }
+
+    var terminateAction: (@Sendable () -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _terminateAction
+        }
+        set {
+            lock.lock()
+            _terminateAction = newValue
+            lock.unlock()
+        }
+    }
+
+    func terminate() {
+        terminateAction?()
+    }
+}
+
+/// Thread-safe accumulator for the subprocess's stderr, written from the
+/// pipe's background `readabilityHandler` and read after `waitUntilExit()`.
+private final class StderrCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func append(_ chunk: Data) {
+        lock.lock()
+        data.append(chunk)
+        lock.unlock()
+    }
+
+    var string: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+}
+
+/// A one-way flag set from a background watchdog and read on the worker.
+private final class TimeoutFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+
+    func set() {
+        lock.lock()
+        flag = true
+        lock.unlock()
+    }
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return flag
+    }
+}
+
+/// Caches the resolved `assistant` executable URL across calls.
+private final class ResolvedExecutableCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cached: URL?
+
+    var value: URL? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return cached
+        }
+        set {
+            lock.lock()
+            cached = newValue
+            lock.unlock()
+        }
     }
 }

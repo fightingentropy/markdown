@@ -214,8 +214,18 @@ enum MermaidParser {
                 }
                 continue
             }
-            if ["loop", "alt", "else", "end", "note", "rect", "activate", "deactivate"]
-                .contains(where: { line.hasPrefix($0) }) { continue }
+            // Detect arrows first: a line containing a recognized arrow operator is a
+            // message regardless of its leading word (e.g. a participant named "loop").
+            let hasArrow = arrows.contains { line.contains($0.0) }
+            if !hasArrow {
+                // Skip standalone control statements. Match the first token exactly so
+                // participants whose name merely starts with a keyword (e.g. "endpoint",
+                // "alternate", "noteSvc") are not silently dropped.
+                let firstWord = line.split(separator: " ").first.map(String.init) ?? line
+                let bareKeywords: Set<String> = ["else", "end", "activate", "deactivate"]
+                let argKeywords: Set<String> = ["loop", "alt", "opt", "par", "note", "rect"]
+                if bareKeywords.contains(firstWord) || argKeywords.contains(firstWord) { continue }
+            }
 
             for (arrow, type) in arrows {
                 guard let r = line.range(of: arrow) else { continue }

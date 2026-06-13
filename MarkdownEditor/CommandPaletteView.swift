@@ -4,61 +4,26 @@ enum PaletteResult: Equatable {
     case file(URL)
 }
 
-private struct PaletteMatch: Identifiable {
-    let file: FileItem
-    let bodySnippet: String?
-
-    var id: URL { file.id }
-}
-
 struct CommandPaletteView: View {
     let workspace: Workspace
     let onDismiss: () -> Void
 
     @State private var query = ""
-    // Debounced mirror of `query` used by the result filter so that a single
-    // keystroke doesn't force a full O(files * string-compare) rescan on
-    // every character — visible as input lag on larger vaults.
-    @State private var activeQuery = ""
+    // A `Sendable` snapshot of the searchable corpus, captured once when the
+    // palette opens. Filtering reads only this — never `workspace` — so a
+    // keystroke can't trigger a fresh O(files) walk of live model state.
+    @State private var entries: [NoteSearchEntry] = []
+    // The current result set, recomputed exactly once per (debounced) query
+    // rather than on every view render / table row.
+    @State private var results: [NoteSearchResult] = []
+    @State private var selectedIndex = 0
     @FocusState private var isSearchFieldFocused: Bool
 
-    private var filteredMatches: [PaletteMatch] {
-        let files = workspace.sortedFiles
-        if activeQuery.isEmpty {
-            return files.map { PaletteMatch(file: $0, bodySnippet: nil) }
-        }
-
-        var titleMatches: [PaletteMatch] = []
-        var bodyMatches: [PaletteMatch] = []
-
-        for file in files {
-            let title = workspace.title(for: file)
-            let matchesTitle = title.localizedStandardContains(activeQuery) ||
-                file.displayName.localizedStandardContains(activeQuery) ||
-                file.name.localizedStandardContains(activeQuery)
-
-            if matchesTitle {
-                titleMatches.append(PaletteMatch(file: file, bodySnippet: nil))
-                continue
-            }
-
-            guard let body = workspace.noteBody(for: file.url),
-                  let snippet = Self.matchSnippet(in: body, for: activeQuery) else {
-                continue
-            }
-
-            bodyMatches.append(PaletteMatch(file: file, bodySnippet: snippet))
-        }
-
-        return titleMatches + bodyMatches
-    }
-
     private var primaryResult: PaletteResult? {
-        if let match = filteredMatches.first {
-            return .file(match.id)
+        guard results.indices.contains(selectedIndex) else {
+            return results.first.map { .file($0.id) }
         }
-
-        return nil
+        return .file(results[selectedIndex].id)
     }
 
     var body: some View {
@@ -74,11 +39,13 @@ struct CommandPaletteView: View {
                 HStack(spacing: 12) {
                     Image(systemName: "magnifyingglass")
                         .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
 
                     TextField("Search notes\u{2026}", text: $query)
                         .textFieldStyle(.plain)
                         .font(.title3)
                         .focused($isSearchFieldFocused)
+                        .accessibilityLabel("Search notes")
                         .onSubmit {
                             activatePrimaryResult()
                         }
@@ -87,31 +54,39 @@ struct CommandPaletteView: View {
 
                 Divider()
 
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 20) {
-                        paletteSection("Notes") {
-                            if filteredMatches.isEmpty {
-                                Text("No matching notes")
-                                    .foregroundStyle(.secondary)
-                                    .padding(.top, 4)
-                            } else {
-                                ForEach(filteredMatches) { match in
-                                    paletteButton(
-                                        title: workspace.title(for: match.file),
-                                        subtitle: match.bodySnippet ?? workspace.relativePath(for: match.file),
-                                        systemImage: match.file.url == workspace.selectedFileURL ? "doc.text.fill" : "doc.text",
-                                        isSelected: primaryResult == .file(match.file.id)
-                                    ) {
-                                        workspace.selectFile(match.file.url)
-                                        dismiss()
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 20) {
+                            paletteSection("Notes") {
+                                if results.isEmpty {
+                                    Text("No matching notes")
+                                        .foregroundStyle(.secondary)
+                                        .padding(.top, 4)
+                                } else {
+                                    ForEach(Array(results.enumerated()), id: \.element.id) { index, match in
+                                        paletteButton(
+                                            title: match.title,
+                                            subtitle: match.subtitle,
+                                            systemImage: match.url == workspace.selectedFileURL ? "doc.text.fill" : "doc.text",
+                                            isSelected: index == selectedIndex
+                                        ) {
+                                            workspace.selectFile(match.url)
+                                            dismiss()
+                                        }
+                                        .id(index)
                                     }
                                 }
                             }
                         }
+                        .padding(20)
                     }
-                    .padding(20)
+                    .frame(maxHeight: 420)
+                    .onChange(of: selectedIndex) { _, newValue in
+                        withAnimation(.easeOut(duration: 0.1)) {
+                            proxy.scrollTo(newValue, anchor: .center)
+                        }
+                    }
                 }
-                .frame(maxHeight: 420)
             }
             .frame(width: 640)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
@@ -124,24 +99,42 @@ struct CommandPaletteView: View {
         }
         .onAppear {
             isSearchFieldFocused = true
+            entries = workspace.makeSearchEntries()
+            results = Workspace.search(entries, query: "")
         }
         .onExitCommand {
             dismiss()
         }
+        .onKeyPress(.upArrow) {
+            moveSelection(by: -1)
+            return .handled
+        }
+        .onKeyPress(.downArrow) {
+            moveSelection(by: 1)
+            return .handled
+        }
         .task(id: query) {
-            // Treat empty queries as immediate so the default file list
-            // appears without flicker. Otherwise wait ~120ms so a burst of
-            // keystrokes collapses into a single filter pass.
-            if query.isEmpty {
-                activeQuery = ""
-                return
+            // Empty queries resolve immediately so the full list shows without
+            // flicker; otherwise debounce ~120ms so a burst of keystrokes
+            // collapses into one filter pass.
+            if !query.isEmpty {
+                do {
+                    try await Task.sleep(nanoseconds: 120_000_000)
+                } catch {
+                    return
+                }
             }
-            do {
-                try await Task.sleep(nanoseconds: 120_000_000)
-            } catch {
-                return
-            }
-            activeQuery = query
+
+            let snapshot = entries
+            let currentQuery = query
+            // Filter off the main actor so large vaults don't stall typing.
+            let filtered = await Task.detached(priority: .userInitiated) {
+                Workspace.search(snapshot, query: currentQuery)
+            }.value
+
+            guard !Task.isCancelled else { return }
+            results = filtered
+            selectedIndex = 0
         }
     }
 
@@ -168,6 +161,7 @@ struct CommandPaletteView: View {
                 Image(systemName: systemImage)
                     .frame(width: 18)
                     .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
@@ -191,6 +185,13 @@ struct CommandPaletteView: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(isSelected ? .white.opacity(0.08) : .white.opacity(0.04))
         )
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+    }
+
+    private func moveSelection(by delta: Int) {
+        guard !results.isEmpty else { return }
+        let next = selectedIndex + delta
+        selectedIndex = min(max(next, 0), results.count - 1)
     }
 
     private func dismiss() {
@@ -201,41 +202,11 @@ struct CommandPaletteView: View {
     private func activatePrimaryResult() {
         switch primaryResult {
         case .file(let id):
-            guard let match = filteredMatches.first(where: { $0.id == id }) else { return }
-            workspace.selectFile(match.file.url)
+            guard let match = results.first(where: { $0.id == id }) else { return }
+            workspace.selectFile(match.url)
             dismiss()
         case nil:
             break
         }
-    }
-
-    private static func matchSnippet(in body: String, for query: String) -> String? {
-        guard !body.isEmpty, !query.isEmpty else { return nil }
-        guard let matchRange = body.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) else {
-            return nil
-        }
-
-        // Expand to the enclosing line so the snippet reads naturally.
-        let lineRange = body.lineRange(for: matchRange)
-        let rawLine = body[lineRange].trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !rawLine.isEmpty else { return nil }
-
-        let maxLength = 140
-        guard rawLine.count > maxLength else { return rawLine }
-
-        // Keep the match roughly centered in the snippet window.
-        let matchOffset = body.distance(from: lineRange.lowerBound, to: matchRange.lowerBound)
-        let windowStart = max(0, matchOffset - maxLength / 2)
-        let startIndex = rawLine.index(rawLine.startIndex, offsetBy: min(windowStart, rawLine.count))
-        let endIndex = rawLine.index(startIndex, offsetBy: min(maxLength, rawLine.distance(from: startIndex, to: rawLine.endIndex)))
-        var snippet = String(rawLine[startIndex..<endIndex])
-
-        if startIndex != rawLine.startIndex {
-            snippet = "…" + snippet
-        }
-        if endIndex != rawLine.endIndex {
-            snippet += "…"
-        }
-        return snippet
     }
 }

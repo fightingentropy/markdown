@@ -2,7 +2,20 @@ import AppKit
 import SwiftUI
 
 struct ImagePreview: View {
-    private static let imageCache = NSCache<NSURL, NSImage>()
+    private static let imageCache: NSCache<NSURL, NSImage> = {
+        let cache = NSCache<NSURL, NSImage>()
+        cache.countLimit = 20
+        cache.totalCostLimit = 256 * 1024 * 1024 // 256 MB of decoded pixels
+        return cache
+    }()
+
+    /// Estimated decoded byte cost of an image (RGBA), used as the NSCache cost so the
+    /// totalCostLimit can evict large images rather than letting them accumulate.
+    private static func cacheCost(for image: NSImage) -> Int {
+        let size = image.size
+        let bytes = size.width * size.height * 4
+        return bytes.isFinite && bytes > 0 ? Int(min(bytes, CGFloat(Int.max))) : 1
+    }
 
     let url: URL
     @State private var zoomScale: CGFloat = 1
@@ -10,6 +23,7 @@ struct ImagePreview: View {
     @State private var controlsHideTask: Task<Void, Never>?
     @State private var image: NSImage?
     @State private var isLoadingImage = false
+    @FocusState private var isControlsFocused: Bool
 
     var body: some View {
         Group {
@@ -50,23 +64,38 @@ struct ImagePreview: View {
 
     private func scheduleControlsHide(after duration: Duration) {
         controlsHideTask?.cancel()
+        // Keep the controls visible while a control has keyboard/VoiceOver focus so
+        // keyboard-only and assistive-tech users can always reach them.
+        guard !isControlsFocused else { return }
         controlsHideTask = Task { @MainActor in
             try? await Task.sleep(for: duration)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, !isControlsFocused else { return }
             isShowingControls = false
         }
     }
 
     private func imageView(_ image: NSImage) -> some View {
-        ZoomableImageScrollView(image: image, zoomScale: $zoomScale)
+        ZoomableImageScrollView(image: image, accessibilityLabel: "Image: \(url.lastPathComponent)", zoomScale: $zoomScale)
             .padding(24)
             .overlay(alignment: .topTrailing) {
                 zoomControls
+                    .focused($isControlsFocused)
                     .padding(16)
                     .opacity(isShowingControls ? 1 : 0)
                     .offset(y: isShowingControls ? 0 : -6)
                     .animation(.easeInOut(duration: 0.18), value: isShowingControls)
-                    .allowsHitTesting(isShowingControls)
+                    // Keep controls hit-testable while focused so keyboard/VoiceOver
+                    // users can activate them even during the hide animation.
+                    .allowsHitTesting(isShowingControls || isControlsFocused)
+                    .onChange(of: isControlsFocused) { _, focused in
+                        if focused {
+                            // Reveal (and keep revealed) as soon as focus lands here.
+                            controlsHideTask?.cancel()
+                            isShowingControls = true
+                        } else {
+                            scheduleControlsHide(after: .milliseconds(900))
+                        }
+                    }
             }
             .onHover { isHovering in
                 if isHovering {
@@ -95,18 +124,30 @@ struct ImagePreview: View {
 
         image = nil
         isLoadingImage = true
-        let data = await Task.detached(priority: .userInitiated) {
-            try? Data(contentsOf: url)
-        }.value
+
+        // Read off the main actor via a nonisolated async helper. Because it stays within
+        // the current `.task(id:)`'s structured task tree, cancellation (a new URL or
+        // onDisappear) propagates: the helper bails before/after the read instead of
+        // continuing to read bytes for an image the user has already navigated away from.
+        let data = await Self.readImageData(at: url)
         guard !Task.isCancelled else { return }
 
         let loadedImage = data.flatMap(NSImage.init(data:))
         if let loadedImage {
-            Self.imageCache.setObject(loadedImage, forKey: cacheKey)
+            Self.imageCache.setObject(loadedImage, forKey: cacheKey, cost: Self.cacheCost(for: loadedImage))
         }
 
         image = loadedImage
         isLoadingImage = false
+    }
+
+    /// Reads a file's bytes off the main actor in a cancellation-aware manner. Kept
+    /// `nonisolated` so awaiting it from `loadImage()` hops off `@MainActor` while
+    /// remaining part of the calling `.task`'s structured tree.
+    private nonisolated static func readImageData(at url: URL) async -> Data? {
+        guard !Task.isCancelled else { return nil }
+        let bytes = try? Data(contentsOf: url, options: .mappedIfSafe)
+        return Task.isCancelled ? nil : bytes
     }
 
     private var zoomControls: some View {
@@ -118,6 +159,7 @@ struct ImagePreview: View {
                 Image(systemName: "minus")
             }
             .help("Zoom Out")
+            .accessibilityLabel("Zoom Out")
             .disabled(zoomScale <= minimumZoomScale)
 
             Text("\(Int(zoomScale * 100))%")
@@ -125,6 +167,8 @@ struct ImagePreview: View {
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 44)
+                .accessibilityLabel("Current zoom")
+                .accessibilityValue("\(Int(zoomScale * 100)) percent")
 
             Button {
                 revealControls()
@@ -133,6 +177,7 @@ struct ImagePreview: View {
                 Image(systemName: "plus")
             }
             .help("Zoom In")
+            .accessibilityLabel("Zoom In")
             .disabled(zoomScale >= maximumZoomScale)
 
             Button("Reset") {
@@ -141,6 +186,7 @@ struct ImagePreview: View {
             }
             .font(.caption)
             .help("Reset Zoom")
+            .accessibilityLabel("Reset Zoom")
             .disabled(abs(zoomScale - 1) < 0.01)
         }
         .buttonStyle(.bordered)
@@ -160,6 +206,7 @@ struct ImagePreview: View {
 
 struct ZoomableImageScrollView: NSViewRepresentable {
     let image: NSImage
+    var accessibilityLabel: String = ""
     @Binding var zoomScale: CGFloat
 
     func makeCoordinator() -> Coordinator {
@@ -182,6 +229,11 @@ struct ZoomableImageScrollView: NSViewRepresentable {
         imageView.imageAlignment = .alignCenter
         imageView.image = image
         imageView.frame = CGRect(origin: .zero, size: image.size)
+        imageView.setAccessibilityElement(true)
+        imageView.setAccessibilityRole(.image)
+        if !accessibilityLabel.isEmpty {
+            imageView.setAccessibilityLabel(accessibilityLabel)
+        }
 
         let documentView = FlippedDocumentView(frame: CGRect(origin: .zero, size: image.size))
         documentView.addSubview(imageView)
@@ -211,6 +263,10 @@ struct ZoomableImageScrollView: NSViewRepresentable {
 
         if imageView.image != image {
             imageView.image = image
+        }
+
+        if !accessibilityLabel.isEmpty, imageView.accessibilityLabel() != accessibilityLabel {
+            imageView.setAccessibilityLabel(accessibilityLabel)
         }
 
         if imageView.frame.size != image.size {

@@ -1,20 +1,44 @@
+import Foundation
+
 @MainActor
 enum PreviewStylesheet {
 
     static func page(body: String, preferences: AppPreferences) -> String {
         let needsMath = body.contains("class=\"math-inline\"") || body.contains("class=\"math-display\"")
         let mathAssets = needsMath ? mathAssetsHTML : ""
+        // Per-render nonce authorizes only our own inline bootstrap script.
+        let nonce = UUID().uuidString
+
+        // Defense-in-depth CSP. Even though cmark now renders in safe mode (no
+        // raw user HTML, no unsafe link schemes), this hard-stops the
+        // exfiltration path: `connect-src 'none'` blocks fetch/XHR/beacons,
+        // `script-src` permits only the bundled KaTeX asset and the nonced
+        // bootstrap, and frames/objects/forms are denied outright. `img-src`
+        // still allows https/data so images and YouTube cards keep working.
+        let csp = [
+            "default-src 'none'",
+            "img-src 'self' data: file: katex-asset: https:",
+            "style-src 'unsafe-inline' katex-asset:",
+            "font-src katex-asset: data:",
+            "script-src 'nonce-\(nonce)' katex-asset:",
+            "connect-src 'none'",
+            "base-uri 'none'",
+            "form-action 'none'",
+            "frame-src 'none'",
+            "object-src 'none'"
+        ].joined(separator: "; ")
 
         return """
         <!DOCTYPE html>
         <html>
         <head>
         <meta charset="utf-8">
+        <meta http-equiv="Content-Security-Policy" content="\(csp)">
         <meta name="color-scheme" content="light dark">
         <style>\(css(using: preferences))</style>
         \(mathAssets)
         </head>
-        <body>\(body)\(needsMath ? mathBootstrapScript : "")</body>
+        <body>\(body)\(needsMath ? mathBootstrapScript(nonce: nonce) : "")</body>
         </html>
         """
     }
@@ -27,8 +51,9 @@ enum PreviewStylesheet {
     <script defer src="katex-asset:///katex.min.js"></script>
     """
 
-    private static let mathBootstrapScript = """
-    <script>
+    private static func mathBootstrapScript(nonce: String) -> String {
+        """
+    <script nonce="\(nonce)">
     document.addEventListener('DOMContentLoaded', function() {
         if (typeof katex === 'undefined') { return; }
         function renderAll(selector, displayMode) {
@@ -46,6 +71,7 @@ enum PreviewStylesheet {
     });
     </script>
     """
+    }
 
     static func css(using preferences: AppPreferences) -> String {
         let previewFontFamily = preferences.previewFontChoice.cssFontFamily

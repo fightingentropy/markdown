@@ -67,6 +67,7 @@ struct ContentView: View {
                         Image(systemName: "plus")
                     }
                     .help("New File")
+                    .accessibilityLabel("New File")
 
                     ForEach(OpenViewMode.allCases) { mode in
                         Button {
@@ -77,6 +78,8 @@ struct ContentView: View {
                         .help(mode.title)
                         .disabled(!workspace.selectedFileIsMarkdown)
                         .opacity(viewMode == mode ? 1 : 0.5)
+                        .accessibilityLabel(mode.title)
+                        .accessibilityAddTraits(viewMode == mode ? [.isButton, .isSelected] : .isButton)
                     }
                 }
             }
@@ -139,6 +142,7 @@ struct ContentView: View {
                 try workspace.renameItem(request.url, to: proposedName)
             }
         }
+        .modifier(SaveStatusAlerts(workspace: workspace))
     }
 
     // MARK: - Sidebar
@@ -203,6 +207,8 @@ struct ContentView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
+                .help("Sort Order")
+                .accessibilityLabel("Sort Order")
 
                 Button {
                     collapseSidebarFolders()
@@ -212,6 +218,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Collapse All Folders")
+                .accessibilityLabel("Collapse All Folders")
                 .disabled(expandedFolderURLs.isEmpty)
 
                 Spacer()
@@ -400,6 +407,43 @@ private extension ContentView {
     var sidebarExpansionStorageKey: String? {
         guard let vaultURL = workspace.vaultURL else { return nil }
         return "sidebarExpandedFolders::" + vaultURL.standardizedFileURL.path
+    }
+}
+
+// MARK: - Save Status Alerts
+
+/// Surfaces save failures and external-modification conflicts. Extracted into a
+/// modifier so the alert closures don't bloat `ContentView.body` past the
+/// type-checker's complexity budget.
+private struct SaveStatusAlerts: ViewModifier {
+    @Bindable var workspace: Workspace
+
+    func body(content: Content) -> some View {
+        content
+            .alert(
+                "File Changed on Disk",
+                isPresented: Binding(
+                    get: { workspace.saveConflict != nil },
+                    set: { if !$0 { workspace.saveConflict = nil } }
+                ),
+                presenting: workspace.saveConflict
+            ) { _ in
+                Button("Keep My Version") { workspace.resolveSaveConflictKeepingMine() }
+                Button("Reload From Disk", role: .destructive) { workspace.resolveSaveConflictUsingDisk() }
+            } message: { conflict in
+                Text("\u{201C}\(conflict.fileName)\u{201D} was modified by another app since you opened it. Keeping your version overwrites those changes; reloading discards your unsaved edits.")
+            }
+            .alert(
+                "Save Failed",
+                isPresented: Binding(
+                    get: { workspace.saveError != nil },
+                    set: { if !$0 { workspace.saveError = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) { workspace.saveError = nil }
+            } message: {
+                Text(workspace.saveError ?? "")
+            }
     }
 }
 

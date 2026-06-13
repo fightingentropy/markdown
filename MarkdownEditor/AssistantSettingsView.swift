@@ -104,7 +104,8 @@ struct AppSettingsView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 22) {
             Text("Settings")
-                .font(.system(size: 34, weight: .semibold, design: .rounded))
+                .font(.largeTitle.weight(.semibold))
+                .fontDesign(.rounded)
 
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(SettingsSection.allCases) { section in
@@ -134,7 +135,8 @@ struct AppSettingsView: View {
     private var detailHeader: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(selectedSection.title)
-                .font(.system(size: 32, weight: .semibold, design: .rounded))
+                .font(.largeTitle.weight(.semibold))
+                .fontDesign(.rounded)
 
             Text(selectedSection.description)
                 .font(.title3)
@@ -577,7 +579,7 @@ struct AppSettingsView: View {
                         .frame(width: 38, height: 38)
 
                     Image(systemName: section.systemImage)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.headline.weight(.semibold))
                         .foregroundStyle(isSelected ? .white : section.accent)
                 }
 

@@ -362,8 +362,8 @@ struct NoteReferenceResolver: Sendable {
     private let noteURLs: Set<URL>
     private let relativePathLookup: [String: URL]
     private let relativeStemLookup: [String: URL]
-    private let basenameLookup: [String: URL]
-    private let stemLookup: [String: URL]
+    private let basenameLookup: [String: [URL]]
+    private let stemLookup: [String: [URL]]
 
     init(noteURLs: [URL], vaultURL: URL?) {
         let standardizedVaultURL = vaultURL?.resolvingSymlinksInPath().standardizedFileURL
@@ -394,11 +394,17 @@ struct NoteReferenceResolver: Sendable {
 
         self.relativePathLookup = relativePathLookup
         self.relativeStemLookup = relativeStemLookup
-        self.basenameLookup = Self.uniqueLookup(from: basenameEntries)
-        self.stemLookup = Self.uniqueLookup(from: stemEntries)
+        self.basenameLookup = Self.groupedLookup(from: basenameEntries)
+        self.stemLookup = Self.groupedLookup(from: stemEntries)
     }
 
     func resolve(destination rawDestination: String, from sourceURL: URL?) -> URL? {
+        // Web/non-file destinations can never resolve to a vault note, so skip the
+        // (potentially costly) normalization and multi-dictionary lookup entirely.
+        if Self.isExternalDestination(rawDestination) {
+            return nil
+        }
+
         let normalizedDestination = Self.normalizedDestination(rawDestination)
         guard !normalizedDestination.isEmpty else {
             return nil
@@ -423,12 +429,24 @@ struct NoteReferenceResolver: Sendable {
         }
 
         let fileName = (normalizedDestination as NSString).lastPathComponent
-        if let match = basenameLookup[Self.normalizeLookupKey(fileName)] {
+        if let match = bestCandidate(
+            in: basenameLookup,
+            key: Self.normalizeLookupKey(fileName),
+            exactComponent: fileName,
+            from: sourceURL,
+            componentForURL: { $0.lastPathComponent }
+        ) {
             return match
         }
 
         let stem = (fileName as NSString).deletingPathExtension
-        if let match = stemLookup[Self.normalizeLookupKey(stem)] {
+        if let match = bestCandidate(
+            in: stemLookup,
+            key: Self.normalizeLookupKey(stem),
+            exactComponent: stem,
+            from: sourceURL,
+            componentForURL: { $0.deletingPathExtension().lastPathComponent }
+        ) {
             return match
         }
 
@@ -438,6 +456,55 @@ struct NoteReferenceResolver: Sendable {
         }
 
         return nil
+    }
+
+    /// Resolve an ambiguous basename/stem key to a single note.
+    ///
+    /// When more than one note shares the (case-folded) key, pick deterministically
+    /// instead of dropping the link: prefer an exact-case component match, then a
+    /// match in the source note's directory, then the shortest path, then alphabetical.
+    /// On case-sensitive volumes this keeps case-distinct notes from colliding;
+    /// on case-insensitive volumes the folded key still resolves as before.
+    private func bestCandidate(
+        in lookup: [String: [URL]],
+        key: String,
+        exactComponent: String,
+        from sourceURL: URL?,
+        componentForURL: (URL) -> String
+    ) -> URL? {
+        guard let candidates = lookup[key], !candidates.isEmpty else {
+            return nil
+        }
+
+        if candidates.count == 1 {
+            return candidates[0]
+        }
+
+        // Prefer candidates whose on-disk component matches the requested case exactly.
+        let exactCaseMatches = candidates.filter { componentForURL($0) == exactComponent }
+        let pool = exactCaseMatches.isEmpty ? candidates : exactCaseMatches
+
+        if pool.count == 1 {
+            return pool[0]
+        }
+
+        let sourceDirectoryPath = sourceURL?.deletingLastPathComponent().standardizedFileURL.path
+
+        return pool.min { lhs, rhs in
+            if let sourceDirectoryPath {
+                let lhsLocal = lhs.deletingLastPathComponent().path == sourceDirectoryPath
+                let rhsLocal = rhs.deletingLastPathComponent().path == sourceDirectoryPath
+                if lhsLocal != rhsLocal {
+                    return lhsLocal
+                }
+            }
+
+            if lhs.path.count != rhs.path.count {
+                return lhs.path.count < rhs.path.count
+            }
+
+            return lhs.path.localizedStandardCompare(rhs.path) == .orderedAscending
+        }
     }
 
     private func resolveRelativeDestination(_ destination: String, from sourceURL: URL) -> URL? {
@@ -460,18 +527,42 @@ struct NoteReferenceResolver: Sendable {
         return nil
     }
 
-    private static func uniqueLookup(from entries: [(String, URL)]) -> [String: URL] {
+    private static func groupedLookup(from entries: [(String, URL)]) -> [String: [URL]] {
         var grouped: [String: [URL]] = [:]
         for (key, url) in entries where !key.isEmpty {
             grouped[key, default: []].append(url)
         }
+        return grouped
+    }
 
-        return grouped.reduce(into: [:]) { result, entry in
-            guard entry.value.count == 1, let url = entry.value.first else {
-                return
-            }
-            result[entry.key] = url
+    /// Reports whether the destination is an external (non-vault) link such as a
+    /// web URL or `mailto:`/`tel:` scheme that can never resolve to a note.
+    /// Only absolute `file:` references are treated as in-vault here; everything
+    /// else with a recognized non-file scheme is short-circuited.
+    private static func isExternalDestination(_ rawDestination: String) -> Bool {
+        var trimmed = rawDestination.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("<"), trimmed.hasSuffix(">"), trimmed.count >= 2 {
+            trimmed.removeFirst()
+            trimmed.removeLast()
         }
+
+        guard let schemeRange = trimmed.range(of: "://") ?? trimmed.range(of: ":") else {
+            return false
+        }
+
+        let scheme = trimmed[trimmed.startIndex..<schemeRange.lowerBound].lowercased()
+        guard !scheme.isEmpty, scheme != "file" else {
+            return false
+        }
+
+        // A bare drive-letter-like or Windows path won't contain a clean scheme;
+        // only treat it as external when the scheme is purely alphanumeric.
+        guard scheme.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "+" || $0 == "-" || $0 == "." }),
+              scheme.first?.isLetter == true else {
+            return false
+        }
+
+        return externalLinkSchemes.contains(scheme) || trimmed.contains("://")
     }
 
     private static func relativeCandidates(for destination: String, relativeTo baseURL: URL) -> [URL] {
@@ -796,6 +887,34 @@ enum NoteGraphLayoutEngine {
         return NoteGraphLayout(positions: mappedPositions)
     }
 
+    /// Cheaply re-centers an existing layout on a (possibly new) pinned node
+    /// without re-running the O(n²) force simulation.
+    ///
+    /// Reuses the node positions already computed for `existing` and only re-pins
+    /// the selected node to the origin and re-normalizes. Returns `nil` when the
+    /// existing layout cannot cover the snapshot (caller should fall back to
+    /// `generate`).
+    static func recenter(_ existing: NoteGraphLayout, for snapshot: NoteGraphSnapshot) -> NoteGraphLayout? {
+        guard !snapshot.nodes.isEmpty else {
+            return .empty
+        }
+
+        let nodes = snapshot.nodes
+        guard nodes.allSatisfy({ existing.positions[$0.id] != nil }) else {
+            return nil
+        }
+
+        let positions = nodes.map { existing.positions[$0.id] ?? .zero }
+        let normalizedPositions = normalized(
+            positions,
+            pinnedNodeID: snapshot.selectedNodeID,
+            nodes: nodes
+        )
+        return NoteGraphLayout(
+            positions: Dictionary(uniqueKeysWithValues: zip(nodes.map(\.id), normalizedPositions))
+        )
+    }
+
     private static func connectedComponents(
         for snapshot: NoteGraphSnapshot
     ) -> [[URL]] {
@@ -1026,6 +1145,11 @@ enum NoteGraphLayoutEngine {
 
 private let markdownNoteExtensionsInPriorityOrder = ["md", "markdown", "mdown"]
 private let markdownNoteExtensions: Set<String> = Set(markdownNoteExtensionsInPriorityOrder)
+
+/// Schemes that always point outside the vault and should never trigger note resolution.
+private let externalLinkSchemes: Set<String> = [
+    "http", "https", "mailto", "tel", "ftp", "ftps", "sms", "data", "javascript"
+]
 
 private extension String {
     func trimmingLeadingWhitespace() -> String {

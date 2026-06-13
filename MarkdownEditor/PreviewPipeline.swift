@@ -797,6 +797,15 @@ enum HTMLPreviewRenderer {
     }
 
     private static func renderMarkdown(_ markdown: String) -> String {
+        // We keep CMARK_OPT_UNSAFE because the preview legitimately relies on
+        // it to emit `file://` <img> sources for local vault images (cmark's
+        // safe mode strips the `file:` scheme). To stay safe we instead:
+        //   1. Neutralize *all* raw user HTML before parsing (escapeUserHTML),
+        //      using a sound per-`<` escaper with no multi-line or scheme
+        //      bypass — genuine http(s)/mailto autolinks are preserved.
+        //   2. Strip dangerous link/script schemes from the rendered output
+        //      (sanitizeDangerousURLSchemes in applyAppSpecificPostProcessing).
+        // A strict CSP and a WKNavigationDelegate provide defense in depth.
         let sanitizedMarkdown = escapeUserHTML(in: markdown)
         let options = Int32(CMARK_OPT_UNSAFE)
 
@@ -848,7 +857,28 @@ enum HTMLPreviewRenderer {
 
         let paragraphTransformed = transformParagraphBlocks(in: widthAdjustedHTML)
         let youtubeTransformed = transformYouTubeLinks(in: paragraphTransformed)
-        return transformMathTokens(in: youtubeTransformed)
+        let mathTransformed = transformMathTokens(in: youtubeTransformed)
+        return sanitizeDangerousURLSchemes(in: mathTransformed)
+    }
+
+    /// cmark with CMARK_OPT_UNSAFE does not sanitize link/image destinations,
+    /// so a `[x](javascript:…)` markdown link would render a live
+    /// `javascript:` href. Neutralize dangerous schemes in href/src attributes
+    /// here (keeping `data:image/…` so inline images still work).
+    private static func sanitizeDangerousURLSchemes(in html: String) -> String {
+        var result = html
+        let patterns = [
+            #"(?i)(href|src)\s*=\s*"\s*(?:javascript|vbscript):[^"]*""#,
+            #"(?i)(href|src)\s*=\s*'\s*(?:javascript|vbscript):[^']*'"#,
+            #"(?i)(href|src)\s*=\s*"\s*data:(?!image/)[^"]*""#,
+            #"(?i)(href|src)\s*=\s*'\s*data:(?!image/)[^']*'"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let range = NSRange(result.startIndex..., in: result)
+            result = regex.stringByReplacingMatches(in: result, range: range, withTemplate: "$1=\"#\"")
+        }
+        return result
     }
 
     private static func transformMathTokens(in html: String) -> String {
@@ -1089,6 +1119,17 @@ enum HTMLPreviewRenderer {
             .replacingOccurrences(of: "&amp;", with: "&")
     }
 
+    // MARK: - Raw HTML neutralization
+
+    /// Escapes raw user-authored HTML before cmark parses it (cmark runs with
+    /// CMARK_OPT_UNSAFE so that legitimate `file://` image sources survive).
+    ///
+    /// This is the corrected successor to a previous escaper that had two
+    /// bypasses: it was line-scoped (a tag split across lines slipped through)
+    /// and it whitelisted any run containing `://` or `@` (so
+    /// `<iframe src="https://…">` passed through). This version decides per `<`
+    /// with no multi-line dependency and only exempts genuine URL autolinks
+    /// whose scheme appears *immediately* after the `<`.
     private static func escapeUserHTML(in markdown: String) -> String {
         let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         var sanitizedLines: [String] = []
@@ -1096,85 +1137,70 @@ enum HTMLPreviewRenderer {
 
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("```") {
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
                 isInsideCodeBlock.toggle()
                 sanitizedLines.append(line)
                 continue
             }
 
-            if isInsideCodeBlock {
-                sanitizedLines.append(line)
-            } else {
-                sanitizedLines.append(escapeHTMLTagsOutsideCodeSpans(in: line))
-            }
+            sanitizedLines.append(isInsideCodeBlock ? line : escapeRawHTMLAngles(in: line))
         }
 
         return sanitizedLines.joined(separator: "\n")
     }
 
-    private static func escapeHTMLTagsOutsideCodeSpans(in line: String) -> String {
+    private static let autolinkSchemePrefixes = ["http://", "https://", "mailto:"]
+
+    private static func escapeRawHTMLAngles(in line: String) -> String {
         let characters = Array(line)
         var result = ""
         var index = 0
         var activeInlineCodeFenceLength: Int?
 
         while index < characters.count {
-            if characters[index] == "`" {
+            let character = characters[index]
+
+            if character == "`" {
                 let runStart = index
                 while index < characters.count, characters[index] == "`" {
                     index += 1
                 }
-
                 let fenceLength = index - runStart
                 result.append(contentsOf: characters[runStart..<index])
-
                 if activeInlineCodeFenceLength == fenceLength {
                     activeInlineCodeFenceLength = nil
                 } else if activeInlineCodeFenceLength == nil {
                     activeInlineCodeFenceLength = fenceLength
                 }
-
                 continue
             }
 
-            if activeInlineCodeFenceLength == nil,
-               characters[index] == "<",
-               let closeIndex = characters[index...].firstIndex(of: ">") {
-                let content = String(characters[(index + 1)..<closeIndex])
-                if shouldEscapeAngleBracketContent(content) {
-                    result += "&lt;\(content)&gt;"
-                    index = closeIndex + 1
-                    continue
+            if activeInlineCodeFenceLength == nil, character == "<" {
+                // Preserve a genuine URL autolink only when the scheme appears
+                // immediately after `<` (e.g. `<https://example.com>`).
+                let lookaheadEnd = min(index + 1 + 8, characters.count)
+                let lookahead = String(characters[(index + 1)..<lookaheadEnd]).lowercased()
+                let isAutolink = autolinkSchemePrefixes.contains { lookahead.hasPrefix($0) }
+
+                if !isAutolink {
+                    let next = index + 1 < characters.count ? characters[index + 1] : nil
+                    if let next, next.isLetter || next == "/" || next == "!" || next == "?" {
+                        // Looks like an HTML tag/comment/closing tag — neutralize
+                        // just the opening bracket; the rest renders as text.
+                        result.append("&lt;")
+                        index += 1
+                        continue
+                    }
                 }
             }
 
-            result.append(characters[index])
+            result.append(character)
             index += 1
         }
 
         return result
     }
 
-    private static func shouldEscapeAngleBracketContent(_ content: String) -> Bool {
-        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return false
-        }
-
-        if trimmed.contains("://") || trimmed.lowercased().hasPrefix("file:") {
-            return false
-        }
-
-        if trimmed.contains("@"), !trimmed.contains(" ") {
-            return false
-        }
-
-        guard let firstCharacter = trimmed.first else {
-            return false
-        }
-
-        return firstCharacter == "/" || firstCharacter == "!" || firstCharacter == "?" || firstCharacter.isLetter
-    }
 }
 
 @MainActor

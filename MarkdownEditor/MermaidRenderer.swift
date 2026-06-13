@@ -36,9 +36,15 @@ private func flowchartSVG(_ graph: FlowchartGraph) -> String {
     let horiz = graph.direction == .LR || graph.direction == .RL
 
     var adj: [String: [String]] = [:]
+    var preds: [String: [String]] = [:]
     var inDeg: [String: Int] = [:]
-    for id in graph.nodeOrder { adj[id] = []; inDeg[id] = 0 }
-    for e in graph.edges { adj[e.from, default: []].append(e.to); inDeg[e.to, default: 0] += 1 }
+    for id in graph.nodeOrder { adj[id] = []; preds[id] = []; inDeg[id] = 0 }
+    for e in graph.edges where e.from != e.to {
+        // Ignore self-edges for layering; they are drawn as loops, not inter-layer links.
+        adj[e.from, default: []].append(e.to)
+        preds[e.to, default: []].append(e.from)
+        inDeg[e.to, default: 0] += 1
+    }
 
     var layerOf: [String: Int] = [:]
     var queue = graph.nodeOrder.filter { (inDeg[$0] ?? 0) == 0 }
@@ -52,7 +58,28 @@ private func flowchartSVG(_ graph: FlowchartGraph) -> String {
             if inDeg[nb] == 0 { queue.append(nb) }
         }
     }
-    for id in graph.nodeOrder where layerOf[id] == nil { layerOf[id] = 0 }
+
+    // Cyclic nodes are never dequeued above and would otherwise all collapse onto
+    // layer 0 and overlap. Place each just past its already-placed predecessors,
+    // iterating until the assignment stabilises (back-edges in the cycle are broken).
+    let unplaced = graph.nodeOrder.filter { layerOf[$0] == nil }
+    if !unplaced.isEmpty {
+        for id in unplaced { layerOf[id] = 0 }
+        for _ in 0..<unplaced.count {
+            var changed = false
+            for id in unplaced {
+                let placedPredMax = (preds[id] ?? [])
+                    .compactMap { layerOf[$0] }
+                    .max()
+                let target = placedPredMax.map { $0 + 1 } ?? 0
+                if target > (layerOf[id] ?? 0) {
+                    layerOf[id] = target
+                    changed = true
+                }
+            }
+            if !changed { break }
+        }
+    }
 
     let maxLayer = layerOf.values.max() ?? 0
     var layers = Array(repeating: [String](), count: maxLayer + 1)
@@ -62,7 +89,6 @@ private func flowchartSVG(_ graph: FlowchartGraph) -> String {
     for (li, layer) in layers.enumerated() {
         for (ni, nodeId) in layer.enumerated() {
             let primary = CGFloat(li) * ((horiz ? nodeW : nodeH) + (horiz ? hGap : vGap)) + (horiz ? nodeW : nodeH) / 2
-            let maxInLayer = CGFloat(layer.count)
             let crossSize = (horiz ? nodeH : nodeW) + (horiz ? vGap : hGap)
             let cross = CGFloat(ni) * crossSize + crossSize / 2
             positions[nodeId] = horiz ? (primary, cross) : (cross, primary)
@@ -75,7 +101,10 @@ private func flowchartSVG(_ graph: FlowchartGraph) -> String {
     let svgW = maxX + nodeW / 2 + pad * 2
     let svgH = maxY + nodeH / 2 + pad * 2
 
-    var svg = svgHeader(width: svgW, height: svgH)
+    let summary = "Flowchart with \(graph.nodes.count) node\(graph.nodes.count == 1 ? "" : "s") "
+        + "and \(graph.edges.count) edge\(graph.edges.count == 1 ? "" : "s"). "
+        + graph.nodeOrder.compactMap { graph.nodes[$0]?.label }.joined(separator: ", ")
+    var svg = svgHeader(width: svgW, height: svgH, accessibilityLabel: summary)
     svg += "<defs><marker id=\"arrow\" viewBox=\"0 0 10 10\" refX=\"10\" refY=\"5\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto-start-reverse\"><path d=\"M 0 0 L 10 5 L 0 10 z\" fill=\"\(lineFill)\"/></marker></defs>\n"
 
     for edge in graph.edges {
@@ -83,6 +112,20 @@ private func flowchartSVG(_ graph: FlowchartGraph) -> String {
         let x1 = fp.x + pad, y1 = fp.y + pad, x2 = tp.x + pad, y2 = tp.y + pad
         let dash = edge.style == .dotted ? " stroke-dasharray=\"6,4\"" : ""
         let width = edge.style == .thick ? "3" : "1.5"
+
+        if edge.from == edge.to {
+            // Self-loop: a degenerate line would be invisible, so draw a small arc
+            // looping out from the node's top-right corner and back.
+            let sx = x1 + nodeW / 2 - 12
+            let sy = y1 - nodeH / 2
+            let loopR = nodeH * 0.6
+            svg += "<path d=\"M \(sx) \(sy) C \(sx + loopR) \(sy - loopR), \(sx + loopR) \(sy + loopR), \(sx + 4) \(sy + 2)\" fill=\"none\" stroke=\"\(lineFill)\" stroke-width=\"\(width)\"\(dash) marker-end=\"url(#arrow)\"/>\n"
+            if !edge.label.isEmpty {
+                svg += "<text x=\"\(sx + loopR + 6)\" y=\"\(sy)\" text-anchor=\"start\" fill=\"\(dimText)\" font-size=\"11\" font-family=\"-apple-system, sans-serif\">\(esc(edge.label))</text>\n"
+            }
+            continue
+        }
+
         svg += "<line x1=\"\(x1)\" y1=\"\(y1)\" x2=\"\(x2)\" y2=\"\(y2)\" stroke=\"\(lineFill)\" stroke-width=\"\(width)\"\(dash) marker-end=\"url(#arrow)\"/>\n"
         if !edge.label.isEmpty {
             let mx = (x1 + x2) / 2, my = (y1 + y2) / 2 - 10
@@ -129,7 +172,12 @@ private func sequenceSVG(_ diagram: SequenceDiagram) -> String {
         return CGFloat(idx) * spacing + spacing / 2 + 10
     }
 
-    var svg = svgHeader(width: totalW, height: totalH)
+    let actorNames = diagram.participants.map { diagram.participantLabels[$0] ?? $0 }
+    let summary = "Sequence diagram with \(diagram.participants.count) participant"
+        + "\(diagram.participants.count == 1 ? "" : "s") "
+        + "and \(diagram.messages.count) message\(diagram.messages.count == 1 ? "" : "s"). "
+        + "Participants: \(actorNames.joined(separator: ", "))"
+    var svg = svgHeader(width: totalW, height: totalH, accessibilityLabel: summary)
     svg += "<defs><marker id=\"seq-arrow\" viewBox=\"0 0 10 10\" refX=\"10\" refY=\"5\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto-start-reverse\"><path d=\"M 0 0 L 10 5 L 0 10 z\" fill=\"\(lineFill)\"/></marker></defs>\n"
 
     for id in diagram.participants {
@@ -169,7 +217,13 @@ private func pieSVG(_ chart: PieChart) -> String {
     let svgW: CGFloat = 300
     let svgH = legendY + CGFloat(chart.slices.count) * 20 + 10
 
-    var svg = svgHeader(width: svgW, height: svgH)
+    let sliceSummary = chart.slices.map { slice -> String in
+        let pct = Int(round(slice.value / total * 100))
+        return "\(slice.label) \(pct)%"
+    }.joined(separator: ", ")
+    let summary = (chart.title.isEmpty ? "Pie chart" : "Pie chart: \(chart.title)")
+        + ". \(sliceSummary)"
+    var svg = svgHeader(width: svgW, height: svgH, accessibilityLabel: summary)
 
     if !chart.title.isEmpty {
         svg += "<text x=\"\(cx)\" y=\"24\" text-anchor=\"middle\" fill=\"\(textFill)\" font-size=\"14\" font-weight=\"600\" font-family=\"-apple-system, sans-serif\">\(esc(chart.title))</text>\n"
@@ -179,15 +233,21 @@ private func pieSVG(_ chart: PieChart) -> String {
     for (i, slice) in chart.slices.enumerated() {
         let sweep = 360 * CGFloat(slice.value / total)
         let endAngle = startAngle + sweep
-        let largeArc = sweep > 180 ? 1 : 0
-        let rad1 = startAngle * .pi / 180
-        let rad2 = endAngle * .pi / 180
-        let x1 = cx + radius * cos(rad1)
-        let y1 = cy + radius * sin(rad1)
-        let x2 = cx + radius * cos(rad2)
-        let y2 = cy + radius * sin(rad2)
         let color = colors[i % colors.count]
-        svg += "<path d=\"M \(cx) \(cy) L \(x1) \(y1) A \(radius) \(radius) 0 \(largeArc) 1 \(x2) \(y2) Z\" fill=\"\(color)\" opacity=\"0.85\"/>\n"
+        // A full-circle slice (single category, or a sweep that rounds up to 360°)
+        // degenerates to an invisible arc path, so render an explicit circle instead.
+        if sweep >= 359.999 {
+            svg += "<circle cx=\"\(cx)\" cy=\"\(cy)\" r=\"\(radius)\" fill=\"\(color)\" opacity=\"0.85\"/>\n"
+        } else {
+            let largeArc = sweep > 180 ? 1 : 0
+            let rad1 = startAngle * .pi / 180
+            let rad2 = endAngle * .pi / 180
+            let x1 = cx + radius * cos(rad1)
+            let y1 = cy + radius * sin(rad1)
+            let x2 = cx + radius * cos(rad2)
+            let y2 = cy + radius * sin(rad2)
+            svg += "<path d=\"M \(cx) \(cy) L \(x1) \(y1) A \(radius) \(radius) 0 \(largeArc) 1 \(x2) \(y2) Z\" fill=\"\(color)\" opacity=\"0.85\"/>\n"
+        }
         startAngle = endAngle
 
         let ly = legendY + CGFloat(i) * 20
@@ -224,7 +284,10 @@ private func classSVG(_ graph: ClassDiagramGraph) -> String {
     let svgW = pad * 2 + CGFloat(min(classes.count, cols)) * (boxW + hGap)
     let svgH = pad * 2 + CGFloat(rows) * (120 + vGap)
 
-    var svg = svgHeader(width: svgW, height: svgH)
+    let summary = "Class diagram with \(classes.count) class\(classes.count == 1 ? "" : "es") "
+        + "and \(graph.relations.count) relation\(graph.relations.count == 1 ? "" : "s"). "
+        + classes.map(\.name).joined(separator: ", ")
+    var svg = svgHeader(width: svgW, height: svgH, accessibilityLabel: summary)
     svg += "<defs><marker id=\"cls-arrow\" viewBox=\"0 0 10 10\" refX=\"10\" refY=\"5\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto-start-reverse\"><path d=\"M 0 0 L 10 5 L 0 10 z\" fill=\"\(lineFill)\"/></marker></defs>\n"
 
     var centers: [String: (x: CGFloat, y: CGFloat)] = [:]
@@ -253,13 +316,25 @@ private func classSVG(_ graph: ClassDiagramGraph) -> String {
 
 // MARK: - Helpers
 
-private func svgHeader(width: CGFloat, height: CGFloat) -> String {
-    "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"\(Int(width))\" height=\"\(Int(height))\" viewBox=\"0 0 \(Int(width)) \(Int(height))\">\n<rect width=\"100%\" height=\"100%\" fill=\"#1C1C1E\" rx=\"10\"/>\n"
+private func svgHeader(width: CGFloat, height: CGFloat, accessibilityLabel: String = "Diagram") -> String {
+    // `aria-label` is an attribute value and `<title>`/`<desc>` are element content;
+    // both carry user-derived text, so both go through esc().
+    let label = esc(accessibilityLabel)
+    return "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"\(Int(width))\" height=\"\(Int(height))\" viewBox=\"0 0 \(Int(width)) \(Int(height))\" role=\"img\" aria-label=\"\(label)\">\n<title>\(label)</title>\n<desc>\(label)</desc>\n<rect width=\"100%\" height=\"100%\" fill=\"#1C1C1E\" rx=\"10\"/>\n"
 }
 
+/// Escapes a user-derived string for safe interpolation into the rendered SVG/HTML.
+///
+/// IMPORTANT: every user-controlled string interpolated into the output (element
+/// content *and* attribute values) MUST pass through `esc()`. The output is embedded
+/// inline in a JavaScript-enabled, non-sandboxed WKWebView, so this is the sole
+/// injection barrier. To stay safe in single-quoted attribute contexts we also escape
+/// `'`, and `/` is escaped to neutralise stray `</script>`/`</foreignObject>` close tags.
 private func esc(_ text: String) -> String {
     text.replacingOccurrences(of: "&", with: "&amp;")
         .replacingOccurrences(of: "<", with: "&lt;")
         .replacingOccurrences(of: ">", with: "&gt;")
         .replacingOccurrences(of: "\"", with: "&quot;")
+        .replacingOccurrences(of: "'", with: "&#39;")
+        .replacingOccurrences(of: "/", with: "&#47;")
 }

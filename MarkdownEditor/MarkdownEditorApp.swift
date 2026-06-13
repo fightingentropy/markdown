@@ -17,6 +17,7 @@ private enum WindowSceneID {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pendingOpenURLs: [URL] = []
     private var openURLsHandler: (([URL]) -> Void)?
+    private var saveHandler: (() -> Void)?
 
     func application(_ application: NSApplication, open urls: [URL]) {
         guard !urls.isEmpty else { return }
@@ -35,6 +36,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let urls = pendingOpenURLs
         pendingOpenURLs.removeAll()
         handler(urls)
+    }
+
+    func setSaveHandler(_ handler: @escaping () -> Void) {
+        saveHandler = handler
+    }
+
+    // `scenePhase` is not guaranteed to reach `.background` before the process
+    // exits, so flush any pending edits synchronously on termination too.
+    func applicationWillTerminate(_ notification: Notification) {
+        saveHandler?()
     }
 }
 
@@ -60,6 +71,9 @@ struct MarkdownEditorApp: App {
         _noteAssistant = State(initialValue: NoteAssistant())
         appDelegate.setOpenURLsHandler { urls in
             workspace.openRequestedFiles(urls)
+        }
+        appDelegate.setSaveHandler { [workspace] in
+            workspace.saveCurrentFile()
         }
     }
 
@@ -144,15 +158,22 @@ struct MarkdownEditorApp: App {
 
     @CommandsBuilder
     private var formatMenu: some Commands {
+        // Only meaningful when a markdown editor is focused; otherwise these
+        // shadow standard shortcuts (e.g. ⌘E) while doing nothing.
+        let hasEditor = editorController != nil
         CommandMenu("Format") {
             Button("Bold") { editorController?.applyBold() }
                 .keyboardShortcut("b", modifiers: [.command, .shift])
+                .disabled(!hasEditor)
             Button("Italic") { editorController?.applyItalic() }
                 .keyboardShortcut("i")
+                .disabled(!hasEditor)
             Button("Inline Code") { editorController?.applyCode() }
                 .keyboardShortcut("e")
+                .disabled(!hasEditor)
             Button("Link") { editorController?.applyLink() }
                 .keyboardShortcut("k", modifiers: [.command, .shift])
+                .disabled(!hasEditor)
 
             Divider()
 
@@ -161,13 +182,18 @@ struct MarkdownEditorApp: App {
                     Button("Heading \(level)") { editorController?.applyHeading(level) }
                 }
             }
+            .disabled(!hasEditor)
 
             Divider()
 
             Button("Blockquote") { editorController?.applyBlockquote() }
+                .disabled(!hasEditor)
             Button("Bullet List") { editorController?.applyUnorderedList() }
+                .disabled(!hasEditor)
             Button("Numbered List") { editorController?.applyOrderedList() }
+                .disabled(!hasEditor)
             Button("Code Block") { editorController?.applyCodeBlock() }
+                .disabled(!hasEditor)
         }
     }
 }

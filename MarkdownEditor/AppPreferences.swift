@@ -146,15 +146,36 @@ final class AppPreferences {
     }
 
     var editorFontSize: Double {
-        didSet { userDefaults.set(editorFontSize, forKey: Self.editorFontSizeKey) }
+        didSet {
+            let clamped = Self.editorFontSizeRange.clamping(editorFontSize)
+            if clamped != editorFontSize {
+                editorFontSize = clamped
+                return
+            }
+            userDefaults.set(editorFontSize, forKey: Self.editorFontSizeKey)
+        }
     }
 
     var editorLineSpacing: Double {
-        didSet { userDefaults.set(editorLineSpacing, forKey: Self.editorLineSpacingKey) }
+        didSet {
+            let clamped = Self.editorLineSpacingRange.clamping(editorLineSpacing)
+            if clamped != editorLineSpacing {
+                editorLineSpacing = clamped
+                return
+            }
+            userDefaults.set(editorLineSpacing, forKey: Self.editorLineSpacingKey)
+        }
     }
 
     var editorReadableWidth: Double {
-        didSet { userDefaults.set(editorReadableWidth, forKey: Self.editorReadableWidthKey) }
+        didSet {
+            let clamped = Self.editorReadableWidthRange.clamping(editorReadableWidth)
+            if clamped != editorReadableWidth {
+                editorReadableWidth = clamped
+                return
+            }
+            userDefaults.set(editorReadableWidth, forKey: Self.editorReadableWidthKey)
+        }
     }
 
     var previewFontChoice: PreviewFontChoice {
@@ -166,11 +187,25 @@ final class AppPreferences {
     }
 
     var previewFontSize: Double {
-        didSet { userDefaults.set(previewFontSize, forKey: Self.previewFontSizeKey) }
+        didSet {
+            let clamped = Self.previewFontSizeRange.clamping(previewFontSize)
+            if clamped != previewFontSize {
+                previewFontSize = clamped
+                return
+            }
+            userDefaults.set(previewFontSize, forKey: Self.previewFontSizeKey)
+        }
     }
 
     var previewPageWidth: Double {
-        didSet { userDefaults.set(previewPageWidth, forKey: Self.previewPageWidthKey) }
+        didSet {
+            let clamped = Self.previewPageWidthRange.clamping(previewPageWidth)
+            if clamped != previewPageWidth {
+                previewPageWidth = clamped
+                return
+            }
+            userDefaults.set(previewPageWidth, forKey: Self.previewPageWidthKey)
+        }
     }
 
     var defaultOpenViewMode: OpenViewMode {
@@ -178,7 +213,14 @@ final class AppPreferences {
     }
 
     var autosaveDelaySeconds: Double {
-        didSet { userDefaults.set(autosaveDelaySeconds, forKey: Self.autosaveDelayKey) }
+        didSet {
+            let clamped = Self.autosaveDelayRange.clamping(autosaveDelaySeconds)
+            if clamped != autosaveDelaySeconds {
+                autosaveDelaySeconds = clamped
+                return
+            }
+            userDefaults.set(autosaveDelaySeconds, forKey: Self.autosaveDelayKey)
+        }
     }
 
     var defaultSortOrder: SortOrder {
@@ -209,18 +251,29 @@ final class AppPreferences {
     private static let restoresExpandedFoldersKey = "preferences.restoresExpandedFolders"
     private static let collapsesFoldersOnVaultSwitchKey = "preferences.collapsesFoldersOnVaultSwitch"
 
+    // Sane bounds for numeric preferences, mirroring the slider ranges in the
+    // settings UI. Stored `defaults` values are clamped into these ranges on
+    // load and on assignment so an externally-edited (e.g. negative) value can
+    // never produce an invalid layout or trap a downstream `UInt64` conversion.
+    private static let editorFontSizeRange: ClosedRange<Double> = 12...22
+    private static let editorLineSpacingRange: ClosedRange<Double> = 0...12
+    private static let editorReadableWidthRange: ClosedRange<Double> = 640...1200
+    private static let previewFontSizeRange: ClosedRange<Double> = 13...22
+    private static let previewPageWidthRange: ClosedRange<Double> = 680...1280
+    private static let autosaveDelayRange: ClosedRange<Double> = 0.2...3.0
+
     init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
         self.editorFontChoice = MonospacedFontChoice(rawValue: userDefaults.string(forKey: Self.editorFontChoiceKey) ?? "") ?? .system
-        self.editorFontSize = userDefaults.object(forKey: Self.editorFontSizeKey) as? Double ?? 14
-        self.editorLineSpacing = userDefaults.object(forKey: Self.editorLineSpacingKey) as? Double ?? 4
-        self.editorReadableWidth = userDefaults.object(forKey: Self.editorReadableWidthKey) as? Double ?? 920
+        self.editorFontSize = Self.editorFontSizeRange.clamping(userDefaults.object(forKey: Self.editorFontSizeKey) as? Double ?? 14)
+        self.editorLineSpacing = Self.editorLineSpacingRange.clamping(userDefaults.object(forKey: Self.editorLineSpacingKey) as? Double ?? 4)
+        self.editorReadableWidth = Self.editorReadableWidthRange.clamping(userDefaults.object(forKey: Self.editorReadableWidthKey) as? Double ?? 920)
         self.previewFontChoice = PreviewFontChoice(rawValue: userDefaults.string(forKey: Self.previewFontChoiceKey) ?? "") ?? .system
         self.previewCodeFontChoice = MonospacedFontChoice(rawValue: userDefaults.string(forKey: Self.previewCodeFontChoiceKey) ?? "") ?? .system
-        self.previewFontSize = userDefaults.object(forKey: Self.previewFontSizeKey) as? Double ?? 15
-        self.previewPageWidth = userDefaults.object(forKey: Self.previewPageWidthKey) as? Double ?? 920
+        self.previewFontSize = Self.previewFontSizeRange.clamping(userDefaults.object(forKey: Self.previewFontSizeKey) as? Double ?? 15)
+        self.previewPageWidth = Self.previewPageWidthRange.clamping(userDefaults.object(forKey: Self.previewPageWidthKey) as? Double ?? 920)
         self.defaultOpenViewMode = OpenViewMode(rawValue: userDefaults.string(forKey: Self.defaultOpenViewModeKey) ?? "") ?? .editor
-        self.autosaveDelaySeconds = userDefaults.object(forKey: Self.autosaveDelayKey) as? Double ?? 0.5
+        self.autosaveDelaySeconds = Self.autosaveDelayRange.clamping(userDefaults.object(forKey: Self.autosaveDelayKey) as? Double ?? 0.5)
         self.defaultSortOrder = SortOrder(rawValue: userDefaults.string(forKey: Self.defaultSortOrderKey) ?? "") ?? .byDate
         if userDefaults.object(forKey: Self.restoresExpandedFoldersKey) != nil {
             self.restoresExpandedFolders = userDefaults.bool(forKey: Self.restoresExpandedFoldersKey)
@@ -256,5 +309,14 @@ final class AppPreferences {
 
     var previewCodeFontSizeCGFloat: CGFloat {
         max(12, previewFontSizeCGFloat * 0.88)
+    }
+}
+
+private extension ClosedRange where Bound == Double {
+    /// Returns `value` constrained to this range. NaN collapses to the lower
+    /// bound so a corrupted `defaults` value can never escape the range.
+    func clamping(_ value: Double) -> Double {
+        guard value.isFinite else { return lowerBound }
+        return Swift.min(Swift.max(value, lowerBound), upperBound)
     }
 }

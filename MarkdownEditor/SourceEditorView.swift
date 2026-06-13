@@ -198,16 +198,29 @@ final class EditorController {
     /// runloop pass so `scrollRangeToVisible`'s scroll/animation has a chance
     /// to settle before the indicator is drawn.
     private func flashFindIndicator(for range: NSRange, in textView: NSTextView) {
+        guard NSMaxRange(range) <= textView.string.utf16.count else { return }
+
         if let layoutManager = textView.layoutManager {
             layoutManager.ensureLayout(forCharacterRange: range)
         }
+
+        // Capture the document the match belongs to so a fast note switch
+        // before the deferred call cannot flash the indicator over the wrong
+        // (now unrelated) content.
+        let documentAtFind = textView.string
 
         // Fire on the next runloop tick so any pending scroll has settled.
         // `showFindIndicator` is idempotent; calling it twice is harmless and
         // guarantees the animation even when the first call raced layout.
         textView.showFindIndicator(for: range)
         DispatchQueue.main.async { [weak textView] in
-            textView?.showFindIndicator(for: range)
+            guard let textView else { return }
+            // Re-validate: the editor may have switched documents (or the text
+            // shrunk) in the interim, which would make `range` stale or
+            // out-of-bounds.
+            guard textView.string == documentAtFind,
+                  NSMaxRange(range) <= textView.string.utf16.count else { return }
+            textView.showFindIndicator(for: range)
         }
     }
 
@@ -264,7 +277,8 @@ struct SourceEditorView: NSViewRepresentable {
 
         context.coordinator.parent = self
         context.coordinator.observeSizeChanges(of: scrollView)
-        updateTextLayout(for: scrollView, textView: textView)
+        context.coordinator.primeContentHash(for: text)
+        context.coordinator.applyTextLayout(for: scrollView, textView: textView)
         _ = context.coordinator.setCurrentDocument(documentURL)
         context.coordinator.primeAppearanceSignature()
         context.coordinator.restoreEditorState(
@@ -286,7 +300,7 @@ struct SourceEditorView: NSViewRepresentable {
         context.coordinator.parent = self
         context.coordinator.observeSizeChanges(of: nsView)
         configure(textView, coordinator: context.coordinator)
-        updateTextLayout(for: nsView, textView: textView)
+        context.coordinator.applyTextLayout(for: nsView, textView: textView)
         let documentChanged = context.coordinator.setCurrentDocument(documentURL)
         context.coordinator.applyExternalTextIfNeeded(
             text,
@@ -319,19 +333,31 @@ struct SourceEditorView: NSViewRepresentable {
         textView.delegate = coordinator
         textView.modifiedLinkDelegate = coordinator
         textView.textStorage?.delegate = coordinator
+
+        textView.setAccessibilityLabel("Markdown source editor")
+        if let documentName = documentURL?.deletingPathExtension().lastPathComponent, !documentName.isEmpty {
+            textView.setAccessibilityHelp("Editing \(documentName). Press Command-Return to open a link under the cursor.")
+        } else {
+            textView.setAccessibilityHelp("Press Command-Return to open a link under the cursor.")
+        }
     }
 
-    private func updateTextLayout(for scrollView: NSScrollView, textView: NSTextView) {
+    /// Pure geometry for the current scroll width; the actual (memoized)
+    /// application happens in `Coordinator.applyTextLayout` so repeated
+    /// scroll/resize notifications don't reassign identical attributes.
+    fileprivate func textLayout(for scrollView: NSScrollView) -> Coordinator.LayoutSignature {
         let readableWidth = preferences.editorReadableWidthCGFloat
         let availableWidth = max(scrollView.contentSize.width, readableWidth)
         let columnWidth = min(readableWidth, max(0, availableWidth - (minimumHorizontalInset * 2)))
         let horizontalInset = max(minimumHorizontalInset, (availableWidth - columnWidth) / 2)
 
-        let baseAttributes = Theme.defaultAttributes(using: preferences)
-        textView.typingAttributes = baseAttributes
-        textView.defaultParagraphStyle = Theme.defaultParagraphStyle(using: preferences)
-        textView.textContainerInset = NSSize(width: horizontalInset, height: 28)
-        textView.textContainer?.containerSize = NSSize(width: columnWidth, height: CGFloat.greatestFiniteMagnitude)
+        return Coordinator.LayoutSignature(
+            fontChoice: preferences.editorFontChoice,
+            fontSize: preferences.editorFontSize,
+            lineSpacing: preferences.editorLineSpacing,
+            horizontalInset: horizontalInset,
+            columnWidth: columnWidth
+        )
     }
 
     @MainActor
@@ -343,6 +369,23 @@ struct SourceEditorView: NSViewRepresentable {
             let readableWidth: Double
         }
 
+        struct LayoutSignature: Equatable {
+            let fontChoice: MonospacedFontChoice
+            let fontSize: Double
+            let lineSpacing: Double
+            let horizontalInset: CGFloat
+            let columnWidth: CGFloat
+
+            /// The portion of the signature that drives typingAttributes /
+            /// defaultParagraphStyle. Only these need reassigning when changed;
+            /// inset/column width are container geometry.
+            func attributesMatch(_ other: LayoutSignature) -> Bool {
+                fontChoice == other.fontChoice
+                    && fontSize == other.fontSize
+                    && lineSpacing == other.lineSpacing
+            }
+        }
+
         var parent: SourceEditorView
         private var isApplyingExternalText = false
         private var lastAppearanceSignature: AppearanceSignature?
@@ -351,6 +394,13 @@ struct SourceEditorView: NSViewRepresentable {
         private weak var observedClipView: NSClipView?
         private var currentDocumentIdentity: String?
         private var lastSelectionRange: NSRange?
+        private var pendingFullHighlight: DispatchWorkItem?
+        private var lastAppliedLayoutSignature: LayoutSignature?
+        /// Hash of the text currently shown in the editor, refreshed whenever the
+        /// editor content changes (user edit or applied external text). Lets
+        /// `updateNSView` skip the O(n) `textView.string != text` comparison when
+        /// the incoming binding hashes identically.
+        private var editorContentHash: Int?
 
         init(_ parent: SourceEditorView) {
             self.parent = parent
@@ -382,8 +432,33 @@ struct SourceEditorView: NSViewRepresentable {
         func scheduleDeferredLayoutUpdate(for scrollView: NSScrollView, textView: NSTextView) {
             DispatchQueue.main.async { [weak self, weak scrollView, weak textView] in
                 guard let self, let scrollView, let textView else { return }
-                self.parent.updateTextLayout(for: scrollView, textView: textView)
+                self.applyTextLayout(for: scrollView, textView: textView)
             }
+        }
+
+        /// Applies the container geometry derived from the current scroll width,
+        /// skipping work when nothing changed since the last application. A live
+        /// window resize fires `frameDidChange` repeatedly; without this guard
+        /// each tick reassigned typingAttributes / defaultParagraphStyle and
+        /// re-set the container size, thrashing layout on large documents.
+        func applyTextLayout(for scrollView: NSScrollView, textView: NSTextView) {
+            let signature = parent.textLayout(for: scrollView)
+            guard signature != lastAppliedLayoutSignature else { return }
+
+            // Only reassign the attribute-bearing properties when an appearance
+            // input actually changed, not when only the width shifted.
+            if lastAppliedLayoutSignature.map({ !signature.attributesMatch($0) }) ?? true {
+                textView.typingAttributes = Theme.defaultAttributes(using: parent.preferences)
+                textView.defaultParagraphStyle = Theme.defaultParagraphStyle(using: parent.preferences)
+            }
+
+            textView.textContainerInset = NSSize(width: signature.horizontalInset, height: 28)
+            textView.textContainer?.containerSize = NSSize(
+                width: signature.columnWidth,
+                height: CGFloat.greatestFiniteMagnitude
+            )
+
+            lastAppliedLayoutSignature = signature
         }
 
         private func stopObservingSizeChanges() {
@@ -411,7 +486,11 @@ struct SourceEditorView: NSViewRepresentable {
             focusEditor: Bool,
             to textView: NSTextView
         ) {
-            guard documentChanged || textView.string != text else { return }
+            guard documentChanged || contentDiffersFromExternalText(text, in: textView) else { return }
+
+            // Any deferred full re-highlight is for the outgoing content; the
+            // synchronous full pass below supersedes it.
+            cancelPendingFullHighlight()
 
             if documentChanged {
                 isApplyingExternalText = true
@@ -420,6 +499,7 @@ struct SourceEditorView: NSViewRepresentable {
                 if textView.string != text {
                     textView.string = text
                 }
+                noteEditorContent(text)
                 restoreEditorState(
                     in: textView,
                     selection: savedSelection,
@@ -433,8 +513,29 @@ struct SourceEditorView: NSViewRepresentable {
                 isApplyingExternalText = true
                 defer { isApplyingExternalText = false }
                 textView.string = text
+                noteEditorContent(text)
                 highlight(textView, preservingViewport: false)
             }
+        }
+
+        /// Cheap pre-check for whether the parent binding differs from what the
+        /// editor currently shows. Compares a cached content hash first and only
+        /// falls back to the O(n) string comparison when the hashes disagree (or
+        /// no hash is cached yet), avoiding a full-document compare on every
+        /// unrelated SwiftUI `updateNSView`.
+        private func contentDiffersFromExternalText(_ text: String, in textView: NSTextView) -> Bool {
+            if let editorContentHash, editorContentHash == text.hashValue {
+                return false
+            }
+            return textView.string != text
+        }
+
+        private func noteEditorContent(_ text: String) {
+            editorContentHash = text.hashValue
+        }
+
+        func primeContentHash(for text: String) {
+            noteEditorContent(text)
         }
 
         func restoreEditorState(
@@ -516,12 +617,55 @@ struct SourceEditorView: NSViewRepresentable {
             let editedRange = pendingEditedRange
             pendingEditedRange = nil
 
-            parent.text = textView.string
+            let updatedString = textView.string
+            parent.text = updatedString
+            noteEditorContent(updatedString)
+
+            // A cheap incremental edit (paragraph/inline-only) is highlighted
+            // synchronously so the keystroke stays crisp. Fence-affecting edits
+            // force a full-document rescan whose cost scales with document
+            // length; coalesce those off the per-keystroke path so a burst of
+            // typing inside/around a code fence collapses into a single pass.
+            let needsFull = textView.textStorage.map {
+                highlighter.requiresFullRehighlight(for: editedRange, in: $0)
+            } ?? true
+
+            if needsFull {
+                scheduleFullHighlight(for: textView)
+                return
+            }
+
+            // Always run the cheap incremental pass for immediate feedback.
             highlight(
                 textView,
                 preservingViewport: false,
                 editedRange: editedRange
             )
+
+            // If a fence-affecting edit is still awaiting its coalesced
+            // full-document pass, keep it scheduled: this cheap edit only
+            // recolored its own paragraph and must not drop the pending
+            // document-wide code-block recolor.
+            if pendingFullHighlight != nil {
+                scheduleFullHighlight(for: textView)
+            }
+        }
+
+        private func scheduleFullHighlight(for textView: NSTextView) {
+            cancelPendingFullHighlight()
+
+            let workItem = DispatchWorkItem { [weak self, weak textView] in
+                guard let self, let textView else { return }
+                self.pendingFullHighlight = nil
+                self.highlight(textView, preservingViewport: false)
+            }
+            pendingFullHighlight = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: workItem)
+        }
+
+        private func cancelPendingFullHighlight() {
+            pendingFullHighlight?.cancel()
+            pendingFullHighlight = nil
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
@@ -540,8 +684,55 @@ struct SourceEditorView: NSViewRepresentable {
                 return false
             }
 
-            NSWorkspace.shared.open(url)
+            openLink(url, from: textView)
             return true
+        }
+
+        @discardableResult
+        func sourceTextViewOpenLinkAtCaret(_ textView: NSTextView) -> Bool {
+            guard let url = EditorLinkDetector.url(
+                near: textView.selectedRange().location,
+                in: textView.string
+            ) else {
+                NSSound.beep()
+                return false
+            }
+
+            openLink(url, from: textView)
+            return true
+        }
+
+        /// Opens a document-sourced URL. For web links in a non-sandboxed app we
+        /// confirm first so a stray ⌘-click / ⌘-Return cannot silently launch an
+        /// arbitrary destination embedded in note content.
+        private func openLink(_ url: URL, from textView: NSTextView) {
+            guard requiresOpenConfirmation(url) else {
+                NSWorkspace.shared.open(url)
+                return
+            }
+
+            let alert = NSAlert()
+            alert.messageText = "Open link?"
+            alert.informativeText = url.absoluteString
+            alert.addButton(withTitle: "Open")
+            alert.addButton(withTitle: "Cancel")
+            alert.alertStyle = .informational
+
+            let openInWindow: (NSApplication.ModalResponse) -> Void = { response in
+                guard response == .alertFirstButtonReturn else { return }
+                NSWorkspace.shared.open(url)
+            }
+
+            if let window = textView.window {
+                alert.beginSheetModal(for: window, completionHandler: openInWindow)
+            } else {
+                openInWindow(alert.runModal())
+            }
+        }
+
+        private func requiresOpenConfirmation(_ url: URL) -> Bool {
+            guard let scheme = url.scheme?.lowercased() else { return false }
+            return scheme == "http" || scheme == "https"
         }
 
         private func withPreservedViewport(
@@ -628,7 +819,7 @@ struct SourceEditorView: NSViewRepresentable {
                 return
             }
 
-            parent.updateTextLayout(for: scrollView, textView: textView)
+            applyTextLayout(for: scrollView, textView: textView)
         }
     }
 }
@@ -636,6 +827,11 @@ struct SourceEditorView: NSViewRepresentable {
 @MainActor
 private protocol SourceTextViewDelegate: AnyObject {
     func sourceTextView(_ textView: NSTextView, handleModifiedLinkClickAt point: CGPoint, with event: NSEvent) -> Bool
+    /// Resolves and opens the link under the caret (keyboard / accessibility
+    /// entry point). Returns `true` if a link was found and opening was
+    /// attempted, `false` if there is no link at the caret.
+    @discardableResult
+    func sourceTextViewOpenLinkAtCaret(_ textView: NSTextView) -> Bool
 }
 
 private final class SourceTextView: NSTextView {
@@ -648,6 +844,31 @@ private final class SourceTextView: NSTextView {
         }
 
         super.mouseDown(with: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        // Command-Return opens the link under the caret — a keyboard equivalent
+        // for the ⌘-click affordance so the feature is reachable without a
+        // mouse (and for VoiceOver users via the custom action below).
+        if event.modifierFlags.contains(.command),
+           let characters = event.charactersIgnoringModifiers,
+           characters == "\r" || characters == "\n" {
+            if modifiedLinkDelegate?.sourceTextViewOpenLinkAtCaret(self) == true {
+                return
+            }
+        }
+
+        super.keyDown(with: event)
+    }
+
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
+        var actions = super.accessibilityCustomActions() ?? []
+        let openLink = NSAccessibilityCustomAction(name: "Open link under cursor") { [weak self] in
+            guard let self else { return false }
+            return self.modifiedLinkDelegate?.sourceTextViewOpenLinkAtCaret(self) ?? false
+        }
+        actions.append(openLink)
+        return actions
     }
 }
 

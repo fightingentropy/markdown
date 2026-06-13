@@ -4,6 +4,8 @@ import SwiftUI
 struct NoteGraphView: View {
     @Bindable var workspace: Workspace
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     @State private var layout = NoteGraphLayout.empty
     @State private var layoutTask: Task<Void, Never>?
     @State private var relayoutSeed = 0
@@ -12,12 +14,23 @@ struct NoteGraphView: View {
     @State private var isComputingLayout = false
     @State private var filter = GraphFilter()
     @State private var isFilterBarPresented = false
+    /// Topology identity of the layout most recently scheduled, used to avoid
+    /// re-running the force simulation on cosmetic (filter/selection) changes.
+    @State private var laidOutTopology: GraphTopologyKey?
 
     private let minimumZoom: CGFloat = 0.65
     private let maximumZoom: CGFloat = 2.8
 
     private var rawSnapshot: NoteGraphSnapshot {
         workspace.noteGraph
+    }
+
+    /// Snapshot the force layout is computed from. We lay out the *unfiltered*
+    /// topology (plus the current selection, which is pinned to center) so that
+    /// cosmetic filter changes never trigger a relayout — filtered-out nodes are
+    /// simply not drawn. See `scheduleLayout`.
+    private var layoutSnapshot: NoteGraphSnapshot {
+        rawSnapshot
     }
 
     /// Graph snapshot with active filters applied. Edges are trimmed to only
@@ -89,9 +102,32 @@ struct NoteGraphView: View {
         snapshot.neighbors(of: snapshot.selectedNodeID)
     }
 
+    /// Identity of the inputs that actually require a fresh force layout: the raw
+    /// node/edge topology, the pinned (selected) node, and the relayout seed.
+    /// Filter search text and min-degree are intentionally excluded so typing in
+    /// the filter does not relayout or reshuffle the graph.
+    private var layoutTopologyKey: GraphTopologyKey {
+        GraphTopologyKey(
+            nodeIDs: layoutSnapshot.nodes.map(\.id),
+            edgeIDs: layoutSnapshot.edges.map(\.id),
+            selectedNodeID: layoutSnapshot.selectedNodeID,
+            relayoutSeed: relayoutSeed
+        )
+    }
+
+    /// Whether the force simulation should be skipped this scheduling pass because
+    /// only the pinned node changed and the existing positions can be re-centered.
+    private func canRecenterOnly(for key: GraphTopologyKey) -> Bool {
+        guard let previous = laidOutTopology else { return false }
+        return previous.nodeIDs == key.nodeIDs
+            && previous.edgeIDs == key.edgeIDs
+            && previous.relayoutSeed == key.relayoutSeed
+            && previous.selectedNodeID != key.selectedNodeID
+    }
+
     var body: some View {
         Group {
-            if snapshot.nodes.isEmpty {
+            if rawSnapshot.nodes.isEmpty {
                 ContentUnavailableView(
                     "No Graph Yet",
                     systemImage: "point.3.connected.trianglepath.dotted",
@@ -113,6 +149,11 @@ struct NoteGraphView: View {
                         controlsPanel
                             .padding(20)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+
+                        if snapshot.nodes.isEmpty {
+                            noMatchesOverlay
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
                     }
                     .overlay(alignment: .bottomLeading) {
                         if !connectedNodes.isEmpty {
@@ -133,11 +174,36 @@ struct NoteGraphView: View {
         .onDisappear {
             layoutTask?.cancel()
         }
-        .onChange(of: snapshot) { oldValue, newValue in
-            if oldValue.selectedNodeID != newValue.selectedNodeID {
-                viewport.reset()
-            }
+        .onChange(of: layoutTopologyKey) { _, _ in
             scheduleLayout()
+        }
+        .onChange(of: snapshot.selectedNodeID) { oldValue, newValue in
+            if oldValue != newValue {
+                resetViewport()
+            }
+        }
+    }
+
+    private var noMatchesOverlay: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "line.3.horizontal.decrease.circle")
+                .font(.system(size: 30, weight: .regular))
+                .foregroundStyle(.secondary)
+            Text("No matches")
+                .font(.headline)
+            Text("No notes match the current filter.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button("Clear Filter") { filter = GraphFilter() }
+                .controlSize(.regular)
+        }
+        .padding(24)
+        .frame(maxWidth: 320)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(.white.opacity(0.08))
         }
     }
 
@@ -184,8 +250,59 @@ struct NoteGraphView: View {
                 .onTapGesture { location in
                     handleNodeTap(at: location, in: size)
                 }
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active(let location):
+                        hoveredNodeID = nearestNode(to: location, in: size)?.id
+                    case .ended:
+                        hoveredNodeID = nil
+                    }
+                }
                 .allowsHitTesting(true)
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Note graph")
+        .accessibilityRepresentation {
+            accessibilityNodeList
+        }
+    }
+
+    /// A focusable, VoiceOver-navigable representation of the graph nodes layered
+    /// over the Canvas rendering (which itself carries no accessibility content).
+    /// Each node is a button that announces its title and connection count and
+    /// opens the note when activated.
+    private var accessibilityNodeList: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(accessibilityNodes) { node in
+                    Button {
+                        workspace.selectFile(node.url)
+                    } label: {
+                        Text(node.title)
+                    }
+                    .accessibilityLabel(node.title)
+                    .accessibilityValue(connectionDescription(for: node))
+                    .accessibilityHint("Opens this note")
+                    .accessibilityAddTraits(snapshot.selectedNodeID == node.id ? [.isButton, .isSelected] : .isButton)
+                }
+            }
+        }
+    }
+
+    /// Nodes exposed to assistive technology, ordered most-connected first so the
+    /// graph's hubs are encountered early during VoiceOver navigation.
+    private var accessibilityNodes: [NoteGraphNode] {
+        snapshot.nodes.sorted { lhs, rhs in
+            if lhs.degree != rhs.degree {
+                return lhs.degree > rhs.degree
+            }
+            return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+        }
+    }
+
+    private func connectionDescription(for node: NoteGraphNode) -> String {
+        let count = node.degree
+        return count == 1 ? "1 connection" : "\(count) connections"
     }
 
     private var labeledNodes: [NoteGraphNode] {
@@ -194,17 +311,40 @@ struct NoteGraphView: View {
     }
 
     private func handleNodeTap(at location: CGPoint, in size: CGSize) {
-        let tapRadius: CGFloat = 16
+        guard let node = nearestNode(to: location, in: size) else { return }
+        workspace.selectFile(node.url)
+    }
+
+    /// Returns the visible node whose drawn circle is nearest the given point.
+    ///
+    /// The hit radius matches each node's drawn radius (with a small minimum for
+    /// tiny nodes), so large hub nodes are tappable out to their visible edge and
+    /// clustered nodes resolve to the closest one rather than the first in draw
+    /// order. Ties are broken toward larger (higher-degree) nodes.
+    private func nearestNode(to location: CGPoint, in size: CGSize) -> NoteGraphNode? {
+        let minimumTapRadius: CGFloat = 12
+        var best: (node: NoteGraphNode, distanceSquared: CGFloat, degree: Int)?
+
         for node in snapshot.nodes {
             guard let position = layout.positions[node.id] else { continue }
             let screenPos = transformed(position, in: size)
             let dx = location.x - screenPos.x
             let dy = location.y - screenPos.y
-            if dx * dx + dy * dy <= tapRadius * tapRadius {
-                workspace.selectFile(node.url)
-                return
+            let distanceSquared = dx * dx + dy * dy
+
+            let hitRadius = max(nodeDiameter(for: node) / 2, minimumTapRadius)
+            guard distanceSquared <= hitRadius * hitRadius else { continue }
+
+            if let current = best {
+                let isCloser = distanceSquared < current.distanceSquared
+                let isTieButLarger = distanceSquared == current.distanceSquared && node.degree > current.degree
+                guard isCloser || isTieButLarger else { continue }
             }
+
+            best = (node, distanceSquared, node.degree)
         }
+
+        return best?.node
     }
 
     private func drawEdges(in context: inout GraphicsContext, size: CGSize) {
@@ -330,14 +470,13 @@ struct NoteGraphView: View {
                     .frame(height: 22)
 
                 graphControlButton(systemImage: "scope", help: "Center Graph") {
-                    withAnimation(.spring(response: 0.22, dampingFraction: 0.84)) {
-                        viewport.reset()
-                    }
+                    resetViewport()
                 }
 
                 graphControlButton(systemImage: "arrow.clockwise", help: "Relayout Graph") {
+                    // Bumping the seed changes `layoutTopologyKey`, which triggers
+                    // `scheduleLayout()` via `onChange`.
                     relayoutSeed += 1
-                    scheduleLayout()
                 }
 
                 Divider()
@@ -349,7 +488,7 @@ struct NoteGraphView: View {
                         : "line.3.horizontal.decrease.circle.fill",
                     help: filter.isEmpty ? "Filter Graph" : "Active filter — click to edit"
                 ) {
-                    withAnimation(.easeOut(duration: 0.18)) {
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
                         isFilterBarPresented.toggle()
                     }
                 }
@@ -556,18 +695,33 @@ struct NoteGraphView: View {
     }
 
     private func adjustZoom(to proposedZoom: CGFloat) {
-        withAnimation(.spring(response: 0.2, dampingFraction: 0.85)) {
+        withAnimation(reduceMotion ? nil : .spring(response: 0.2, dampingFraction: 0.85)) {
             viewport.zoom = min(max(proposedZoom, minimumZoom), maximumZoom)
         }
         viewport.commitZoom()
     }
 
     private func scheduleLayout() {
-        let snapshot = self.snapshot
+        let snapshot = layoutSnapshot
+        let key = layoutTopologyKey
         layoutTask?.cancel()
 
         guard !snapshot.nodes.isEmpty else {
             layout = .empty
+            laidOutTopology = key
+            isComputingLayout = false
+            return
+        }
+
+        // When only the pinned node changed, re-center the existing positions
+        // instead of re-running the O(n²) simulation. This keeps node positions
+        // stable (no reshuffle) and avoids a CPU spike on rapid selection changes.
+        if canRecenterOnly(for: key),
+           let recentered = NoteGraphLayoutEngine.recenter(layout, for: snapshot) {
+            withAnimation(layoutAnimation) {
+                layout = recentered
+            }
+            laidOutTopology = key
             isComputingLayout = false
             return
         }
@@ -581,11 +735,24 @@ struct NoteGraphView: View {
 
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                withAnimation(layoutAnimation) {
                     layout = computedLayout
                 }
+                laidOutTopology = key
                 isComputingLayout = false
             }
+        }
+    }
+
+    /// Spring used when settling a freshly computed layout, or `nil` (instant)
+    /// when the user has opted into Reduce Motion.
+    private var layoutAnimation: Animation? {
+        reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.82)
+    }
+
+    private func resetViewport() {
+        withAnimation(reduceMotion ? nil : .spring(response: 0.22, dampingFraction: 0.84)) {
+            viewport.reset()
         }
     }
 
@@ -625,6 +792,16 @@ struct GraphFilter: Equatable {
     var isEmpty: Bool {
         minDegree == 0 && titleSearch.isEmpty
     }
+}
+
+/// Identity of the inputs that require a fresh force layout. Equatable so the
+/// view can drive `scheduleLayout` from a single `onChange` and skip relayout
+/// when only cosmetic filter state changed.
+private struct GraphTopologyKey: Equatable {
+    let nodeIDs: [URL]
+    let edgeIDs: [String]
+    let selectedNodeID: URL?
+    let relayoutSeed: Int
 }
 
 private struct GraphViewport {

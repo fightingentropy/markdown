@@ -67,6 +67,41 @@ struct CachedMarkdownMetadata: Sendable {
     let noteBody: String
 }
 
+/// Describes an unreconciled external modification: the file on disk changed
+/// since we last loaded/saved it and its contents differ from the editor
+/// buffer. Carries snapshots so resolution is correct even if the user has
+/// navigated to another file in the meantime.
+struct SaveConflict: Identifiable, Equatable {
+    let id = UUID()
+    let url: URL
+    let fileName: String
+    let onDiskContent: String
+    let editorContent: String
+}
+
+/// A self-contained, `Sendable` snapshot of one note used for full-text
+/// command-palette search. Folded (case- and diacritic-insensitive) haystacks
+/// are precomputed once so per-keystroke filtering is a cheap substring test
+/// instead of a locale-aware scan over every file body on every render.
+struct NoteSearchEntry: Sendable, Identifiable {
+    let id: URL
+    let url: URL
+    let title: String
+    let relativePath: String?
+    let body: String
+    fileprivate let foldedTitleHaystack: String
+}
+
+/// Result of a search pass. `Sendable` so the filtering can run off the main
+/// actor and the result handed back to the view.
+struct NoteSearchResult: Sendable, Identifiable {
+    let id: URL
+    let url: URL
+    let title: String
+    let subtitle: String?
+    let isBodyMatch: Bool
+}
+
 @Observable
 @MainActor
 final class Workspace {
@@ -91,6 +126,14 @@ final class Workspace {
     }
     var isCommandPalettePresented = false
     var isLoadingSnapshot = false
+
+    /// Set when a save fails (disk full, permissions, unmounted volume, …) so
+    /// the UI can surface it instead of silently dropping the user's edits. The
+    /// in-memory `text` is preserved so a later save can recover the content.
+    var saveError: String?
+    /// Set when the file changed on disk since we last read/wrote it, so we can
+    /// ask the user how to resolve instead of clobbering the external edits.
+    var saveConflict: SaveConflict?
 
     var hasVault: Bool { vaultURL != nil }
     var selectedFileIsMarkdown: Bool {
@@ -275,8 +318,66 @@ final class Workspace {
         autosaveTask?.cancel()
         guard let url = selectedFileURL else { return }
         guard Self.isMarkdownFile(url) else { return }
-        guard (try? Data(text.utf8).write(to: url, options: .atomic)) != nil else { return }
-        updateCachedMetadata(for: url, content: text)
+        // While a conflict alert is pending, don't keep re-writing/re-prompting.
+        guard saveConflict == nil else { return }
+        writeBuffer(text, to: url)
+    }
+
+    /// Writes `content` to `url`, but first guards against clobbering an
+    /// external modification, and surfaces (rather than swallows) write errors.
+    private func writeBuffer(_ content: String, to url: URL) {
+        let key = Self.metadataCacheKey(for: url.standardizedFileURL)
+        // Read the on-disk date via FileManager rather than URL.resourceValues:
+        // URL caches resource values per instance, which would mask an external
+        // modification made after we first read the file.
+        let currentDate = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+        if let knownDate = cachedMarkdownMetadataByPath[key]?.modificationDate,
+           let currentDate,
+           // 1s tolerance absorbs filesystem timestamp granularity and our own
+           // just-written timestamp; anything beyond that is an external write.
+           currentDate.timeIntervalSince(knownDate) > 1.0,
+           let diskContent = Self.readFileContents(url),
+           diskContent != content {
+            saveConflict = SaveConflict(
+                url: url,
+                fileName: url.lastPathComponent,
+                onDiskContent: diskContent,
+                editorContent: content
+            )
+            return
+        }
+
+        do {
+            try Data(content.utf8).write(to: url, options: .atomic)
+            saveError = nil
+            updateCachedMetadata(for: url, content: content)
+        } catch {
+            saveError = "Couldn\u{2019}t save \(url.lastPathComponent): \(error.localizedDescription)"
+        }
+    }
+
+    /// Conflict resolution: overwrite the on-disk file with the editor buffer.
+    func resolveSaveConflictKeepingMine() {
+        guard let conflict = saveConflict else { return }
+        saveConflict = nil
+        do {
+            try Data(conflict.editorContent.utf8).write(to: conflict.url, options: .atomic)
+            saveError = nil
+            updateCachedMetadata(for: conflict.url, content: conflict.editorContent)
+        } catch {
+            saveError = "Couldn\u{2019}t save \(conflict.fileName): \(error.localizedDescription)"
+        }
+    }
+
+    /// Conflict resolution: discard the editor buffer and adopt the on-disk
+    /// version (loading it into the editor if it is still the selected file).
+    func resolveSaveConflictUsingDisk() {
+        guard let conflict = saveConflict else { return }
+        saveConflict = nil
+        if let selectedFileURL, Self.urlsMatch(selectedFileURL, conflict.url) {
+            text = conflict.onDiskContent
+        }
+        updateCachedMetadata(for: conflict.url, content: conflict.onDiskContent)
     }
 
     func scheduleAutosave() {
@@ -343,6 +444,15 @@ final class Workspace {
         guard let url = urls
             .map({ $0.resolvingSymlinksInPath().standardizedFileURL })
             .first(where: { Self.isMarkdownFile($0) || Self.isImageFile($0) }) else {
+            return
+        }
+
+        // If the file already lives inside the open vault, just select it.
+        // Replacing the whole vault (tearing down the sidebar, file index, and
+        // selection) is jarring and unnecessary for an in-vault file.
+        if let vaultURL,
+           url.standardizedFileURL.path.hasPrefix(vaultURL.standardizedFileURL.path + "/") {
+            selectFile(url)
             return
         }
 
@@ -632,6 +742,103 @@ final class Workspace {
         }
         let key = Self.metadataCacheKey(for: standardized)
         return cachedMarkdownMetadataByPath[key]?.noteBody
+    }
+
+    /// Builds a `Sendable` search index for the current vault. Called once when
+    /// the command palette opens; the resulting array can be filtered repeatedly
+    /// (and off the main actor) without touching `Workspace` state again.
+    func makeSearchEntries() -> [NoteSearchEntry] {
+        files.map { file in
+            let title = title(for: file)
+            let haystack = "\(title)\n\(file.displayName)\n\(file.name)"
+            return NoteSearchEntry(
+                id: file.id,
+                url: file.url,
+                title: title,
+                relativePath: relativePath(for: file),
+                body: noteBody(for: file.url) ?? "",
+                foldedTitleHaystack: Self.foldedForSearch(haystack)
+            )
+        }
+    }
+
+    nonisolated static func foldedForSearch(_ string: String) -> String {
+        string.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+    }
+
+    /// Pure, `nonisolated` full-text filter so it can run inside a detached task
+    /// for large vaults. Title/name matches rank above body matches; body
+    /// matches carry a centered snippet for context.
+    nonisolated static func search(_ entries: [NoteSearchEntry], query rawQuery: String) -> [NoteSearchResult] {
+        let trimmedQuery = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else {
+            return entries.map {
+                NoteSearchResult(id: $0.id, url: $0.url, title: $0.title, subtitle: $0.relativePath, isBodyMatch: false)
+            }
+        }
+
+        let foldedQuery = foldedForSearch(trimmedQuery)
+        var titleMatches: [NoteSearchResult] = []
+        var bodyMatches: [NoteSearchResult] = []
+
+        for entry in entries {
+            if entry.foldedTitleHaystack.contains(foldedQuery) {
+                titleMatches.append(
+                    NoteSearchResult(id: entry.id, url: entry.url, title: entry.title, subtitle: entry.relativePath, isBodyMatch: false)
+                )
+            } else if let snippet = searchSnippet(in: entry.body, query: trimmedQuery) {
+                bodyMatches.append(
+                    NoteSearchResult(id: entry.id, url: entry.url, title: entry.title, subtitle: snippet, isBodyMatch: true)
+                )
+            }
+        }
+
+        return titleMatches + bodyMatches
+    }
+
+    /// Returns a single-line, match-centered snippet, or `nil` if `query` is not
+    /// present in `body`. Offsets are computed within the trimmed line so the
+    /// window stays aligned with the visible text.
+    nonisolated static func searchSnippet(in body: String, query: String) -> String? {
+        guard !body.isEmpty, !query.isEmpty,
+              body.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil else {
+            return nil
+        }
+
+        guard let matchRange = body.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) else {
+            return nil
+        }
+
+        let lineRange = body.lineRange(for: matchRange)
+        let trimmedLine = body[lineRange].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedLine.isEmpty else { return nil }
+
+        let maxLength = 140
+        guard trimmedLine.count > maxLength else { return trimmedLine }
+
+        // Re-locate the match inside the trimmed line so the window offsets are
+        // consistent with the string we actually slice.
+        guard let trimmedMatch = trimmedLine.range(
+            of: query,
+            options: [.caseInsensitive, .diacriticInsensitive]
+        ) else {
+            return String(trimmedLine.prefix(maxLength)) + "\u{2026}"
+        }
+
+        let matchOffset = trimmedLine.distance(from: trimmedLine.startIndex, to: trimmedMatch.lowerBound)
+        let windowStart = max(0, matchOffset - maxLength / 2)
+        let startIndex = trimmedLine.index(trimmedLine.startIndex, offsetBy: windowStart)
+        let endOffset = min(trimmedLine.count, windowStart + maxLength)
+        let endIndex = trimmedLine.index(trimmedLine.startIndex, offsetBy: endOffset)
+        var snippet = String(trimmedLine[startIndex..<endIndex])
+
+        if startIndex != trimmedLine.startIndex {
+            snippet = "\u{2026}" + snippet
+        }
+        if endIndex != trimmedLine.endIndex {
+            snippet += "\u{2026}"
+        }
+        return snippet
     }
 
 
@@ -1071,8 +1278,7 @@ final class Workspace {
     }
 
     private nonisolated static func readFileContents(_ url: URL) -> String? {
-        if let data = try? Data(contentsOf: url),
-           let string = String(data: data, encoding: .utf8) {
+        if let string = decodeFileContents(url) {
             return string
         }
 
@@ -1083,8 +1289,31 @@ final class Workspace {
             }
         }
 
+        return decodeFileContents(url)
+    }
+
+    /// Decodes a text file, tolerating non-UTF-8 encodings. We try the system's
+    /// BOM/heuristic detector first, then UTF-8, UTF-16, and finally ISO-Latin-1
+    /// (which maps every byte to a character and so never fails). This prevents
+    /// a non-UTF-8 note from appearing empty in the editor and then being
+    /// silently overwritten with an empty file on the next save.
+    private nonisolated static func decodeFileContents(_ url: URL) -> String? {
+        var detectedEncoding = String.Encoding.utf8
+        if let string = try? String(contentsOf: url, usedEncoding: &detectedEncoding) {
+            return string
+        }
+
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return String(data: data, encoding: .utf8)
+        // NB: we intentionally do NOT try .utf16 here — without a BOM it
+        // "succeeds" on arbitrary even-length byte runs and yields garbage.
+        // BOM-tagged UTF-16 is already handled by the usedEncoding attempt
+        // above; .isoLatin1 maps any byte and so is the safe final fallback.
+        for encoding in [String.Encoding.utf8, .isoLatin1] {
+            if let string = String(data: data, encoding: encoding) {
+                return string
+            }
+        }
+        return nil
     }
 
     nonisolated static func isMarkdownFile(_ url: URL) -> Bool {

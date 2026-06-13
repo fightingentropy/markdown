@@ -123,7 +123,7 @@ final class KaTeXBundleSchemeHandler: NSObject, WKURLSchemeHandler {
             return
         }
 
-        let response = HTTPURLResponse(
+        guard let response = HTTPURLResponse(
             url: url,
             statusCode: 200,
             httpVersion: "HTTP/1.1",
@@ -132,7 +132,10 @@ final class KaTeXBundleSchemeHandler: NSObject, WKURLSchemeHandler {
                 "Content-Length": "\(data.count)",
                 "Cache-Control": "public, max-age=31536000, immutable",
             ]
-        )!
+        ) else {
+            urlSchemeTask.didFailWithError(URLError(.cannotParseResponse))
+            return
+        }
 
         urlSchemeTask.didReceive(response)
         urlSchemeTask.didReceive(data)
@@ -156,7 +159,7 @@ final class KaTeXBundleSchemeHandler: NSObject, WKURLSchemeHandler {
 }
 
 private struct HTMLPreviewWebView: NSViewRepresentable {
-    final class Coordinator: NSObject, WKScriptMessageHandler {
+    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         var lastHTML: String?
         var lastBaseURL: URL?
 
@@ -167,6 +170,43 @@ private struct HTMLPreviewWebView: NSViewRepresentable {
             guard message.name == "openLink",
                   let urlString = message.body as? String,
                   let url = URL(string: urlString) else { return }
+            Self.openExternally(url)
+        }
+
+        /// Authoritative navigation policy. The preview frame must only ever
+        /// display the HTML we load programmatically; user-initiated link
+        /// clicks open in the default browser (http/https/mailto) or are
+        /// rejected outright. This prevents `javascript:`/`file:`/`data:`
+        /// links from navigating the file:// preview in place.
+        @MainActor
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void
+        ) {
+            switch navigationAction.navigationType {
+            case .linkActivated:
+                if let url = navigationAction.request.url,
+                   let scheme = url.scheme?.lowercased(),
+                   scheme == "http" || scheme == "https" || scheme == "mailto" {
+                    Self.openExternally(url)
+                }
+                decisionHandler(.cancel)
+            case .other, .reload, .formSubmitted, .formResubmitted, .backForward:
+                // `.other` covers our own `loadHTMLString`. Everything that is
+                // not an explicit link click stays inside the (app-generated)
+                // page; we still never let it leave the loaded document.
+                decisionHandler(.allow)
+            @unknown default:
+                decisionHandler(.allow)
+            }
+        }
+
+        private static func openExternally(_ url: URL) {
+            guard let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https" || scheme == "mailto" else {
+                return
+            }
             NSWorkspace.shared.open(url)
         }
 
@@ -184,7 +224,10 @@ private struct HTMLPreviewWebView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
+        #if DEBUG
+        // Web Inspector is a developer convenience; never ship it enabled.
         configuration.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        #endif
         configuration.setURLSchemeHandler(
             KaTeXBundleSchemeHandler(),
             forURLScheme: KaTeXBundleSchemeHandler.scheme
@@ -210,7 +253,9 @@ private struct HTMLPreviewWebView: NSViewRepresentable {
         configuration.userContentController.addUserScript(script)
         configuration.userContentController.add(context.coordinator, name: "openLink")
 
-        return WKWebView(frame: .zero, configuration: configuration)
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = context.coordinator
+        return webView
     }
 
     func updateNSView(_ nsView: WKWebView, context: Context) {

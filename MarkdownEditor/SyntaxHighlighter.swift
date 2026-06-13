@@ -29,8 +29,11 @@ enum EditorLinkDetector {
     }
 
     private static func markdownLinkURL(at characterIndex: Int, in text: String, nsText: NSString) -> URL? {
-        let fullRange = NSRange(location: 0, length: nsText.length)
-        for match in markdownLinkRegex.matches(in: text, range: fullRange) {
+        // Restrict the regex to the line containing the click so the scan stays
+        // O(line) instead of O(document) on large notes. Markdown links cannot
+        // span a newline, so a single line is a sufficient search window.
+        let searchRange = nsText.lineRange(for: NSRange(location: characterIndex, length: 0))
+        for match in markdownLinkRegex.matches(in: text, range: searchRange) {
             guard NSLocationInRange(characterIndex, match.range) else {
                 continue
             }
@@ -51,8 +54,10 @@ enum EditorLinkDetector {
     }
 
     private static func bareLinkURL(at characterIndex: Int, in text: String, nsText: NSString) -> URL? {
-        let fullRange = NSRange(location: 0, length: nsText.length)
-        for match in bareLinkRegex.matches(in: text, range: fullRange) {
+        // Bare links are terminated by whitespace, so they never cross a line
+        // boundary; scanning only the click's line keeps this bounded.
+        let searchRange = nsText.lineRange(for: NSRange(location: characterIndex, length: 0))
+        for match in bareLinkRegex.matches(in: text, range: searchRange) {
             guard NSLocationInRange(characterIndex, match.range) else {
                 continue
             }
@@ -90,6 +95,18 @@ final class SyntaxHighlighter {
 
     init(preferences: AppPreferences) {
         self.preferences = preferences
+    }
+
+    /// Reports whether an edit touching `editedRange` forces a full-document
+    /// re-highlight (rather than a cheap incremental paragraph/code-block pass).
+    /// Fence-affecting edits invalidate code-block parity for the whole
+    /// document, so callers can coalesce these expensive passes off the
+    /// per-keystroke path instead of running one synchronously each time.
+    func requiresFullRehighlight(for editedRange: NSRange?, in textStorage: NSTextStorage) -> Bool {
+        guard editedRange != nil else { return true }
+        let text = textStorage.string as NSString
+        let fullRange = NSRange(location: 0, length: text.length)
+        return incrementalHighlightRange(for: editedRange, in: text, fullRange: fullRange) == nil
     }
 
     func highlight(_ textStorage: NSTextStorage, editedRange: NSRange? = nil) {
