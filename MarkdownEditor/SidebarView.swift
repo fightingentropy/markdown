@@ -176,33 +176,7 @@ struct SidebarFolderRow: View {
                 }
             }
             .contextMenu {
-                Button {
-                    onRenameRequested(RenameRequest(folder: node))
-                } label: {
-                    Label("Rename", systemImage: "pencil")
-                }
-
-                Button {
-                    expandedFolderURLs.insert(node.url)
-                    workspace.createNewFile(in: node.url)
-                } label: {
-                    Label("New File", systemImage: "doc.badge.plus")
-                }
-
-                Button {
-                    expandedFolderURLs.insert(node.url)
-                    workspace.createNewFolder(in: node.url)
-                } label: {
-                    Label("New Folder", systemImage: "folder.badge.plus")
-                }
-
-                Divider()
-
-                Button(role: .destructive) {
-                    showDeleteConfirmation = true
-                } label: {
-                    Label("Delete", systemImage: "trash")
-                }
+                folderActions
             }
             .onDrop(of: SidebarDropSupport.internalTypeIdentifiers, isTargeted: $isDropTargeted) { providers in
                 SidebarDropSupport.handleMoveDrop(
@@ -223,7 +197,7 @@ struct SidebarFolderRow: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This moves the folder and everything inside it to the Trash. You can recover items from Finder.")
+                Text(deleteConfirmationMessage)
             }
         }
         .listRowInsets(sidebarRowInsets)
@@ -241,6 +215,66 @@ struct SidebarFolderRow: View {
                 }
             }
         )
+    }
+
+    @ViewBuilder
+    private var folderActions: some View {
+        Button {
+            onRenameRequested(RenameRequest(folder: node))
+        } label: {
+            Label("Rename", systemImage: "pencil")
+        }
+
+        Button {
+            expandedFolderURLs.insert(node.url)
+            workspace.createNewFile(in: node.url)
+        } label: {
+            Label("New File", systemImage: "doc.badge.plus")
+        }
+
+        Button {
+            expandedFolderURLs.insert(node.url)
+            workspace.createNewFolder(in: node.url)
+        } label: {
+            Label("New Folder", systemImage: "folder.badge.plus")
+        }
+
+        Divider()
+
+        Button(role: .destructive) {
+            showDeleteConfirmation = true
+        } label: {
+            Label("Move Folder to Trash", systemImage: "trash")
+        }
+    }
+
+    private var deleteConfirmationMessage: String {
+        let counts = descendantCounts(in: node.children)
+        let contents: String
+        switch (counts.folders, counts.items) {
+        case (0, 0):
+            contents = "The folder is empty."
+        case (0, let items):
+            contents = "It contains \(items) \(items == 1 ? "item" : "items")."
+        case (let folders, 0):
+            contents = "It contains \(folders) \(folders == 1 ? "subfolder" : "subfolders")."
+        case (let folders, let items):
+            contents = "It contains \(folders) \(folders == 1 ? "subfolder" : "subfolders") and \(items) \(items == 1 ? "item" : "items")."
+        }
+        return "\(contents) Everything will be moved to Trash and can be recovered from Finder."
+    }
+
+    private func descendantCounts(in nodes: [SidebarNode]) -> (folders: Int, items: Int) {
+        nodes.reduce(into: (folders: 0, items: 0)) { result, child in
+            if child.isFolder {
+                result.folders += 1
+                let nested = descendantCounts(in: child.children)
+                result.folders += nested.folders
+                result.items += nested.items
+            } else {
+                result.items += 1
+            }
+        }
     }
 }
 
@@ -586,31 +620,33 @@ final class SidebarBackgroundContextMenuView: NSView {
     }
 
     private func shouldHandleBlankSidebarArea(at point: NSPoint) -> Bool {
-        guard let outlineView = enclosingOutlineView() else {
-            return true
-        }
-
-        let pointInOutlineView = outlineView.convert(point, from: self)
-        guard outlineView.bounds.contains(pointInOutlineView) else {
+        guard let tableView = enclosingTableView() else {
+            // If SwiftUI's backing list cannot be identified, do not steal the
+            // right-click from row-level context menus.
             return false
         }
 
-        return outlineView.row(at: pointInOutlineView) == -1
+        let pointInTableView = tableView.convert(point, from: self)
+        guard tableView.bounds.contains(pointInTableView) else {
+            return false
+        }
+
+        return tableView.row(at: pointInTableView) == -1
     }
 
-    private func enclosingOutlineView() -> NSOutlineView? {
+    private func enclosingTableView() -> NSTableView? {
         guard let containerView = superview else { return nil }
-        return findOutlineView(in: containerView, excluding: self)
+        return findTableView(in: containerView, excluding: self)
     }
 
-    private func findOutlineView(in view: NSView, excluding excludedView: NSView) -> NSOutlineView? {
+    private func findTableView(in view: NSView, excluding excludedView: NSView) -> NSTableView? {
         for subview in view.subviews where subview !== excludedView {
-            if let outlineView = subview as? NSOutlineView {
-                return outlineView
+            if let tableView = subview as? NSTableView {
+                return tableView
             }
 
-            if let outlineView = findOutlineView(in: subview, excluding: excludedView) {
-                return outlineView
+            if let tableView = findTableView(in: subview, excluding: excludedView) {
+                return tableView
             }
         }
 

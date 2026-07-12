@@ -1,22 +1,15 @@
 import SwiftUI
 
 struct AppSettingsView: View {
-    @Bindable var assistantSettings: AssistantSettings
     @Bindable var preferences: AppPreferences
     @Bindable var workflowConfiguration: NoteWorkflowConfigurationStore
-    @FocusState private var focusedField: Field?
     @State private var selectedSection: SettingsSection = .workspace
-
-    private enum Field: Hashable {
-        case apiKey
-    }
 
     private enum SettingsSection: String, CaseIterable, Identifiable {
         case workspace
         case editor
         case preview
         case workflows
-        case assistant
 
         var id: String { rawValue }
 
@@ -30,8 +23,6 @@ struct AppSettingsView: View {
                 return "Preview"
             case .workflows:
                 return "Workflows"
-            case .assistant:
-                return "Assistant"
             }
         }
 
@@ -45,8 +36,6 @@ struct AppSettingsView: View {
                 return "Rendered note presentation"
             case .workflows:
                 return "Daily Notes, templates, and capture"
-            case .assistant:
-                return "Assistant connection and launcher tuning"
             }
         }
 
@@ -60,8 +49,6 @@ struct AppSettingsView: View {
                 return "Adjust how rendered notes read on screen, from typography to page width."
             case .workflows:
                 return "Choose where Daily Notes and reusable note templates live inside each vault."
-            case .assistant:
-                return "Manage the in-app assistant, including its API key, model, reasoning level, and launcher."
             }
         }
 
@@ -75,8 +62,6 @@ struct AppSettingsView: View {
                 return "doc.text.image"
             case .workflows:
                 return "calendar.badge.plus"
-            case .assistant:
-                return "sparkles.rectangle.stack.fill"
             }
         }
 
@@ -90,8 +75,6 @@ struct AppSettingsView: View {
                 return Color(red: 0.34, green: 0.78, blue: 0.66)
             case .workflows:
                 return Color(red: 0.72, green: 0.54, blue: 0.96)
-            case .assistant:
-                return Color(red: 0.44, green: 0.72, blue: 0.98)
             }
         }
     }
@@ -108,9 +91,6 @@ struct AppSettingsView: View {
         }
         .background(settingsBackground)
         .frame(minWidth: 980, minHeight: 720)
-        .onAppear {
-            focusedField = nil
-        }
     }
 
     private var sidebar: some View {
@@ -189,28 +169,6 @@ struct AppSettingsView: View {
         case .workflows:
             statusPill(workflowConfiguration.dailyNotes.folderPath, systemImage: "calendar", tint: selectedSection.accent)
             statusPill(workflowConfiguration.templates.folderPath, systemImage: "doc.on.doc", tint: .secondary)
-        case .assistant:
-            let currentModel = AssistantSettings.model(for: assistantSettings.selectedModel)
-            if assistantSettings.isConfigured {
-                if currentModel?.requiresAPIKey == false {
-                    statusPill("Using assistant subscription", systemImage: "person.crop.circle.badge.checkmark", tint: .green)
-                } else {
-                    statusPill("Key loaded", systemImage: "checkmark.circle.fill", tint: .green)
-                }
-            } else {
-                statusPill("Assistant disabled", systemImage: "exclamationmark.circle", tint: .orange)
-            }
-
-            if let currentModel {
-                statusPill(currentModel.displayName, systemImage: "cpu", tint: selectedSection.accent)
-
-                if !currentModel.supportedReasoningEfforts.isEmpty {
-                    let reasoningLabel = assistantSettings.selectedReasoningEffort == .modelDefault
-                        ? "Reasoning default"
-                        : "Reasoning " + assistantSettings.selectedReasoningEffort.displayName
-                    statusPill(reasoningLabel, systemImage: "brain", tint: .secondary)
-                }
-            }
         }
     }
 
@@ -225,11 +183,6 @@ struct AppSettingsView: View {
             previewSection
         case .workflows:
             workflowsSection
-        case .assistant:
-            connectionSection
-            modelSection
-            launcherSection
-            assistantBehaviorSection
         }
     }
 
@@ -403,215 +356,6 @@ struct AppSettingsView: View {
                 TextField("Templates folder", text: templatesFolderBinding)
                     .textFieldStyle(.roundedBorder)
             }
-        }
-    }
-
-    private var connectionSection: some View {
-        let currentModel = AssistantSettings.model(for: assistantSettings.selectedModel)
-        let usesSubscription = currentModel?.requiresAPIKey == false
-
-        return settingsCard(
-            title: "Assistant Connection",
-            description: usesSubscription
-                ? "assistant (Subscription) uses the local assistant Code CLI — no API key needed."
-                : "Store your OpenAI API key in this app on this Mac."
-        ) {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 12) {
-                    if usesSubscription {
-                        statusPill("Using assistant subscription", systemImage: "person.crop.circle.badge.checkmark", tint: .green)
-                    } else if assistantSettings.apiKeyPersistenceError != nil {
-                        statusPill("Keychain needs attention", systemImage: "exclamationmark.triangle.fill", tint: .orange)
-                    } else if assistantSettings.isConfigured {
-                        statusPill("Key saved in app", systemImage: "checkmark.circle.fill", tint: .green)
-                    } else {
-                        statusPill("Assistant disabled", systemImage: "exclamationmark.circle", tint: .orange)
-                    }
-                }
-
-                if usesSubscription {
-                    Text("The assistant will run the `assistant` command-line tool under your assistant subscription. Install assistant Code if you haven't already.")
-                        .foregroundStyle(.secondary)
-                        .font(.caption)
-                    Link("Install assistant Code", destination: URL(string: "https://assistant.com/assistant-code")!)
-                        .font(.caption)
-                } else {
-                    SecureField("API key", text: $assistantSettings.apiKey)
-                        .textFieldStyle(.roundedBorder)
-                        .focused($focusedField, equals: .apiKey)
-
-                    if let persistenceError = assistantSettings.apiKeyPersistenceError {
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            Label(persistenceError, systemImage: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.orange)
-                            Button("Retry") {
-                                assistantSettings.retryAPIKeyPersistence()
-                            }
-                            .buttonStyle(.link)
-                        }
-                        .font(.caption)
-                    }
-
-                    HStack(spacing: 12) {
-                        Link("Create or manage API keys", destination: AssistantSettings.authURL)
-
-                        Text(assistantSettings.isConfigured ? "Saved securely in macOS Keychain." : "The assistant stays disabled until a key is entered.")
-                            .foregroundStyle(.secondary)
-                    }
-                    .font(.caption)
-                }
-            }
-        }
-    }
-
-    private var modelSection: some View {
-        settingsCard(
-            title: "Assistant Model",
-            description: "Pick which model answers note questions — your assistant subscription or an OpenAI API model."
-        ) {
-            VStack(alignment: .leading, spacing: 14) {
-                Picker("Assistant model", selection: $assistantSettings.selectedModel) {
-                    ForEach(AssistantSettings.supportedModels, id: \.id) { model in
-                        Text(model.displayName).tag(model.id)
-                    }
-                }
-                .pickerStyle(.menu)
-                .frame(maxWidth: 320, alignment: .leading)
-
-                if let currentModel = AssistantSettings.model(for: assistantSettings.selectedModel),
-                   !currentModel.supportedReasoningEfforts.isEmpty {
-                    Picker("Reasoning level", selection: $assistantSettings.selectedReasoningEffort) {
-                        Text(AssistantReasoningEffortOption.modelDefault.displayName)
-                            .tag(AssistantReasoningEffortOption.modelDefault)
-
-                        ForEach(currentModel.supportedReasoningEfforts) { effort in
-                            Text(effort.displayName)
-                                .tag(AssistantReasoningEffortOption(rawValue: effort.rawValue) ?? .modelDefault)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .frame(maxWidth: 320, alignment: .leading)
-
-                    Text("Only reasoning-capable models expose this control. Model default defers to the selected model’s own reasoning preset.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                Text("The assistant sends the current note contents with each question, using the selected OpenAI model.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                if let currentModel = AssistantSettings.model(for: assistantSettings.selectedModel) {
-                    statusPill(currentModel.displayName, systemImage: "cpu", tint: .accentColor)
-                }
-            }
-        }
-    }
-
-    private var launcherSection: some View {
-        settingsCard(
-            title: "Assistant Launcher",
-            description: "Adjust the floating chat button directly from settings."
-        ) {
-            HStack(alignment: .top, spacing: 28) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Preview")
-                        .font(.headline)
-
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 22, style: .continuous)
-                            .fill(Color.black.opacity(0.18))
-                            .frame(width: 160, height: 160)
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                                    .strokeBorder(.white.opacity(0.08))
-                            }
-
-                        ZStack(alignment: .bottomTrailing) {
-                            AssistantLauncherSurface(settings: assistantSettings)
-                                .frame(width: assistantSettings.launcherSize, height: assistantSettings.launcherSize)
-
-                            if !assistantSettings.isConfigured && assistantSettings.showsLauncherStatusBadge {
-                                Circle()
-                                    .fill(.black.opacity(0.8))
-                                    .frame(width: 14, height: 14)
-                                    .overlay {
-                                        Circle()
-                                            .fill(.gray.opacity(0.7))
-                                            .padding(3)
-                                    }
-                                    .offset(x: -6, y: -5)
-                            }
-                        }
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 16) {
-                    Picker("Icon", selection: $assistantSettings.launcherSymbol) {
-                        ForEach(AssistantSettings.supportedLauncherSymbols, id: \.id) { symbol in
-                            Text(symbol.displayName).tag(symbol.id)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .frame(maxWidth: 220, alignment: .leading)
-
-                    Toggle("Show status badge when API key is missing", isOn: $assistantSettings.showsLauncherStatusBadge)
-
-                    sliderRow(
-                        title: "Button size",
-                        value: $assistantSettings.launcherSize,
-                        range: 48...72,
-                        format: .number.precision(.fractionLength(0)),
-                        suffix: " pt"
-                    )
-
-                    sliderRow(
-                        title: "Corner radius",
-                        value: $assistantSettings.launcherCornerRadius,
-                        range: 12...24,
-                        format: .number.precision(.fractionLength(0)),
-                        suffix: " pt"
-                    )
-
-                    sliderRow(
-                        title: "Background tone",
-                        value: $assistantSettings.launcherBackgroundLevel,
-                        range: 0.05...0.22,
-                        format: .number.precision(.fractionLength(2))
-                    )
-
-                    sliderRow(
-                        title: "Icon tone",
-                        value: $assistantSettings.launcherForegroundLevel,
-                        range: 0.14...0.34,
-                        format: .number.precision(.fractionLength(2))
-                    )
-
-                    sliderRow(
-                        title: "Border tone",
-                        value: $assistantSettings.launcherBorderLevel,
-                        range: 0.14...0.30,
-                        format: .number.precision(.fractionLength(2))
-                    )
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-    }
-
-    private var assistantBehaviorSection: some View {
-        settingsCard(
-            title: "Assistant Behavior",
-            description: "Quick reminders about how the assistant behaves while you work."
-        ) {
-            VStack(alignment: .leading, spacing: 10) {
-                Label("The current note is sent as context with each assistant question.", systemImage: "doc.text")
-                Label("Messages reset automatically when you switch to another note.", systemImage: "arrow.triangle.2.circlepath")
-                Label("API keys are stored in macOS Keychain, not in settings or document files.", systemImage: "key")
-            }
-            .foregroundStyle(.secondary)
         }
     }
 

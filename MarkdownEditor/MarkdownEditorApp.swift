@@ -55,21 +55,16 @@ struct MarkdownEditorApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var workspace: Workspace
     @State private var appUpdater: AppUpdater
-    @State private var assistantSettings: AssistantSettings
     @State private var appPreferences: AppPreferences
-    @State private var noteAssistant: NoteAssistant
     @State private var noteWorkflowConfiguration: NoteWorkflowConfigurationStore
     @FocusedValue(\.editorController) private var editorController
 
     init() {
-        let assistantSettings = AssistantSettings()
         let appPreferences = AppPreferences()
         let workspace = Workspace(preferences: appPreferences)
-        _assistantSettings = State(initialValue: assistantSettings)
         _appPreferences = State(initialValue: appPreferences)
         _workspace = State(initialValue: workspace)
         _appUpdater = State(initialValue: AppUpdater())
-        _noteAssistant = State(initialValue: NoteAssistant())
         _noteWorkflowConfiguration = State(initialValue: NoteWorkflowConfigurationStore())
         appDelegate.setOpenURLsHandler { urls in
             workspace.openRequestedFiles(urls)
@@ -85,8 +80,6 @@ struct MarkdownEditorApp: App {
                 if workspace.hasVault {
                     ContentView(
                         workspace: workspace,
-                        assistant: noteAssistant,
-                        assistantSettings: assistantSettings,
                         preferences: appPreferences,
                         workflowConfiguration: noteWorkflowConfiguration
                     )
@@ -132,9 +125,6 @@ struct MarkdownEditorApp: App {
                 Button("Search Notes") { workspace.isCommandPalettePresented.toggle() }
                     .keyboardShortcut("k")
                     .disabled(!workspace.hasVault)
-                Button("Toggle Assistant") { noteAssistant.togglePresentation() }
-                    .keyboardShortcut("l")
-                    .disabled(!workspace.hasVault)
             }
             CommandGroup(after: .help) {
                 if appUpdater.isConfigured {
@@ -148,7 +138,6 @@ struct MarkdownEditorApp: App {
 
         Window("Settings", id: WindowSceneID.settings) {
             AppSettingsView(
-                assistantSettings: assistantSettings,
                 preferences: appPreferences,
                 workflowConfiguration: noteWorkflowConfiguration
             )

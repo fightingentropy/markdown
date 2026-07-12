@@ -428,7 +428,9 @@ struct SourceEditorView: NSViewRepresentable {
         private var currentDocumentIdentity: String?
         private var lastSelectionRange: NSRange?
         private var pendingFullHighlight: DispatchWorkItem?
+        private var pendingLinkPreviewRefresh: DispatchWorkItem?
         private var lastAppliedLayoutSignature: LayoutSignature?
+        private let linkPreviewController = EditorLinkPreviewController()
         /// Hash of the text currently shown in the editor, refreshed whenever the
         /// editor content changes (user edit or applied external text). Lets
         /// `updateNSView` skip the O(n) `textView.string != text` comparison when
@@ -471,11 +473,18 @@ struct SourceEditorView: NSViewRepresentable {
             stopObservingSizeChanges()
             observedClipView = clipView
             clipView.postsFrameChangedNotifications = true
+            clipView.postsBoundsChangedNotifications = true
 
             NotificationCenter.default.addObserver(
                 self,
                 selector: #selector(clipViewFrameDidChange(_:)),
                 name: NSView.frameDidChangeNotification,
+                object: clipView
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(clipViewBoundsDidChange(_:)),
+                name: NSView.boundsDidChangeNotification,
                 object: clipView
             )
         }
@@ -510,6 +519,7 @@ struct SourceEditorView: NSViewRepresentable {
             )
 
             lastAppliedLayoutSignature = signature
+            linkPreviewController.layoutCards(in: textView)
         }
 
         private func stopObservingSizeChanges() {
@@ -518,6 +528,11 @@ struct SourceEditorView: NSViewRepresentable {
             NotificationCenter.default.removeObserver(
                 self,
                 name: NSView.frameDidChangeNotification,
+                object: observedClipView
+            )
+            NotificationCenter.default.removeObserver(
+                self,
+                name: NSView.boundsDidChangeNotification,
                 object: observedClipView
             )
             self.observedClipView = nil
@@ -640,12 +655,20 @@ struct SourceEditorView: NSViewRepresentable {
             let applyHighlighting = {
                 guard let storage = textView.textStorage else { return }
                 self.highlighter.highlight(storage, editedRange: editedRange)
+                if editedRange == nil {
+                    self.cancelPendingLinkPreviewRefresh()
+                    self.refreshLinkPreviews(in: textView)
+                }
             }
 
             if preservingViewport {
                 withPreservedViewport(for: textView, updates: applyHighlighting)
             } else {
                 applyHighlighting()
+            }
+
+            if editedRange != nil {
+                scheduleLinkPreviewRefresh(for: textView)
             }
         }
 
@@ -747,6 +770,31 @@ struct SourceEditorView: NSViewRepresentable {
             pendingFullHighlight = nil
         }
 
+        private func scheduleLinkPreviewRefresh(for textView: NSTextView) {
+            cancelPendingLinkPreviewRefresh()
+
+            let workItem = DispatchWorkItem { [weak self, weak textView] in
+                guard let self, let textView else { return }
+                self.pendingLinkPreviewRefresh = nil
+                self.withPreservedViewport(for: textView, revealSelectionAfterUpdate: false) {
+                    self.refreshLinkPreviews(in: textView)
+                }
+            }
+            pendingLinkPreviewRefresh = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: workItem)
+        }
+
+        private func cancelPendingLinkPreviewRefresh() {
+            pendingLinkPreviewRefresh?.cancel()
+            pendingLinkPreviewRefresh = nil
+        }
+
+        private func refreshLinkPreviews(in textView: NSTextView) {
+            linkPreviewController.refresh(in: textView) { [weak self] url in
+                self?.openLink(url)
+            }
+        }
+
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             guard !isApplyingExternalText else { return }
@@ -754,6 +802,7 @@ struct SourceEditorView: NSViewRepresentable {
             guard lastSelectionRange != selection else { return }
 
             lastSelectionRange = selection
+            linkPreviewController.selectionDidChange(in: textView)
             parent.onSelectionChange(parent.documentURL, selection)
         }
 
@@ -763,7 +812,7 @@ struct SourceEditorView: NSViewRepresentable {
                 return false
             }
 
-            openLink(url, from: textView)
+            openLink(url)
             return true
         }
 
@@ -777,36 +826,17 @@ struct SourceEditorView: NSViewRepresentable {
                 return false
             }
 
-            openLink(url, from: textView)
+            openLink(url)
             return true
         }
 
-        /// Opens a document-sourced URL. For web links in a non-sandboxed app we
-        /// confirm first so a stray ⌘-click / ⌘-Return cannot silently launch an
-        /// arbitrary destination embedded in note content.
-        private func openLink(_ url: URL, from textView: NSTextView) {
+        private func openLink(_ url: URL) {
             guard PreviewURLPolicy.canOpenExternally(url) else {
                 NSSound.beep()
                 return
             }
 
-            let alert = NSAlert()
-            alert.messageText = "Open link?"
-            alert.informativeText = url.absoluteString
-            alert.addButton(withTitle: "Open")
-            alert.addButton(withTitle: "Cancel")
-            alert.alertStyle = .informational
-
-            let openInWindow: (NSApplication.ModalResponse) -> Void = { response in
-                guard response == .alertFirstButtonReturn else { return }
-                NSWorkspace.shared.open(url)
-            }
-
-            if let window = textView.window {
-                alert.beginSheetModal(for: window, completionHandler: openInWindow)
-            } else {
-                openInWindow(alert.runModal())
-            }
+            NSWorkspace.shared.open(url)
         }
 
         private func withPreservedViewport(
@@ -894,6 +924,17 @@ struct SourceEditorView: NSViewRepresentable {
             }
 
             applyTextLayout(for: scrollView, textView: textView)
+        }
+
+        @objc
+        private func clipViewBoundsDidChange(_ notification: Notification) {
+            guard let clipView = notification.object as? NSClipView,
+                  let scrollView = clipView.superview as? NSScrollView,
+                  let textView = scrollView.documentView as? NSTextView else {
+                return
+            }
+
+            linkPreviewController.layoutCards(in: textView)
         }
     }
 }

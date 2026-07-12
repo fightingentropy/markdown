@@ -2,7 +2,7 @@
 
 Markdown is a native macOS Markdown notes app built with SwiftUI and AppKit.
 
-It is designed as an Obsidian-compatible home for a plain-text vault, with safe local files, iCloud Drive support, fast note switching, metadata, backlinks, workflows, preview, and an optional in-app note assistant.
+It is designed as an Obsidian-compatible home for a plain-text vault, with safe local files, iCloud Drive support, fast note switching, metadata, backlinks, workflows, and preview.
 
 ## What The App Does
 
@@ -16,7 +16,6 @@ It is designed as an Obsidian-compatible home for a plain-text vault, with safe 
 - Renders Mermaid diagrams
 - Shows image files and inline image embeds
 - Includes Sparkle-based app updates for shipped builds
-- Includes an optional note assistant that uses the current note as context
 
 ## Main Features
 
@@ -53,6 +52,7 @@ It is designed as an Obsidian-compatible home for a plain-text vault, with safe 
 - Preserves note bytes on open, including YAML frontmatter and CRLF line endings
 - Sidebar titles use frontmatter titles or the first heading when available
 - Supports Obsidian-style `[[Wiki Links]]` with title completion
+- Shows real X post cards and interactive 16:9 YouTube players while editing; embed source links reveal on hover or caret focus
 - Copies pasted or dropped attachments into the configured Obsidian attachment folder
 - Toggle Markdown tasks with `Shift-Command-Return`
 
@@ -96,16 +96,6 @@ It is designed as an Obsidian-compatible home for a plain-text vault, with safe 
 - Obsidian-style filters for text, file, path, tag, property, and task state
 - Quoted phrases, `OR` groups, exclusions, result snippets, and saved searches
 
-### Assistant
-
-- Optional in-app note assistant
-- Uses the current note as the primary context
-- Resets chat automatically when switching notes
-- Stores the API key in macOS Keychain and migrates older plaintext settings
-- Supports OpenAI-compatible models and a local assistant subscription through the `assistant` CLI
-- Lets you choose the assistant model
-- Lets you customize the floating launcher button
-
 ### Updates
 
 - Built-in Sparkle updater for shipped builds
@@ -122,7 +112,6 @@ It is designed as an Obsidian-compatible home for a plain-text vault, with safe 
 - `Command-S`: Save
 - `Command-B`: Show or hide sidebar
 - `Command-K`: Search notes
-- `Command-L`: Focus the editor
 - `Shift-Command-B`: Bold
 - `Command-I`: Italic
 - `Command-E`: Inline code
@@ -228,14 +217,6 @@ or for Release:
 
 1. Open a note.
 2. Click the eye button in the toolbar to switch to preview.
-
-### Ask The Assistant
-
-1. Open Settings.
-2. Add an OpenAI API key, or choose assistant Subscription if the local `assistant` CLI is authenticated.
-3. Choose a model and reasoning level.
-4. Open a note.
-5. Use the floating assistant button to ask questions about that note.
 
 ### Check For Updates
 
@@ -349,7 +330,6 @@ If the archive URLs or notes URLs are hosted somewhere else:
 - Do not commit private keys to the repo
 - Use the same `SPARKLE_PRIVATE_KEY` for future releases if you want existing users to keep receiving Sparkle updates without a manual reinstall
 - Local `/Applications/Markdown.app` installs should be signed with the local `Markdown` identity, not ad-hoc
-- Assistant API keys are stored in the app's local settings, not in note files
 
 ## Current Update Feed
 

@@ -2,8 +2,6 @@ import SwiftUI
 
 struct ContentView: View {
     @Bindable var workspace: Workspace
-    @Bindable var assistant: NoteAssistant
-    @Bindable var assistantSettings: AssistantSettings
     @Bindable var preferences: AppPreferences
     @State private var controller = EditorController()
     @State private var renameRequest: RenameRequest?
@@ -22,14 +20,10 @@ struct ContentView: View {
 
     init(
         workspace: Workspace,
-        assistant: NoteAssistant,
-        assistantSettings: AssistantSettings,
         preferences: AppPreferences,
         workflowConfiguration: NoteWorkflowConfigurationStore
     ) {
         self.workspace = workspace
-        self.assistant = assistant
-        self.assistantSettings = assistantSettings
         self.preferences = preferences
         self.workflowConfiguration = workflowConfiguration
         _viewMode = State(initialValue: preferences.defaultOpenViewMode)
@@ -44,117 +38,13 @@ struct ContentView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .navigationTitle(workspace.selectedFileName)
-        .overlay(alignment: .bottomTrailing) {
-            NoteAssistantPanel(
-                assistant: assistant,
-                settings: assistantSettings,
-                currentFileTitle: workspace.selectedFileName,
-                hasSelectedFile: workspace.selectedFileURL != nil
-            )
-            .padding(.trailing, 22)
-            .padding(.bottom, 20)
-        }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                EditorSearchToolbarField(
-                    query: controller.searchQuery,
-                    controller: controller,
-                    isEnabled: workspace.selectedFileIsMarkdown,
-                    onActivate: showEditorForSearch
-                )
-                .frame(width: 150)
-                .help("Search Current Document")
-            }
-
-            if #available(macOS 26.0, *) {
-                ToolbarSpacer(.fixed, placement: .primaryAction)
-            }
-
-            ToolbarItem(placement: .primaryAction) {
-                HStack(spacing: 2) {
-                    Button { workspace.createNewFile() } label: {
-                        Image(systemName: "plus")
-                    }
-                    .help("New File")
-                    .accessibilityLabel("New File")
-
-                    Button {
-                        openDailyNote()
-                    } label: {
-                        Image(systemName: "calendar")
-                    }
-                    .help("Open Today's Daily Note")
-
-                    Menu {
-                        if availableTemplates.isEmpty {
-                            Text("No templates in \(workflowConfiguration.templates.folderPath)")
-                        } else {
-                            ForEach(availableTemplates) { template in
-                                Button(template.displayName) {
-                                    selectedTemplate = template
-                                }
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "doc.badge.plus")
-                    }
-                    .menuStyle(.borderlessButton)
-                    .help("New from Template")
-
-                    ForEach(OpenViewMode.allCases) { mode in
-                        Button {
-                            viewMode = mode
-                        } label: {
-                            Image(systemName: mode.systemImage)
-                        }
-                        .help(mode.title)
-                        .disabled(mode != .bases && !workspace.selectedFileIsMarkdown)
-                        .opacity(viewMode == mode ? 1 : 0.5)
-                        .accessibilityLabel(mode.title)
-                        .accessibilityAddTraits(viewMode == mode ? [.isButton, .isSelected] : .isButton)
-                    }
-
-                    Button {
-                        workspaceSession.splitPreview.toggle()
-                    } label: {
-                        Image(systemName: "rectangle.split.2x1")
-                    }
-                    .help(workspaceSession.splitPreview ? "Hide Split Preview" : "Show Split Preview")
-                    .disabled(!workspace.selectedFileIsMarkdown || viewMode != .editor)
-                    .opacity(workspaceSession.splitPreview ? 1 : 0.5)
-
-                    if let selectedURL = workspace.selectedFileURL {
-                        Button {
-                            workspaceSession.togglePinned(selectedURL)
-                        } label: {
-                            Image(systemName: workspaceSession.isPinned(selectedURL) ? "pin.fill" : "pin")
-                        }
-                        .help(workspaceSession.isPinned(selectedURL) ? "Unpin Note" : "Pin Note")
-                    }
-
-                    Button {
-                        isInspectorPresented.toggle()
-                    } label: {
-                        Image(systemName: "sidebar.trailing")
-                    }
-                    .help(isInspectorPresented ? "Hide Note Inspector" : "Show Note Inspector")
-                    .opacity(isInspectorPresented ? 1 : 0.5)
-
-                    Button {
-                        isVaultHealthPresented = true
-                    } label: {
-                        Image(systemName: "checkmark.shield")
-                    }
-                    .help("Vault Health")
-                }
-            }
-        }
         .frame(minWidth: 700, minHeight: 500)
         .inspector(isPresented: $isInspectorPresented) {
             NoteInspectorView(workspace: workspace, controller: controller)
                 .inspectorColumnWidth(min: 270, ideal: 320, max: 440)
         }
         .background(WindowToolbarConfigurator())
+        .background(TitlebarAccessoryInstaller(content: noteViewToolbar))
         .overlay {
             if workspace.isCommandPalettePresented {
                 CommandPaletteView(workspace: workspace) {
@@ -168,7 +58,6 @@ struct ContentView: View {
             restoreWorkspaceSession()
             recordCurrentVault()
             applyPreferredViewMode()
-            synchronizeAssistantContext()
         }
         .onDisappear {
             persistExpandedFolders()
@@ -194,14 +83,12 @@ struct ContentView: View {
         }
         .onChange(of: workspace.text) { _, _ in
             workspace.scheduleAutosave()
-            synchronizeAssistantContext()
         }
         .onChange(of: workspace.selectedFileURL) { _, _ in
             if workspaceSession.isLoaded(for: workspace.vaultURL) {
                 workspaceSession.noteSelected(workspace.selectedFileURL)
             }
             applyPreferredViewMode()
-            synchronizeAssistantContext()
             controller.requestEditorFocus()
         }
         .onChange(of: preferences.restoresExpandedFolders) { _, _ in
@@ -342,8 +229,138 @@ struct ContentView: View {
 
     // MARK: - Detail
 
-    @ViewBuilder
     private var detail: some View {
+        VStack(spacing: 0) {
+            detailHeader
+            Divider()
+            detailContent
+        }
+    }
+
+    private var detailHeader: some View {
+        NoteTabBar(workspace: workspace, session: workspaceSession)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.bar)
+    }
+
+    private var noteViewToolbar: some View {
+        HStack(spacing: 8) {
+            Picker("View", selection: $viewMode) {
+                ForEach(OpenViewMode.allCases) { mode in
+                    Label(mode.title, systemImage: mode.systemImage)
+                        .labelStyle(.iconOnly)
+                        .tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.large)
+            .labelsHidden()
+            .font(.system(size: 16, weight: .medium))
+            .frame(width: 190)
+            .help("Editor, Preview, Graph, and Bases")
+            .accessibilityLabel("Note View")
+
+            Button {
+                workspaceSession.splitPreview.toggle()
+            } label: {
+                Image(systemName: "rectangle.split.2x1")
+                    .font(.system(size: 16, weight: .medium))
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .help(workspaceSession.splitPreview ? "Hide Split Preview" : "Show Split Preview")
+            .disabled(!workspace.selectedFileIsMarkdown || viewMode != .editor)
+            .tint(workspaceSession.splitPreview ? .accentColor : nil)
+
+            Button {
+                isInspectorPresented.toggle()
+            } label: {
+                Image(systemName: "sidebar.trailing")
+                    .font(.system(size: 16, weight: .medium))
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .help(isInspectorPresented ? "Hide Note Inspector" : "Show Note Inspector")
+            .tint(isInspectorPresented ? .accentColor : nil)
+
+            moreNoteActionsMenu
+        }
+        .fixedSize()
+        // Titlebar accessories are top-aligned by AppKit. Give the controls
+        // breathing room above so they sit visually centered in the tall
+        // unified titlebar instead of crowding the menu-bar edge.
+        .padding(.top, 14)
+        .padding(.bottom, 2)
+    }
+
+    private var moreNoteActionsMenu: some View {
+        Menu {
+            Button {
+                workspace.createNewFile()
+            } label: {
+                Label("New Note", systemImage: "plus")
+            }
+
+            Button {
+                openDailyNote()
+            } label: {
+                Label("Open Today's Daily Note", systemImage: "calendar")
+            }
+
+            Menu("New from Template") {
+                if availableTemplates.isEmpty {
+                    Text("No templates in \(workflowConfiguration.templates.folderPath)")
+                } else {
+                    ForEach(availableTemplates) { template in
+                        Button(template.displayName) {
+                            selectedTemplate = template
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
+            Button {
+                showEditorForSearch()
+                controller.activateSearch()
+            } label: {
+                Label("Find in Current Note", systemImage: "magnifyingglass")
+            }
+            .disabled(!workspace.selectedFileIsMarkdown)
+
+            if let selectedURL = workspace.selectedFileURL {
+                Button {
+                    workspaceSession.togglePinned(selectedURL)
+                } label: {
+                    Label(
+                        workspaceSession.isPinned(selectedURL) ? "Unpin Note" : "Pin Note",
+                        systemImage: workspaceSession.isPinned(selectedURL) ? "pin.slash" : "pin"
+                    )
+                }
+            }
+
+            Button {
+                isVaultHealthPresented = true
+            } label: {
+                Label("Vault Health", systemImage: "checkmark.shield")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.system(size: 18, weight: .medium))
+                .frame(width: 28, height: 28)
+        }
+        .menuStyle(.borderlessButton)
+        .controlSize(.large)
+        .fixedSize()
+        .help("More Note Actions")
+        .accessibilityLabel("More Note Actions")
+    }
+
+    @ViewBuilder
+    private var detailContent: some View {
         if workspace.selectedFileIsImage, let selectedURL = workspace.selectedFileURL {
             ImagePreview(url: selectedURL)
         } else if viewMode == .bases {
@@ -375,28 +392,23 @@ struct ContentView: View {
 
     @ViewBuilder
     private var noteWorkspaceView: some View {
-        VStack(spacing: 0) {
-            NoteTabBar(workspace: workspace, session: workspaceSession)
-            Divider()
-
-            if viewMode == .editor && workspaceSession.splitPreview {
-                HSplitView {
-                    editorView
-                        .frame(minWidth: 360)
-                    previewView
-                        .frame(minWidth: 360)
-                }
-            } else {
-                switch viewMode {
-                case .editor:
-                    editorView
-                case .preview:
-                    previewView
-                case .graph:
-                    graphView
-                case .bases:
-                    basesView
-                }
+        if viewMode == .editor && workspaceSession.splitPreview {
+            HSplitView {
+                editorView
+                    .frame(minWidth: 360)
+                previewView
+                    .frame(minWidth: 360)
+            }
+        } else {
+            switch viewMode {
+            case .editor:
+                editorView
+            case .preview:
+                previewView
+            case .graph:
+                graphView
+            case .bases:
+                basesView
             }
         }
     }
@@ -488,23 +500,6 @@ private extension ContentView {
         if viewMode != .editor {
             viewMode = .editor
         }
-    }
-
-    func synchronizeAssistantContext() {
-        guard workspace.selectedFileIsMarkdown else {
-            assistant.updateContext(
-                fileURL: nil,
-                title: "",
-                markdown: ""
-            )
-            return
-        }
-
-        assistant.updateContext(
-            fileURL: workspace.selectedFileURL,
-            title: workspace.selectedFileName,
-            markdown: workspace.text
-        )
     }
 
     func collapseSidebarFolders() {
@@ -651,9 +646,74 @@ private struct WindowToolbarConfigurator: NSViewRepresentable {
     }
 
     private func configureToolbar(for view: NSView) {
-        guard let toolbar = view.window?.toolbar else { return }
+        guard let window = view.window, let toolbar = window.toolbar else { return }
+        window.toolbarStyle = .unified
         toolbar.displayMode = .iconOnly
+        toolbar.sizeMode = .regular
         toolbar.allowsUserCustomization = false
         toolbar.autosavesConfiguration = false
+    }
+}
+
+private struct TitlebarAccessoryInstaller<Content: View>: NSViewRepresentable {
+    let content: Content
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(content: content)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            context.coordinator.update(content: content, in: view)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            context.coordinator.update(content: content, in: nsView)
+        }
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    @MainActor
+    final class Coordinator {
+        private let accessoryController = NSTitlebarAccessoryViewController()
+        private let hostingView: NSHostingView<Content>
+        private weak var attachedWindow: NSWindow?
+
+        init(content: Content) {
+            hostingView = NSHostingView(rootView: content)
+            accessoryController.layoutAttribute = .right
+            accessoryController.view = hostingView
+        }
+
+        func update(content: Content, in containerView: NSView) {
+            hostingView.rootView = content
+            hostingView.setFrameSize(hostingView.fittingSize)
+
+            guard let window = containerView.window else { return }
+            guard attachedWindow !== window else { return }
+
+            detach()
+            window.addTitlebarAccessoryViewController(accessoryController)
+            attachedWindow = window
+        }
+
+        func detach() {
+            guard let attachedWindow,
+                  let index = attachedWindow.titlebarAccessoryViewControllers.firstIndex(where: {
+                      $0 === accessoryController
+                  }) else {
+                self.attachedWindow = nil
+                return
+            }
+            attachedWindow.removeTitlebarAccessoryViewController(at: index)
+            self.attachedWindow = nil
+        }
     }
 }
