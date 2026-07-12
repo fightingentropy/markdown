@@ -3,6 +3,7 @@ import SwiftUI
 struct WelcomeView: View {
     let workspace: Workspace
     @State private var isDropTargeted = false
+    @State private var recentVaults = RecentVaultStore()
 
     var body: some View {
         VStack(spacing: 20) {
@@ -22,6 +23,41 @@ struct WelcomeView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
+
+            if !recentVaults.records.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Recent Vaults")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+
+                    ForEach(recentVaults.records.prefix(5)) { record in
+                        Button {
+                            if workspace.openVault(record.url) {
+                                recentVaults.recordOpened(record.url, displayName: record.displayName)
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: "folder")
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(record.displayName)
+                                    Text(record.url.path)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
+                    }
+                }
+                .frame(width: 460)
+                .padding(.top, 8)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay {
@@ -37,6 +73,9 @@ struct WelcomeView: View {
             return true
         } isTargeted: { targeted in
             isDropTargeted = targeted
+        }
+        .onAppear {
+            recentVaults.pruneUnavailable()
         }
     }
 }

@@ -58,6 +58,7 @@ struct MarkdownEditorApp: App {
     @State private var assistantSettings: AssistantSettings
     @State private var appPreferences: AppPreferences
     @State private var noteAssistant: NoteAssistant
+    @State private var noteWorkflowConfiguration: NoteWorkflowConfigurationStore
     @FocusedValue(\.editorController) private var editorController
 
     init() {
@@ -69,6 +70,7 @@ struct MarkdownEditorApp: App {
         _workspace = State(initialValue: workspace)
         _appUpdater = State(initialValue: AppUpdater())
         _noteAssistant = State(initialValue: NoteAssistant())
+        _noteWorkflowConfiguration = State(initialValue: NoteWorkflowConfigurationStore())
         appDelegate.setOpenURLsHandler { urls in
             workspace.openRequestedFiles(urls)
         }
@@ -85,7 +87,8 @@ struct MarkdownEditorApp: App {
                         workspace: workspace,
                         assistant: noteAssistant,
                         assistantSettings: assistantSettings,
-                        preferences: appPreferences
+                        preferences: appPreferences,
+                        workflowConfiguration: noteWorkflowConfiguration
                     )
                 } else {
                     WelcomeView(workspace: workspace)
@@ -146,7 +149,8 @@ struct MarkdownEditorApp: App {
         Window("Settings", id: WindowSceneID.settings) {
             AppSettingsView(
                 assistantSettings: assistantSettings,
-                preferences: appPreferences
+                preferences: appPreferences,
+                workflowConfiguration: noteWorkflowConfiguration
             )
             .background(SettingsWindowAccessor())
         }
@@ -191,6 +195,9 @@ struct MarkdownEditorApp: App {
             Button("Bullet List") { editorController?.applyUnorderedList() }
                 .disabled(!hasEditor)
             Button("Numbered List") { editorController?.applyOrderedList() }
+                .disabled(!hasEditor)
+            Button("Toggle Task") { editorController?.toggleTask() }
+                .keyboardShortcut(.return, modifiers: [.command, .shift])
                 .disabled(!hasEditor)
             Button("Code Block") { editorController?.applyCodeBlock() }
                 .disabled(!hasEditor)

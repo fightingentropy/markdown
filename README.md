@@ -2,13 +2,15 @@
 
 Markdown is a native macOS Markdown notes app built with SwiftUI and AppKit.
 
-It is designed for working in a folder of notes with a plain-text editor, a rendered preview, fast note switching, inline image handling, Mermaid support, and an optional in-app note assistant.
+It is designed as an Obsidian-compatible home for a plain-text vault, with safe local files, iCloud Drive support, fast note switching, metadata, backlinks, workflows, preview, and an optional in-app note assistant.
 
 ## What The App Does
 
 - Opens a notes folder as a vault
 - Shows notes and folders in a sidebar
 - Lets you create, edit, save, search, and delete notes
+- Supports Obsidian properties, aliases, tags, wiki links, backlinks, attachments, templates, and Daily Notes
+- Includes persistent tabs, pinned notes, split preview, an outline, saved searches, Bases-style views, and vault health checks
 - Renders Markdown in a native preview
 - Maps note relationships in a graph view
 - Renders Mermaid diagrams
@@ -23,12 +25,16 @@ It is designed for working in a folder of notes with a plain-text editor, a rend
 - Open a folder and use it as your notes vault
 - Automatically restore the last opened vault on launch
 - Automatically restore the last selected file in that vault
+- Restore open tabs, pinned notes, and split-preview state per vault
+- Keep recent vaults available from the welcome screen
 - Browse nested folders and notes in a sidebar
 - Sort notes by date modified or by name
 - Collapse all expanded folders from the sidebar footer
 - Create new notes and folders from the app
 - Delete notes from the sidebar
-- Drag and drop a Markdown file onto the app to open/import it
+- Drag and drop a Markdown file onto the app to safely import it into the current vault
+- Detect external file changes and protect unsaved edits with conflict and recovery handling
+- Update incoming wiki, Markdown, and attachment links when notes or folders are renamed or moved
 
 ### Editing
 
@@ -44,9 +50,11 @@ It is designed for working in a folder of notes with a plain-text editor, a rend
   - bullet lists
   - numbered lists
   - code blocks
-- If a note has no Markdown heading at the top, the app can normalize it by adding a `# Title` based on the file name
-- Sidebar titles use the first heading when available
-- Supports Obsidian-style `[[Wiki Links]]` for note connections
+- Preserves note bytes on open, including YAML frontmatter and CRLF line endings
+- Sidebar titles use frontmatter titles or the first heading when available
+- Supports Obsidian-style `[[Wiki Links]]` with title completion
+- Copies pasted or dropped attachments into the configured Obsidian attachment folder
+- Toggle Markdown tasks with `Shift-Command-Return`
 
 ### Preview
 
@@ -66,6 +74,16 @@ It is designed for working in a folder of notes with a plain-text editor, a rend
 - Centers the selected note and highlights connected notes
 - Click any node in the graph to open that note
 
+### Organization And Workflows
+
+- Inspect the current note's outline, backlinks, unlinked mentions, tags, aliases, and properties
+- Convert an unlinked mention into a wiki link with one click
+- Edit common frontmatter fields without rewriting the rest of the note
+- Open today's Daily Note and create notes from vault templates
+- Use `{{title}}`, `{{date}}`, and `{{time}}` in templates
+- Browse notes in table, list, or card-based Bases views and filter by tag or property
+- Scan the vault for broken links, missing attachments, duplicate note targets, malformed frontmatter, and recovery drafts
+
 ### Inline Image Editing
 
 - Optional inline image previews while editing
@@ -74,14 +92,17 @@ It is designed for working in a folder of notes with a plain-text editor, a rend
 
 ### Search
 
-- Command palette for searching notes by title, file name, or relative path
+- Command palette for searching notes by title, body, file name, or relative path
+- Obsidian-style filters for text, file, path, tag, property, and task state
+- Quoted phrases, `OR` groups, exclusions, result snippets, and saved searches
 
 ### Assistant
 
 - Optional in-app note assistant
 - Uses the current note as the primary context
 - Resets chat automatically when switching notes
-- Stores the API key in the app's local settings on that Mac
+- Stores the API key in macOS Keychain and migrates older plaintext settings
+- Supports OpenAI-compatible models and a local assistant subscription through the `assistant` CLI
 - Lets you choose the assistant model
 - Lets you customize the floating launcher button
 
@@ -101,10 +122,12 @@ It is designed for working in a folder of notes with a plain-text editor, a rend
 - `Command-S`: Save
 - `Command-B`: Show or hide sidebar
 - `Command-K`: Search notes
+- `Command-L`: Focus the editor
 - `Shift-Command-B`: Bold
 - `Command-I`: Italic
 - `Command-E`: Inline code
 - `Shift-Command-K`: Link
+- `Shift-Command-Return`: Toggle task
 
 ## Requirements
 
@@ -209,8 +232,8 @@ or for Release:
 ### Ask The Assistant
 
 1. Open Settings.
-2. Add or load your OpenAI API key.
-3. Choose a model.
+2. Add an OpenAI API key, or choose assistant Subscription if the local `assistant` CLI is authenticated.
+3. Choose a model and reasoning level.
 4. Open a note.
 5. Use the floating assistant button to ask questions about that note.
 

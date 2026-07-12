@@ -12,17 +12,26 @@ struct ContentView: View {
     @State private var expandedFolderURLs: Set<URL> = []
     @State private var isSidebarRootDropTargeted = false
     @State private var restoredVaultKey: String?
+    @State private var workspaceSession = WorkspaceSession()
+    @State private var isInspectorPresented = false
+    @Bindable var workflowConfiguration: NoteWorkflowConfigurationStore
+    @State private var recentVaults = RecentVaultStore()
+    @State private var selectedTemplate: TemplateDescriptor?
+    @State private var workflowError: String?
+    @State private var isVaultHealthPresented = false
 
     init(
         workspace: Workspace,
         assistant: NoteAssistant,
         assistantSettings: AssistantSettings,
-        preferences: AppPreferences
+        preferences: AppPreferences,
+        workflowConfiguration: NoteWorkflowConfigurationStore
     ) {
         self.workspace = workspace
         self.assistant = assistant
         self.assistantSettings = assistantSettings
         self.preferences = preferences
+        self.workflowConfiguration = workflowConfiguration
         _viewMode = State(initialValue: preferences.defaultOpenViewMode)
     }
 
@@ -69,6 +78,29 @@ struct ContentView: View {
                     .help("New File")
                     .accessibilityLabel("New File")
 
+                    Button {
+                        openDailyNote()
+                    } label: {
+                        Image(systemName: "calendar")
+                    }
+                    .help("Open Today's Daily Note")
+
+                    Menu {
+                        if availableTemplates.isEmpty {
+                            Text("No templates in \(workflowConfiguration.templates.folderPath)")
+                        } else {
+                            ForEach(availableTemplates) { template in
+                                Button(template.displayName) {
+                                    selectedTemplate = template
+                                }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "doc.badge.plus")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .help("New from Template")
+
                     ForEach(OpenViewMode.allCases) { mode in
                         Button {
                             viewMode = mode
@@ -76,15 +108,52 @@ struct ContentView: View {
                             Image(systemName: mode.systemImage)
                         }
                         .help(mode.title)
-                        .disabled(!workspace.selectedFileIsMarkdown)
+                        .disabled(mode != .bases && !workspace.selectedFileIsMarkdown)
                         .opacity(viewMode == mode ? 1 : 0.5)
                         .accessibilityLabel(mode.title)
                         .accessibilityAddTraits(viewMode == mode ? [.isButton, .isSelected] : .isButton)
                     }
+
+                    Button {
+                        workspaceSession.splitPreview.toggle()
+                    } label: {
+                        Image(systemName: "rectangle.split.2x1")
+                    }
+                    .help(workspaceSession.splitPreview ? "Hide Split Preview" : "Show Split Preview")
+                    .disabled(!workspace.selectedFileIsMarkdown || viewMode != .editor)
+                    .opacity(workspaceSession.splitPreview ? 1 : 0.5)
+
+                    if let selectedURL = workspace.selectedFileURL {
+                        Button {
+                            workspaceSession.togglePinned(selectedURL)
+                        } label: {
+                            Image(systemName: workspaceSession.isPinned(selectedURL) ? "pin.fill" : "pin")
+                        }
+                        .help(workspaceSession.isPinned(selectedURL) ? "Unpin Note" : "Pin Note")
+                    }
+
+                    Button {
+                        isInspectorPresented.toggle()
+                    } label: {
+                        Image(systemName: "sidebar.trailing")
+                    }
+                    .help(isInspectorPresented ? "Hide Note Inspector" : "Show Note Inspector")
+                    .opacity(isInspectorPresented ? 1 : 0.5)
+
+                    Button {
+                        isVaultHealthPresented = true
+                    } label: {
+                        Image(systemName: "checkmark.shield")
+                    }
+                    .help("Vault Health")
                 }
             }
         }
         .frame(minWidth: 700, minHeight: 500)
+        .inspector(isPresented: $isInspectorPresented) {
+            NoteInspectorView(workspace: workspace, controller: controller)
+                .inspectorColumnWidth(min: 270, ideal: 320, max: 440)
+        }
         .background(WindowToolbarConfigurator())
         .overlay {
             if workspace.isCommandPalettePresented {
@@ -96,6 +165,8 @@ struct ContentView: View {
         }
         .onAppear {
             restoreExpandedFoldersIfNeeded()
+            restoreWorkspaceSession()
+            recordCurrentVault()
             applyPreferredViewMode()
             synchronizeAssistantContext()
         }
@@ -104,12 +175,19 @@ struct ContentView: View {
         }
         .onChange(of: workspace.vaultURL) { _, _ in
             restoreExpandedFoldersIfNeeded(force: true)
+            restoreWorkspaceSession()
+            recordCurrentVault()
         }
         .onChange(of: workspace.sidebarNodes) { _, _ in
             restoreExpandedFoldersIfNeeded()
+            if !workspace.isLoadingSnapshot,
+               workspaceSession.isLoaded(for: workspace.vaultURL) {
+                workspaceSession.prune(availableFiles: Set(workspace.files.map(\.url)))
+            }
         }
         .onChange(of: workspace.isLoadingSnapshot) { _, _ in
             restoreExpandedFoldersIfNeeded()
+            restoreWorkspaceSession()
         }
         .onChange(of: expandedFolderURLs) { _, _ in
             persistExpandedFolders()
@@ -119,6 +197,9 @@ struct ContentView: View {
             synchronizeAssistantContext()
         }
         .onChange(of: workspace.selectedFileURL) { _, _ in
+            if workspaceSession.isLoaded(for: workspace.vaultURL) {
+                workspaceSession.noteSelected(workspace.selectedFileURL)
+            }
             applyPreferredViewMode()
             synchronizeAssistantContext()
             controller.requestEditorFocus()
@@ -141,6 +222,29 @@ struct ContentView: View {
             RenameItemSheet(target: request) { proposedName in
                 try workspace.renameItem(request.url, to: proposedName)
             }
+        }
+        .sheet(item: $selectedTemplate) { template in
+            if let vaultURL = workspace.vaultURL {
+                TemplateCreationSheet(
+                    vaultURL: vaultURL,
+                    template: template,
+                    templateConfiguration: workflowConfiguration.templates
+                ) { url in
+                    workspace.refreshFiles()
+                    workspace.selectFile(url)
+                }
+            }
+        }
+        .sheet(isPresented: $isVaultHealthPresented) {
+            VaultHealthView(workspace: workspace)
+        }
+        .alert("Note Workflow Failed", isPresented: Binding(
+            get: { workflowError != nil },
+            set: { if !$0 { workflowError = nil } }
+        )) {
+            Button("OK", role: .cancel) { workflowError = nil }
+        } message: {
+            Text(workflowError ?? "")
         }
         .modifier(SaveStatusAlerts(workspace: workspace))
     }
@@ -240,12 +344,12 @@ struct ContentView: View {
 
     @ViewBuilder
     private var detail: some View {
-        if workspace.selectedFileURL != nil {
-            if workspace.selectedFileIsImage, let selectedURL = workspace.selectedFileURL {
-                ImagePreview(url: selectedURL)
-            } else {
-                noteWorkspaceView
-            }
+        if workspace.selectedFileIsImage, let selectedURL = workspace.selectedFileURL {
+            ImagePreview(url: selectedURL)
+        } else if viewMode == .bases {
+            basesView
+        } else if workspace.selectedFileURL != nil {
+            noteWorkspaceView
         } else {
             ContentUnavailableView(
                 "No File Selected",
@@ -261,20 +365,39 @@ struct ContentView: View {
             documentURL: workspace.selectedFileURL,
             vaultURL: workspace.vaultURL,
             assetLookupByFilename: workspace.assetLookupSnapshot,
-            preferences: preferences
+            preferences: preferences,
+            onOpenInternalFile: { url in
+                workspace.selectFile(url)
+            }
         )
         .id(workspace.selectedFileURL)
     }
 
     @ViewBuilder
     private var noteWorkspaceView: some View {
-        switch viewMode {
-        case .editor:
-            editorView
-        case .preview:
-            previewView
-        case .graph:
-            graphView
+        VStack(spacing: 0) {
+            NoteTabBar(workspace: workspace, session: workspaceSession)
+            Divider()
+
+            if viewMode == .editor && workspaceSession.splitPreview {
+                HSplitView {
+                    editorView
+                        .frame(minWidth: 360)
+                    previewView
+                        .frame(minWidth: 360)
+                }
+            } else {
+                switch viewMode {
+                case .editor:
+                    editorView
+                case .preview:
+                    previewView
+                case .graph:
+                    graphView
+                case .bases:
+                    basesView
+                }
+            }
         }
     }
 
@@ -282,6 +405,8 @@ struct ContentView: View {
         SourceEditorView(
             text: $workspace.text,
             documentURL: workspace.selectedFileURL,
+            vaultURL: workspace.vaultURL,
+            noteLinkCompletions: workspace.files.map { workspace.title(for: $0) },
             controller: controller,
             preferences: preferences,
             savedSelection: workspace.editorSelection(for: workspace.selectedFileURL),
@@ -296,6 +421,13 @@ struct ContentView: View {
             .id(workspace.selectedFileURL)
     }
 
+    private var basesView: some View {
+        BasesView(workspace: workspace) { url in
+            workspace.selectFile(url)
+            viewMode = .editor
+        }
+    }
+
     private func restoreEditorFocusAfterPaletteDismiss() {
         guard viewMode == .editor, workspace.selectedFileIsMarkdown else { return }
         controller.focusEditor()
@@ -305,9 +437,50 @@ struct ContentView: View {
 // MARK: - Helpers
 
 private extension ContentView {
+    var availableTemplates: [TemplateDescriptor] {
+        guard let vaultURL = workspace.vaultURL else { return [] }
+        return (try? TemplateLibraryService().availableTemplates(
+            in: vaultURL,
+            configuration: workflowConfiguration.templates
+        )) ?? []
+    }
+
+    func openDailyNote() {
+        guard let vaultURL = workspace.vaultURL else { return }
+        do {
+            let result = try DailyNoteService().createOrOpen(
+                in: vaultURL,
+                configuration: workflowConfiguration.dailyNotes,
+                templateConfiguration: workflowConfiguration.templates
+            )
+            workspace.refreshFiles()
+            workspace.selectFile(result.fileURL)
+        } catch {
+            workflowError = error.localizedDescription
+        }
+    }
+
+    func recordCurrentVault() {
+        guard let vaultURL = workspace.vaultURL else { return }
+        recentVaults.recordOpened(vaultURL)
+    }
+
+    func restoreWorkspaceSession() {
+        guard workspaceSession.load(
+            for: workspace.vaultURL,
+            availableFiles: Set(workspace.files.map(\.url)),
+            inventoryReady: !workspace.isLoadingSnapshot
+        ) else { return }
+        workspaceSession.noteSelected(workspace.selectedFileURL)
+    }
+
     func applyPreferredViewMode() {
-        guard workspace.selectedFileIsMarkdown else { return }
-        viewMode = preferences.defaultOpenViewMode
+        viewMode = WorkspaceViewModePolicy.modeAfterSelection(
+            current: viewMode,
+            preferred: preferences.defaultOpenViewMode,
+            isMarkdown: workspace.selectedFileIsMarkdown,
+            isImage: workspace.selectedFileIsImage
+        )
     }
 
     func showEditorForSearch() {
@@ -407,6 +580,19 @@ private extension ContentView {
     var sidebarExpansionStorageKey: String? {
         guard let vaultURL = workspace.vaultURL else { return nil }
         return "sidebarExpandedFolders::" + vaultURL.standardizedFileURL.path
+    }
+}
+
+enum WorkspaceViewModePolicy {
+    static func modeAfterSelection(
+        current: OpenViewMode,
+        preferred: OpenViewMode,
+        isMarkdown: Bool,
+        isImage: Bool
+    ) -> OpenViewMode {
+        if isMarkdown { return preferred }
+        if isImage, current == .bases { return .preview }
+        return current
     }
 }
 

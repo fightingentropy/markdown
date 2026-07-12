@@ -191,6 +191,178 @@ final class SecurityAndSearchTests: XCTestCase {
         XCTAssertTrue(workspace.text.contains("Caf"))
     }
 
+    // MARK: - Document safety and crash recovery
+
+    func testOpeningFrontmatterNotePreservesBytesAndDoesNotInsertHeading() throws {
+        let original = """
+        ---
+        title: Project Atlas
+        aliases:
+          - Atlas
+        tags: [work, active]
+        ---
+
+        Body without an H1.
+        """
+        let fixture = try makeVault(files: [("Atlas", original)])
+        let workspace = Workspace()
+        workspace.vaultURL = fixture.vaultURL
+        workspace.refreshFiles()
+
+        XCTAssertTrue(workspace.selectFile(fixture.fileURLs[0]))
+
+        XCTAssertEqual(workspace.text, original)
+        XCTAssertEqual(try String(contentsOf: fixture.fileURLs[0], encoding: .utf8), original)
+        XCTAssertEqual(workspace.saveCurrentFile(), .noChanges)
+    }
+
+    func testReadFailureKeepsCurrentSelectionAndBuffer() throws {
+        let fixture = try makeVault(files: [("Current", "Current body")])
+        let unreadableURL = fixture.vaultURL.appendingPathComponent("Unreadable.md", isDirectory: true)
+        try FileManager.default.createDirectory(at: unreadableURL, withIntermediateDirectories: false)
+
+        let workspace = Workspace()
+        workspace.vaultURL = fixture.vaultURL
+        workspace.refreshFiles()
+        XCTAssertTrue(workspace.selectFile(fixture.fileURLs[0]))
+
+        XCTAssertFalse(workspace.selectFile(unreadableURL))
+        XCTAssertEqual(workspace.selectedFileURL?.standardizedFileURL, fixture.fileURLs[0].standardizedFileURL)
+        XCTAssertEqual(workspace.text, "Current body")
+        XCTAssertNotNil(workspace.saveError)
+    }
+
+    func testFailedSaveBlocksNoteAndVaultSwitchAndKeepsDirtyText() throws {
+        let fixture = try makeVault(files: [
+            ("First", "first on disk"),
+            ("Second", "second on disk")
+        ])
+        let otherVault = try makeVault(files: [("Other", "other vault")])
+        let recoveryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: recoveryURL) }
+
+        let workspace = Workspace(recoveryStore: RecoveryStore(directoryURL: recoveryURL))
+        workspace.vaultURL = fixture.vaultURL
+        workspace.refreshFiles()
+        XCTAssertTrue(workspace.selectFile(fixture.fileURLs[0]))
+        workspace.text = "unsaved text that must survive"
+
+        // Simulate an unavailable iCloud item after it was opened.
+        try FileManager.default.removeItem(at: fixture.fileURLs[0])
+
+        let saveResult = workspace.saveCurrentFile()
+        guard case .failed(let message) = saveResult else {
+            return XCTFail("Expected actionable save failure, got \(saveResult)")
+        }
+        XCTAssertTrue(message.contains("recovery"))
+        XCTAssertNotNil(workspace.recoveryDraft(for: fixture.fileURLs[0]))
+
+        XCTAssertFalse(workspace.selectFile(fixture.fileURLs[1]))
+        XCTAssertFalse(workspace.openVault(otherVault.vaultURL))
+        XCTAssertEqual(workspace.vaultURL?.standardizedFileURL, fixture.vaultURL.standardizedFileURL)
+        XCTAssertEqual(workspace.selectedFileURL?.standardizedFileURL, fixture.fileURLs[0].standardizedFileURL)
+        XCTAssertEqual(workspace.text, "unsaved text that must survive")
+        XCTAssertTrue(workspace.hasUnsavedChanges)
+    }
+
+    func testFailedSaveDoesNotClaimRecoveryWhenRecoveryWriteFails() throws {
+        let fixture = try makeVault(files: [("Note", "base")])
+        let blockedRecoveryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try Data("not a directory".utf8).write(to: blockedRecoveryURL)
+        addTeardownBlock { try? FileManager.default.removeItem(at: blockedRecoveryURL) }
+
+        let workspace = Workspace(recoveryStore: RecoveryStore(directoryURL: blockedRecoveryURL))
+        workspace.vaultURL = fixture.vaultURL
+        workspace.refreshFiles()
+        XCTAssertTrue(workspace.selectFile(fixture.fileURLs[0]))
+        workspace.text = "unsaved"
+        try FileManager.default.removeItem(at: fixture.fileURLs[0])
+
+        guard case .failed(let message) = workspace.saveCurrentFile() else {
+            return XCTFail("Expected the unavailable note save to fail")
+        }
+        XCTAssertTrue(message.contains("recovery could not be written"))
+        XCTAssertNil(workspace.recoveryDraft(for: fixture.fileURLs[0]))
+    }
+
+    func testExternalChangeBatchAlwaysRechecksSelectedNote() throws {
+        let fixture = try makeVault(files: [("Note", "original")])
+        let workspace = Workspace()
+        workspace.vaultURL = fixture.vaultURL
+        workspace.refreshFiles()
+        XCTAssertTrue(workspace.selectFile(fixture.fileURLs[0]))
+
+        try Data("external".utf8).write(to: fixture.fileURLs[0], options: .atomic)
+        let unrelated = fixture.vaultURL.appendingPathComponent("unrelated.png")
+        workspace.handleExternalChanges([.changed(unrelated)])
+
+        XCTAssertEqual(workspace.text, "external")
+        XCTAssertNil(workspace.saveConflict)
+    }
+
+    func testUnrelatedPresenterEventDoesNotConflictWithOrdinaryUnsavedEdits() throws {
+        let fixture = try makeVault(files: [("Note", "original")])
+        let workspace = Workspace()
+        workspace.vaultURL = fixture.vaultURL
+        workspace.refreshFiles()
+        XCTAssertTrue(workspace.selectFile(fixture.fileURLs[0]))
+        workspace.text = "local unsaved"
+
+        workspace.handleExternalChanges([
+            .changed(fixture.vaultURL.appendingPathComponent("unrelated.png"))
+        ])
+
+        XCTAssertEqual(workspace.text, "local unsaved")
+        XCTAssertNil(workspace.saveConflict)
+        XCTAssertTrue(workspace.hasUnsavedChanges)
+    }
+
+    func testExternalMoveRemapsSelectedNoteWithoutLosingBuffer() throws {
+        let fixture = try makeVault(files: [("Old", "body")])
+        let oldURL = fixture.fileURLs[0]
+        let newURL = fixture.vaultURL.appendingPathComponent("New.md")
+        let workspace = Workspace()
+        workspace.vaultURL = fixture.vaultURL
+        workspace.refreshFiles()
+        XCTAssertTrue(workspace.selectFile(oldURL))
+
+        try FileManager.default.moveItem(at: oldURL, to: newURL)
+        workspace.handleExternalChanges([.moved(from: oldURL, to: newURL)])
+
+        XCTAssertEqual(workspace.selectedFileURL?.standardizedFileURL, newURL.standardizedFileURL)
+        XCTAssertEqual(workspace.text, "body")
+    }
+
+    func testRecoveryStoreRestoresDraftWhenDiskStillMatchesItsBase() throws {
+        let fixture = try makeVault(files: [("Note", "base content")])
+        let recoveryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: recoveryURL) }
+        let recoveryStore = RecoveryStore(directoryURL: recoveryURL)
+
+        let firstWorkspace = Workspace(recoveryStore: recoveryStore)
+        firstWorkspace.vaultURL = fixture.vaultURL
+        firstWorkspace.refreshFiles()
+        XCTAssertTrue(firstWorkspace.selectFile(fixture.fileURLs[0]))
+        firstWorkspace.text = "locally recovered edit"
+        firstWorkspace.persistRecoveryDraftNow()
+
+        let restoredWorkspace = Workspace(recoveryStore: recoveryStore)
+        restoredWorkspace.vaultURL = fixture.vaultURL
+        restoredWorkspace.refreshFiles()
+        XCTAssertTrue(restoredWorkspace.selectFile(fixture.fileURLs[0]))
+
+        XCTAssertEqual(restoredWorkspace.text, "locally recovered edit")
+        XCTAssertEqual(
+            restoredWorkspace.recoveredDraftURL?.standardizedFileURL,
+            fixture.fileURLs[0].standardizedFileURL
+        )
+        XCTAssertTrue(restoredWorkspace.hasUnsavedChanges)
+        XCTAssertEqual(try String(contentsOf: fixture.fileURLs[0], encoding: .utf8), "base content")
+    }
+
     // MARK: - Fixture
 
     private func makeVault(files: [(name: String, content: String)]) throws -> (vaultURL: URL, fileURLs: [URL]) {

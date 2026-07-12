@@ -43,6 +43,20 @@ final class EditorController {
     func applyUnorderedList() { prependToCurrentLine("- ") }
     func applyOrderedList() { prependToCurrentLine("1. ") }
 
+    func toggleTask() {
+        guard let textView else { return }
+        let result = MarkdownTaskToggler.toggle(
+            in: textView.string,
+            selection: textView.selectedRange()
+        )
+        textView.insertText(
+            result.text,
+            replacementRange: NSRange(location: 0, length: (textView.string as NSString).length)
+        )
+        textView.setSelectedRange(result.selection)
+        textView.scrollRangeToVisible(result.selection)
+    }
+
     func applyHeading(_ level: Int) {
         let prefix = String(repeating: "#", count: level) + " "
         prependToCurrentLine(prefix)
@@ -96,6 +110,22 @@ final class EditorController {
     func requestEditorFocus() {
         pendingEditorFocusRequest = true
         focusEditorIfPossible(queueIfUnavailable: true)
+    }
+
+    func jumpToLine(_ oneBasedLineNumber: Int) {
+        guard let textView, oneBasedLineNumber > 0 else { return }
+        let text = textView.string as NSString
+        var location = 0
+        var line = 1
+        while line < oneBasedLineNumber && location < text.length {
+            let range = text.lineRange(for: NSRange(location: location, length: 0))
+            let next = NSMaxRange(range)
+            guard next > location else { break }
+            location = next
+            line += 1
+        }
+        textView.setSelectedRange(NSRange(location: min(location, text.length), length: 0))
+        focusEditorIfPossible(queueIfUnavailable: false)
     }
 
     func consumePendingEditorFocusRequest() -> Bool {
@@ -249,6 +279,8 @@ final class EditorController {
 struct SourceEditorView: NSViewRepresentable {
     @Binding var text: String
     let documentURL: URL?
+    let vaultURL: URL?
+    let noteLinkCompletions: [String]
     let controller: EditorController
     let preferences: AppPreferences
     let savedSelection: NSRange?
@@ -332,6 +364,7 @@ struct SourceEditorView: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = false
         textView.delegate = coordinator
         textView.modifiedLinkDelegate = coordinator
+        textView.attachmentDelegate = coordinator
         textView.textStorage?.delegate = coordinator
 
         textView.setAccessibilityLabel("Markdown source editor")
@@ -401,6 +434,24 @@ struct SourceEditorView: NSViewRepresentable {
         /// `updateNSView` skip the O(n) `textView.string != text` comparison when
         /// the incoming binding hashes identically.
         private var editorContentHash: Int?
+
+        func sourceTextView(_ textView: NSTextView, importAttachmentFrom pasteboard: NSPasteboard) -> Bool {
+            do {
+                guard let attachment = try AttachmentStore.importFirstAttachment(
+                    from: pasteboard,
+                    documentURL: parent.documentURL,
+                    vaultURL: parent.vaultURL
+                ) else {
+                    return false
+                }
+
+                textView.insertText(attachment.markdownEmbed, replacementRange: textView.selectedRange())
+                return true
+            } catch {
+                NSSound.beep()
+                return false
+            }
+        }
 
         init(_ parent: SourceEditorView) {
             self.parent = parent
@@ -620,6 +671,7 @@ struct SourceEditorView: NSViewRepresentable {
             let updatedString = textView.string
             parent.text = updatedString
             noteEditorContent(updatedString)
+            offerWikiLinkCompletionsIfNeeded(in: textView)
 
             // A cheap incremental edit (paragraph/inline-only) is highlighted
             // synchronously so the keystroke stays crisp. Fence-affecting edits
@@ -648,6 +700,33 @@ struct SourceEditorView: NSViewRepresentable {
             // document-wide code-block recolor.
             if pendingFullHighlight != nil {
                 scheduleFullHighlight(for: textView)
+            }
+
+        }
+
+        func textView(
+            _ textView: NSTextView,
+            completions words: [String],
+            forPartialWordRange charRange: NSRange,
+            indexOfSelectedItem index: UnsafeMutablePointer<Int>?
+        ) -> [String] {
+            let partial = (textView.string as NSString).substring(with: charRange)
+            let suggestions = WikiLinkCompletion.suggestions(
+                for: partial,
+                candidates: parent.noteLinkCompletions
+            )
+            index?.pointee = suggestions.isEmpty ? -1 : 0
+            return suggestions
+        }
+
+        private func offerWikiLinkCompletionsIfNeeded(in textView: NSTextView) {
+            guard WikiLinkCompletion.partialRange(
+                in: textView.string,
+                selection: textView.selectedRange()
+            ) != nil else { return }
+
+            DispatchQueue.main.async { [weak textView] in
+                textView?.complete(nil)
             }
         }
 
@@ -706,8 +785,8 @@ struct SourceEditorView: NSViewRepresentable {
         /// confirm first so a stray ⌘-click / ⌘-Return cannot silently launch an
         /// arbitrary destination embedded in note content.
         private func openLink(_ url: URL, from textView: NSTextView) {
-            guard requiresOpenConfirmation(url) else {
-                NSWorkspace.shared.open(url)
+            guard PreviewURLPolicy.canOpenExternally(url) else {
+                NSSound.beep()
                 return
             }
 
@@ -728,11 +807,6 @@ struct SourceEditorView: NSViewRepresentable {
             } else {
                 openInWindow(alert.runModal())
             }
-        }
-
-        private func requiresOpenConfirmation(_ url: URL) -> Bool {
-            guard let scheme = url.scheme?.lowercased() else { return false }
-            return scheme == "http" || scheme == "https"
         }
 
         private func withPreservedViewport(
@@ -832,10 +906,31 @@ private protocol SourceTextViewDelegate: AnyObject {
     /// attempted, `false` if there is no link at the caret.
     @discardableResult
     func sourceTextViewOpenLinkAtCaret(_ textView: NSTextView) -> Bool
+    func sourceTextView(_ textView: NSTextView, importAttachmentFrom pasteboard: NSPasteboard) -> Bool
 }
 
 private final class SourceTextView: NSTextView {
     weak var modifiedLinkDelegate: SourceTextViewDelegate?
+    weak var attachmentDelegate: SourceTextViewDelegate?
+
+    override var rangeForUserCompletion: NSRange {
+        WikiLinkCompletion.partialRange(in: string, selection: selectedRange())
+            ?? NSRange(location: NSNotFound, length: 0)
+    }
+
+    override func paste(_ sender: Any?) {
+        if attachmentDelegate?.sourceTextView(self, importAttachmentFrom: .general) == true {
+            return
+        }
+        super.paste(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        if attachmentDelegate?.sourceTextView(self, importAttachmentFrom: sender.draggingPasteboard) == true {
+            return true
+        }
+        return super.performDragOperation(sender)
+    }
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)

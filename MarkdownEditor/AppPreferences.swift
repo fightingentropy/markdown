@@ -5,6 +5,7 @@ enum OpenViewMode: String, CaseIterable, Identifiable {
     case editor
     case preview
     case graph
+    case bases
 
     var id: String { rawValue }
 
@@ -16,6 +17,8 @@ enum OpenViewMode: String, CaseIterable, Identifiable {
             "Preview"
         case .graph:
             "Graph"
+        case .bases:
+            "Bases"
         }
     }
 
@@ -27,6 +30,8 @@ enum OpenViewMode: String, CaseIterable, Identifiable {
             "eye"
         case .graph:
             "point.3.connected.trianglepath.dotted"
+        case .bases:
+            "tablecells"
         }
     }
 }

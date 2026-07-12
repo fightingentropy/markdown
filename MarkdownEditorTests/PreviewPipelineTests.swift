@@ -4,6 +4,62 @@ import XCTest
 @testable import Markdown
 
 final class PreviewPipelineTests: XCTestCase {
+    func testPreviewURLPolicyAllowsOnlySafeExternalSchemes() throws {
+        XCTAssertTrue(PreviewURLPolicy.canOpenExternally(try XCTUnwrap(URL(string: "https://example.com"))))
+        XCTAssertTrue(PreviewURLPolicy.canOpenExternally(try XCTUnwrap(URL(string: "mailto:hello@example.com"))))
+        XCTAssertFalse(PreviewURLPolicy.canOpenExternally(URL(fileURLWithPath: "/tmp/note.md")))
+        XCTAssertFalse(PreviewURLPolicy.canOpenExternally(try XCTUnwrap(URL(string: "shortcuts://run-shortcut?name=Unsafe"))))
+        XCTAssertFalse(PreviewURLPolicy.canOpenExternally(try XCTUnwrap(URL(string: "javascript:alert(1)"))))
+        XCTAssertFalse(PreviewURLPolicy.canOpenExternally(try XCTUnwrap(URL(string: "data:text/html,hello"))))
+    }
+
+    func testPreviewURLPolicyRoutesOnlyExistingVaultNotesAndImagesInternally() throws {
+        let vault = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: vault) }
+        let note = vault.appendingPathComponent("Note.md")
+        let image = vault.appendingPathComponent("Image.png")
+        let other = vault.appendingPathComponent("File.pdf")
+        try Data("note".utf8).write(to: note)
+        try Data([0]).write(to: image)
+        try Data([0]).write(to: other)
+
+        XCTAssertEqual(PreviewURLPolicy.internalVaultFile(note, vaultURL: vault), note.standardizedFileURL)
+        XCTAssertEqual(PreviewURLPolicy.internalVaultFile(image, vaultURL: vault), image.standardizedFileURL)
+        XCTAssertNil(PreviewURLPolicy.internalVaultFile(other, vaultURL: vault))
+        XCTAssertNil(PreviewURLPolicy.internalVaultFile(URL(fileURLWithPath: "/tmp/outside.md"), vaultURL: vault))
+    }
+
+    func testRemotePreviewImageResponseRequiresImageMIMEAndSizeLimit() throws {
+        let url = try XCTUnwrap(URL(string: "https://example.com/image.png"))
+        let valid = try XCTUnwrap(HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "image/png", "Content-Length": "1024"]
+        ))
+        let html = try XCTUnwrap(HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "text/html", "Content-Length": "1024"]
+        ))
+        let oversized = try XCTUnwrap(HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: [
+                "Content-Type": "image/png",
+                "Content-Length": "\(PreviewImageSourceLoader.maximumRemoteImageBytes + 1)"
+            ]
+        ))
+
+        XCTAssertTrue(PreviewImageSourceLoader.isValidRemoteImageResponse(valid, for: url))
+        XCTAssertFalse(PreviewImageSourceLoader.isValidRemoteImageResponse(html, for: url))
+        XCTAssertFalse(PreviewImageSourceLoader.isValidRemoteImageResponse(oversized, for: url))
+    }
+
     func testEditorLinkDetectorFindsBareURLAtCharacterIndex() {
         let text = "Visit https://21st.dev/community/components for components."
         let index = (text as NSString).range(of: "21st.dev").location

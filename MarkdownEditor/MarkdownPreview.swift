@@ -3,12 +3,36 @@ import SwiftUI
 import Textual
 import WebKit
 
+enum PreviewURLPolicy {
+    private static let externallyOpenableSchemes: Set<String> = [
+        "http", "https", "mailto"
+    ]
+
+    static func canOpenExternally(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased() else { return false }
+        return externallyOpenableSchemes.contains(scheme)
+    }
+
+    static func internalVaultFile(_ url: URL, vaultURL: URL?) -> URL? {
+        guard url.isFileURL, let vaultURL else { return nil }
+        let resolvedVault = vaultURL.resolvingSymlinksInPath().standardizedFileURL
+        let resolvedURL = url.resolvingSymlinksInPath().standardizedFileURL
+        guard resolvedURL.path.hasPrefix(resolvedVault.path + "/"),
+              FileManager.default.fileExists(atPath: resolvedURL.path),
+              Workspace.isMarkdownFile(resolvedURL) || Workspace.isImageFile(resolvedURL) else {
+            return nil
+        }
+        return resolvedURL
+    }
+}
+
 struct MarkdownPreview: View {
     let markdown: String
     let documentURL: URL?
     let vaultURL: URL?
     let assetLookupByFilename: [String: [URL]]
     let preferences: AppPreferences
+    let onOpenInternalFile: (URL) -> Void
 
     private var context: PreviewContext {
         PreviewContext(
@@ -22,9 +46,18 @@ struct MarkdownPreview: View {
         let document = MarkdownPreprocessor.preprocessCached(markdown, context: context)
         switch document.preferredRenderMode {
         case .native:
-            NativeMarkdownPreview(markdown: markdown, context: context, preferences: preferences)
+            NativeMarkdownPreview(
+                markdown: markdown,
+                context: context,
+                preferences: preferences,
+                onOpenInternalFile: onOpenInternalFile
+            )
         case .html:
-            HTMLMarkdownPreview(document: document, preferences: preferences)
+            HTMLMarkdownPreview(
+                document: document,
+                preferences: preferences,
+                onOpenInternalFile: onOpenInternalFile
+            )
         }
     }
 }
@@ -33,6 +66,7 @@ private struct NativeMarkdownPreview: View {
     let markdown: String
     let context: PreviewContext
     let preferences: AppPreferences
+    let onOpenInternalFile: (URL) -> Void
 
     private var inlineStyle: InlineStyle {
         InlineStyle.gitHub.code(
@@ -58,8 +92,16 @@ private struct NativeMarkdownPreview: View {
         }
         .background(Color(nsColor: .textBackgroundColor))
         .environment(\.openURL, OpenURLAction { url in
-            NSWorkspace.shared.open(url)
-            return .handled
+            if let internalURL = PreviewURLPolicy.internalVaultFile(url, vaultURL: context.vaultURL) {
+                onOpenInternalFile(internalURL)
+                return .handled
+            }
+            guard PreviewURLPolicy.canOpenExternally(url) else {
+                NSSound.beep()
+                return .discarded
+            }
+
+            return NSWorkspace.shared.open(url) ? .handled : .discarded
         })
     }
 }
@@ -67,6 +109,7 @@ private struct NativeMarkdownPreview: View {
 private struct HTMLMarkdownPreview: View {
     let document: PreviewDocument
     let preferences: AppPreferences
+    let onOpenInternalFile: (URL) -> Void
 
     private var fullPageHTML: String {
         PreviewStylesheet.page(
@@ -78,7 +121,9 @@ private struct HTMLMarkdownPreview: View {
     var body: some View {
         HTMLPreviewWebView(
             html: fullPageHTML,
-            baseURL: document.context.previewBaseURL
+            baseURL: document.context.previewBaseURL,
+            vaultURL: document.context.vaultURL,
+            onOpenInternalFile: onOpenInternalFile
         )
     }
 }
@@ -162,6 +207,13 @@ private struct HTMLPreviewWebView: NSViewRepresentable {
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         var lastHTML: String?
         var lastBaseURL: URL?
+        var vaultURL: URL?
+        var onOpenInternalFile: (URL) -> Void
+
+        init(vaultURL: URL?, onOpenInternalFile: @escaping (URL) -> Void) {
+            self.vaultURL = vaultURL
+            self.onOpenInternalFile = onOpenInternalFile
+        }
 
         func userContentController(
             _ userContentController: WKUserContentController,
@@ -170,7 +222,7 @@ private struct HTMLPreviewWebView: NSViewRepresentable {
             guard message.name == "openLink",
                   let urlString = message.body as? String,
                   let url = URL(string: urlString) else { return }
-            Self.openExternally(url)
+            route(url)
         }
 
         /// Authoritative navigation policy. The preview frame must only ever
@@ -186,10 +238,8 @@ private struct HTMLPreviewWebView: NSViewRepresentable {
         ) {
             switch navigationAction.navigationType {
             case .linkActivated:
-                if let url = navigationAction.request.url,
-                   let scheme = url.scheme?.lowercased(),
-                   scheme == "http" || scheme == "https" || scheme == "mailto" {
-                    Self.openExternally(url)
+                if let url = navigationAction.request.url {
+                    route(url)
                 }
                 decisionHandler(.cancel)
             case .other, .reload, .formSubmitted, .formResubmitted, .backForward:
@@ -202,12 +252,12 @@ private struct HTMLPreviewWebView: NSViewRepresentable {
             }
         }
 
-        private static func openExternally(_ url: URL) {
-            guard let scheme = url.scheme?.lowercased(),
-                  scheme == "http" || scheme == "https" || scheme == "mailto" else {
-                return
+        private func route(_ url: URL) {
+            if let internalURL = PreviewURLPolicy.internalVaultFile(url, vaultURL: vaultURL) {
+                onOpenInternalFile(internalURL)
+            } else if PreviewURLPolicy.canOpenExternally(url) {
+                NSWorkspace.shared.open(url)
             }
-            NSWorkspace.shared.open(url)
         }
 
         func tearDown(_ webView: WKWebView) {
@@ -217,9 +267,11 @@ private struct HTMLPreviewWebView: NSViewRepresentable {
 
     let html: String
     let baseURL: URL?
+    let vaultURL: URL?
+    let onOpenInternalFile: (URL) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(vaultURL: vaultURL, onOpenInternalFile: onOpenInternalFile)
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -259,6 +311,8 @@ private struct HTMLPreviewWebView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: WKWebView, context: Context) {
+        context.coordinator.vaultURL = vaultURL
+        context.coordinator.onOpenInternalFile = onOpenInternalFile
         guard context.coordinator.lastHTML != html || context.coordinator.lastBaseURL != baseURL else {
             return
         }

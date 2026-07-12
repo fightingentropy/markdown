@@ -1,5 +1,4 @@
 import Foundation
-import Security
 
 @Observable
 @MainActor
@@ -54,9 +53,21 @@ final class AssistantSettings {
 
     var apiKey: String {
         didSet {
+            guard !isNormalizingAPIKey else { return }
+            let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            if apiKey != trimmed {
+                isNormalizingAPIKey = true
+                apiKey = trimmed
+                isNormalizingAPIKey = false
+            }
             persistAPIKey()
         }
     }
+
+    /// Non-nil when the in-memory field and the Keychain could not be brought
+    /// into agreement. The settings UI surfaces this rather than claiming a
+    /// credential was saved or deleted when the operation actually failed.
+    var apiKeyPersistenceError: String?
 
     var selectedModel: String {
         didSet {
@@ -124,16 +135,14 @@ final class AssistantSettings {
     }
 
     private let userDefaults: UserDefaults
+    private let apiKeyStore: any APIKeyStoring
+    @ObservationIgnored private var isNormalizingAPIKey = false
 
-    // The app stores the OpenAI API key in `UserDefaults`. A prior build
-    // briefly stored it in the Keychain — these identifiers exist only so
-    // we can migrate that value back into `UserDefaults` and wipe the
-    // Keychain slot on launch. No new writes are ever made to the Keychain.
-    private static let legacyKeychainService: String = {
+    private static let keychainService: String = {
         let bundleID = Bundle.main.bundleIdentifier ?? "com.md.MarkdownEditor"
         return "\(bundleID).assistant"
     }()
-    private static let legacyKeychainAccount = "openai.apiKey"
+    private static let keychainAccount = "openai.apiKey"
 
     private static let apiKeyDefaultsKey = "assistant.apiKey"
     private static let modelDefaultsKey = "assistant.selectedModel"
@@ -155,25 +164,45 @@ final class AssistantSettings {
     private static let defaultLauncherBorderLevel = 0.20
     private static let defaultShowsLauncherStatusBadge = true
     init(
-        userDefaults: UserDefaults = .standard
+        userDefaults: UserDefaults = .standard,
+        apiKeyStore: any APIKeyStoring = KeychainStore(
+            service: AssistantSettings.keychainService,
+            account: AssistantSettings.keychainAccount
+        )
     ) {
         self.userDefaults = userDefaults
+        self.apiKeyStore = apiKeyStore
 
-        // Migrate any value left behind in the Keychain by the earlier
-        // build back into `UserDefaults`, then delete the Keychain entry
-        // unconditionally. After this one-shot cleanup the app never
-        // touches the Keychain again.
-        let keychainLeftover = Self.readLegacyKeychainValue()
-        Self.deleteLegacyKeychainValue()
-
-        if let storedKey = userDefaults.string(forKey: Self.apiKeyDefaultsKey),
-           !storedKey.isEmpty {
-            self.apiKey = storedKey
-        } else if let keychainLeftover, !keychainLeftover.isEmpty {
-            self.apiKey = keychainLeftover
-            userDefaults.set(keychainLeftover, forKey: Self.apiKeyDefaultsKey)
+        // Current builds briefly wrote this secret to UserDefaults. Migrate
+        // that value back to the same Keychain slot older builds used, and
+        // scrub the plaintext only after the secure write succeeds. If the
+        // Keychain is temporarily unavailable, retaining the legacy value is
+        // safer than silently losing the user's credential; the next launch
+        // retries the migration.
+        let legacyDefaultsKey = userDefaults.string(forKey: Self.apiKeyDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let legacyDefaultsKey, !legacyDefaultsKey.isEmpty {
+            self.apiKey = legacyDefaultsKey
+            do {
+                try apiKeyStore.save(legacyDefaultsKey)
+                userDefaults.removeObject(forKey: Self.apiKeyDefaultsKey)
+            } catch {
+                // Leave the existing defaults value in place for a future
+                // retry. Never copy a newly entered key into UserDefaults.
+                self.apiKeyPersistenceError = Self.keychainErrorMessage(
+                    action: "move the API key to Keychain",
+                    error: error
+                )
+            }
+        } else if let keychainKey = try? apiKeyStore.read(),
+                  !keychainKey.isEmpty {
+            self.apiKey = keychainKey
+            userDefaults.removeObject(forKey: Self.apiKeyDefaultsKey)
         } else {
             self.apiKey = ""
+            if userDefaults.object(forKey: Self.apiKeyDefaultsKey) != nil {
+                userDefaults.removeObject(forKey: Self.apiKeyDefaultsKey)
+            }
         }
 
         let storedModel = userDefaults.string(forKey: Self.modelDefaultsKey)
@@ -219,51 +248,44 @@ final class AssistantSettings {
         supportedLauncherSymbols.first(where: { $0.id == id })
     }
 
+    func retryAPIKeyPersistence() {
+        persistAPIKey()
+    }
+
     private func persistAPIKey() {
         let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Belt-and-suspenders: if a legacy Keychain entry was somehow
-        // re-created (e.g. the user rolled forward and back between
-        // builds), remove it every time we touch the key.
-        Self.deleteLegacyKeychainValue()
-
         if trimmed.isEmpty {
             userDefaults.removeObject(forKey: Self.apiKeyDefaultsKey)
+            do {
+                try apiKeyStore.delete()
+                apiKeyPersistenceError = nil
+            } catch {
+                apiKeyPersistenceError = Self.keychainErrorMessage(
+                    action: "remove the API key from Keychain",
+                    error: error
+                )
+            }
             return
         }
 
-        userDefaults.set(trimmed, forKey: Self.apiKeyDefaultsKey)
-        if apiKey != trimmed {
-            apiKey = trimmed
+        do {
+            try apiKeyStore.save(trimmed)
+            // This also scrubs a legacy value after a transient migration
+            // failure once the Keychain becomes available again.
+            userDefaults.removeObject(forKey: Self.apiKeyDefaultsKey)
+            apiKeyPersistenceError = nil
+        } catch {
+            // Keep the key in memory for this session. Writing a newly entered
+            // secret back to plaintext would undo the security boundary.
+            apiKeyPersistenceError = Self.keychainErrorMessage(
+                action: "save the API key in Keychain",
+                error: error
+            )
         }
     }
 
-    // MARK: - One-shot Keychain cleanup
-
-    private static func readLegacyKeychainValue() -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: legacyKeychainService,
-            kSecAttrAccount as String: legacyKeychainAccount,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              let string = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-        return string
-    }
-
-    private static func deleteLegacyKeychainValue() {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: legacyKeychainService,
-            kSecAttrAccount as String: legacyKeychainAccount
-        ]
-        SecItemDelete(query as CFDictionary)
+    private static func keychainErrorMessage(action: String, error: Error) -> String {
+        "Couldn’t \(action). \(error.localizedDescription) Try again after unlocking Keychain."
     }
 }
 

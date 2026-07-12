@@ -40,7 +40,8 @@ struct assistantSubscriptionClient {
 
     /// Runs the CLI with `prompt` as the user message (with optional extra
     /// system-prompt text) and streams back the accumulated reply text as it
-    /// arrives. Returns the full reply on success.
+    /// arrives. Sensitive prompt content is supplied through standard input,
+    /// never through process arguments. Returns the full reply on success.
     func streamReply(
         prompt: String,
         systemPrompt: String?,
@@ -154,16 +155,18 @@ struct assistantSubscriptionClient {
         let process = Process()
         process.executableURL = executable
 
-        var arguments: [String] = [
-            "-p", prompt,
-            "--output-format", "stream-json",
-            "--verbose",
-            "--include-partial-messages"
-        ]
-        if let systemPrompt, !systemPrompt.isEmpty {
-            arguments.append(contentsOf: ["--append-system-prompt", systemPrompt])
-        }
-        process.arguments = arguments
+        // `ps` and Activity Monitor expose process arguments to other local
+        // processes. Both the request and note context therefore arrive on
+        // stdin. assistant Code has no documented file-based system-prompt flag,
+        // so the context is clearly delimited in the input instead of relying
+        // on a non-portable CLI option.
+        let promptInput = try SecureTemporaryFile(
+            contents: Self.standardInputData(for: prompt, systemPrompt: systemPrompt)
+        )
+        try promptInput.unlinkFromFilesystem()
+        process.standardInput = promptInput.fileHandle
+        defer { withExtendedLifetime(promptInput) {} }
+        process.arguments = Self.processArguments()
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -272,6 +275,35 @@ struct assistantSubscriptionClient {
             let stderr = stderrCollector.string
             throw ClientError.processFailed(code: process.terminationStatus, stderr: stderr)
         }
+    }
+
+    /// Arguments contain only fixed flags. Keeping prompt values out of this API makes it
+    /// difficult to accidentally regress to exposing note contents in `ps`.
+    static func processArguments() -> [String] {
+        [
+            "-p",
+            "--input-format", "text",
+            "--output-format", "stream-json",
+            "--verbose",
+            "--include-partial-messages"
+        ]
+    }
+
+    static func standardInputData(for prompt: String, systemPrompt: String?) -> Data {
+        guard let systemPrompt, !systemPrompt.isEmpty else {
+            return Data(prompt.utf8)
+        }
+
+        let combined = """
+        <markdown-note-context>
+        \(systemPrompt)
+        </markdown-note-context>
+
+        <user-request>
+        \(prompt)
+        </user-request>
+        """
+        return Data(combined.utf8)
     }
 
     // MARK: - JSON line parsing
@@ -447,6 +479,62 @@ struct assistantSubscriptionClient {
 }
 
 // MARK: - Sendable helpers
+
+/// A per-invocation, owner-readable file used to bridge sensitive input into
+/// a subprocess without placing it in argv. Standard-input files are unlinked
+/// before launch and remain readable only through their already-open handle;
+/// system-prompt files are removed automatically when the invocation ends.
+private final class SecureTemporaryFile {
+    enum FileError: LocalizedError {
+        case couldNotCreate
+
+        var errorDescription: String? {
+            "Couldn't create protected temporary input for the assistant CLI."
+        }
+    }
+
+    let url: URL
+    let fileHandle: FileHandle
+    private var pathExists = true
+
+    init(contents: Data) throws {
+        let fileManager = FileManager.default
+        let url = fileManager.temporaryDirectory
+            .appendingPathComponent("Markdown-assistant-\(UUID().uuidString)", isDirectory: false)
+
+        guard fileManager.createFile(
+            atPath: url.path,
+            contents: nil,
+            attributes: [.posixPermissions: 0o600]
+        ) else {
+            throw FileError.couldNotCreate
+        }
+
+        do {
+            let fileHandle = try FileHandle(forUpdating: url)
+            try fileHandle.write(contentsOf: contents)
+            try fileHandle.seek(toOffset: 0)
+            self.url = url
+            self.fileHandle = fileHandle
+        } catch {
+            try? fileManager.removeItem(at: url)
+            throw error
+        }
+    }
+
+    func unlinkFromFilesystem() throws {
+        guard pathExists else { return }
+        try FileManager.default.removeItem(at: url)
+        pathExists = false
+    }
+
+    deinit {
+        try? fileHandle.close()
+        if pathExists {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+}
 
 /// Holds the detached worker `Task` and a terminate hook so cancellation can
 /// both cancel the task and SIGTERM the subprocess (the latter unblocks the

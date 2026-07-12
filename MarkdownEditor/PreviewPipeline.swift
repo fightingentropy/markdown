@@ -83,6 +83,8 @@ struct PreviewDocument {
 enum PreviewPipelineError: Error {
     case unresolvedImageReference(String)
     case invalidImageData(URL)
+    case invalidRemoteImageResponse(URL)
+    case remoteImageTooLarge(URL)
 }
 
 struct AssetResolver {
@@ -1241,6 +1243,19 @@ struct PreviewImageAttachmentLoader: AttachmentLoader {
 }
 
 enum PreviewImageSourceLoader {
+    static let maximumRemoteImageBytes = 20 * 1_024 * 1_024
+
+    private static let remoteSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 30
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.httpShouldSetCookies = false
+        configuration.urlCache = nil
+        return URLSession(configuration: configuration)
+    }()
+
     static func resolvedImageURL(for url: URL, context: PreviewContext) -> URL? {
         let resolver = AssetResolver(context: context)
         return resolver.resolveImageURL(for: url)
@@ -1248,7 +1263,20 @@ enum PreviewImageSourceLoader {
 
     static func loadImageData(for url: URL, context: PreviewContext) async throws -> (data: Data, resolvedURL: URL) {
         if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            var request = URLRequest(
+                url: url,
+                cachePolicy: .reloadIgnoringLocalCacheData,
+                timeoutInterval: 15
+            )
+            request.setValue("image/avif,image/webp,image/png,image/jpeg,image/gif,image/*;q=0.8", forHTTPHeaderField: "Accept")
+
+            let (data, response) = try await remoteSession.data(for: request)
+            guard isValidRemoteImageResponse(response, for: url) else {
+                throw PreviewPipelineError.invalidRemoteImageResponse(url)
+            }
+            guard data.count <= maximumRemoteImageBytes else {
+                throw PreviewPipelineError.remoteImageTooLarge(url)
+            }
             return (data, url)
         }
 
@@ -1257,6 +1285,17 @@ enum PreviewImageSourceLoader {
         }
 
         return (try Data(contentsOf: resolvedURL), resolvedURL)
+    }
+
+    static func isValidRemoteImageResponse(_ response: URLResponse, for url: URL) -> Bool {
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode),
+              httpResponse.mimeType?.lowercased().hasPrefix("image/") == true else {
+            return false
+        }
+
+        let expectedLength = httpResponse.expectedContentLength
+        return expectedLength < 0 || expectedLength <= Int64(maximumRemoteImageBytes)
     }
 
     static func imageSize(for data: Data, url: URL) throws -> CGSize {

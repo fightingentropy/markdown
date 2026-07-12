@@ -63,6 +63,25 @@ final class WorkspaceRenameTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: renamedURL, encoding: .utf8), "# Custom Title\n\nBody")
     }
 
+    func testRenameUpdatesIncomingWikiAndMarkdownLinks() throws {
+        let fixture = try makeWorkspaceFixture(
+            files: [
+                ("Old", "# Old\n\nBody"),
+                ("Index", "See [[Old]] and [Old](Old.md)."),
+            ]
+        )
+        let workspace = Workspace()
+        workspace.vaultURL = fixture.vaultURL
+        workspace.refreshFiles()
+
+        _ = try workspace.renameItem(fixture.fileURLs[0], to: "New")
+
+        XCTAssertEqual(
+            try String(contentsOf: fixture.fileURLs[1], encoding: .utf8),
+            "See [[New]] and [Old](New.md)."
+        )
+    }
+
     func testRenameItemRejectsExistingDestination() throws {
         let fixture = try makeWorkspaceFixture(fileName: "Old", content: "# Old\n\nBody")
         let destinationURL = fixture.vaultURL.appendingPathComponent("Taken.md")
@@ -98,6 +117,54 @@ final class WorkspaceRenameTests: XCTestCase {
                 atPath: renamedFolderURL.appendingPathComponent("Nested.md").path
             )
         )
+    }
+
+    func testRenameFolderRemapsSelectedDescendantAndCursorState() throws {
+        let fixture = try makeWorkspaceFixture(fileName: "Existing", content: "# Existing\n\nBody")
+        let folderURL = fixture.vaultURL.appendingPathComponent("Drafts", isDirectory: true)
+        try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+        let nestedFileURL = folderURL.appendingPathComponent("Nested.md")
+        try Data("# Nested\n\nBody".utf8).write(to: nestedFileURL, options: .atomic)
+
+        let workspace = Workspace()
+        workspace.vaultURL = fixture.vaultURL
+        workspace.refreshFiles()
+        workspace.selectFile(nestedFileURL)
+        workspace.persistEditorSelection(NSRange(location: 11, length: 2), for: nestedFileURL)
+
+        let renamedFolderURL = try workspace.renameItem(folderURL, to: "Archive")
+        let renamedNestedURL = renamedFolderURL.appendingPathComponent("Nested.md")
+
+        XCTAssertEqual(workspace.selectedFileURL?.standardizedFileURL, renamedNestedURL.standardizedFileURL)
+        XCTAssertEqual(workspace.text, "# Nested\n\nBody")
+        XCTAssertEqual(workspace.editorSelection(for: renamedNestedURL), NSRange(location: 11, length: 2))
+        XCTAssertNil(workspace.editorSelection(for: nestedFileURL))
+    }
+
+    func testMoveFolderRemapsSelectedDescendantAndCursorState() throws {
+        let fixture = try makeWorkspaceFixture(fileName: "Existing", content: "# Existing\n\nBody")
+        let folderURL = fixture.vaultURL.appendingPathComponent("Drafts", isDirectory: true)
+        let destinationFolderURL = fixture.vaultURL.appendingPathComponent("Archive", isDirectory: true)
+        try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationFolderURL, withIntermediateDirectories: true)
+        let nestedFileURL = folderURL.appendingPathComponent("Nested.md")
+        try Data("# Nested\n\nBody".utf8).write(to: nestedFileURL, options: .atomic)
+
+        let workspace = Workspace()
+        workspace.vaultURL = fixture.vaultURL
+        workspace.refreshFiles()
+        workspace.selectFile(nestedFileURL)
+        workspace.persistEditorSelection(NSRange(location: 4, length: 0), for: nestedFileURL)
+
+        XCTAssertTrue(workspace.moveItem(folderURL, toFolder: destinationFolderURL))
+        let movedNestedURL = destinationFolderURL
+            .appendingPathComponent("Drafts", isDirectory: true)
+            .appendingPathComponent("Nested.md")
+
+        XCTAssertEqual(workspace.selectedFileURL?.standardizedFileURL, movedNestedURL.standardizedFileURL)
+        XCTAssertEqual(workspace.text, "# Nested\n\nBody")
+        XCTAssertEqual(workspace.editorSelection(for: movedNestedURL), NSRange(location: 4, length: 0))
+        XCTAssertNil(workspace.editorSelection(for: nestedFileURL))
     }
 
     func testRefreshFilesDoesNotRewriteFilesWithoutHeadings() throws {
@@ -142,6 +209,24 @@ final class WorkspaceRenameTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: createdURL.path))
         XCTAssertEqual(workspace.selectedFileURL?.standardizedFileURL, createdURL.standardizedFileURL)
         XCTAssertEqual(workspace.text, "# Untitled\n\n")
+    }
+
+    func testDroppedExternalMarkdownImportsIntoCurrentVault() throws {
+        let fixture = try makeWorkspaceFixture(fileName: "Existing", content: "# Existing")
+        let external = FileManager.default.temporaryDirectory
+            .appendingPathComponent("External-\(UUID().uuidString).md")
+        try "# Imported".write(to: external, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: external) }
+
+        let workspace = Workspace()
+        workspace.vaultURL = fixture.vaultURL
+        workspace.refreshFiles()
+        workspace.importDroppedFile(external)
+
+        let imported = fixture.vaultURL.appendingPathComponent(external.lastPathComponent)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: imported.path))
+        XCTAssertEqual(workspace.vaultURL?.standardizedFileURL, fixture.vaultURL.standardizedFileURL)
+        XCTAssertEqual(workspace.selectedFileURL?.standardizedFileURL, imported.standardizedFileURL)
     }
 
     func testDeleteItemRemovesSelectedMarkdownFileAndClearsSelectionState() throws {

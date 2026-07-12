@@ -17,6 +17,9 @@ struct CommandPaletteView: View {
     // rather than on every view render / table row.
     @State private var results: [NoteSearchResult] = []
     @State private var selectedIndex = 0
+    @State private var savedSearches = SavedAdvancedSearchStore()
+    @State private var isSaveSearchPresented = false
+    @State private var savedSearchName = ""
     @FocusState private var isSearchFieldFocused: Bool
 
     private var primaryResult: PaletteResult? {
@@ -41,7 +44,7 @@ struct CommandPaletteView: View {
                         .foregroundStyle(.secondary)
                         .accessibilityHidden(true)
 
-                    TextField("Search notes\u{2026}", text: $query)
+                    TextField("Search notes, tags, properties, tasks…", text: $query)
                         .textFieldStyle(.plain)
                         .font(.title3)
                         .focused($isSearchFieldFocused)
@@ -49,6 +52,28 @@ struct CommandPaletteView: View {
                         .onSubmit {
                             activatePrimaryResult()
                         }
+
+                    Menu {
+                        if savedSearches.searches.isEmpty {
+                            Text("No saved searches")
+                        } else {
+                            ForEach(savedSearches.searches) { search in
+                                Button(search.name) {
+                                    query = search.query
+                                }
+                            }
+                            Divider()
+                        }
+                        Button("Save Current Search…") {
+                            savedSearchName = query
+                            isSaveSearchPresented = true
+                        }
+                        .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    } label: {
+                        Image(systemName: "bookmark")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .help("Saved Searches")
                 }
                 .padding(20)
 
@@ -105,6 +130,15 @@ struct CommandPaletteView: View {
         .onExitCommand {
             dismiss()
         }
+        .alert("Save Search", isPresented: $isSaveSearchPresented) {
+            TextField("Name", text: $savedSearchName)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") {
+                _ = try? savedSearches.save(name: savedSearchName, query: query)
+            }
+        } message: {
+            Text("Save this advanced search for quick access later.")
+        }
         .onKeyPress(.upArrow) {
             moveSelection(by: -1)
             return .handled
@@ -129,7 +163,7 @@ struct CommandPaletteView: View {
             let currentQuery = query
             // Filter off the main actor so large vaults don't stall typing.
             let filtered = await Task.detached(priority: .userInitiated) {
-                Workspace.search(snapshot, query: currentQuery)
+                ObsidianAdvancedSearchEvaluator.search(snapshot, query: currentQuery)
             }.value
 
             guard !Task.isCancelled else { return }

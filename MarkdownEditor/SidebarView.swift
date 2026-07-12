@@ -682,5 +682,5 @@ func isMD(_ url: URL) -> Bool {
     // Keep this in sync with `Workspace.isMarkdownFile`'s supported extensions.
     // `.txt` is intentionally excluded: it is not opened end-to-end, so accepting
     // it here would let a drop succeed visually but silently do nothing.
-    ["md", "markdown", "mdown"].contains(url.pathExtension.lowercased())
+    ["md", "markdown", "mdown", "txt"].contains(url.pathExtension.lowercased())
 }

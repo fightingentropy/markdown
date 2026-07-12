@@ -3,6 +3,7 @@ import SwiftUI
 struct AppSettingsView: View {
     @Bindable var assistantSettings: AssistantSettings
     @Bindable var preferences: AppPreferences
+    @Bindable var workflowConfiguration: NoteWorkflowConfigurationStore
     @FocusState private var focusedField: Field?
     @State private var selectedSection: SettingsSection = .workspace
 
@@ -14,6 +15,7 @@ struct AppSettingsView: View {
         case workspace
         case editor
         case preview
+        case workflows
         case assistant
 
         var id: String { rawValue }
@@ -26,6 +28,8 @@ struct AppSettingsView: View {
                 return "Editor"
             case .preview:
                 return "Preview"
+            case .workflows:
+                return "Workflows"
             case .assistant:
                 return "Assistant"
             }
@@ -39,6 +43,8 @@ struct AppSettingsView: View {
                 return "Source editing layout and typography"
             case .preview:
                 return "Rendered note presentation"
+            case .workflows:
+                return "Daily Notes, templates, and capture"
             case .assistant:
                 return "Assistant connection and launcher tuning"
             }
@@ -52,6 +58,8 @@ struct AppSettingsView: View {
                 return "Tune the writing surface for source editing, density, and long-form readability."
             case .preview:
                 return "Adjust how rendered notes read on screen, from typography to page width."
+            case .workflows:
+                return "Choose where Daily Notes and reusable note templates live inside each vault."
             case .assistant:
                 return "Manage the in-app assistant, including its API key, model, reasoning level, and launcher."
             }
@@ -65,6 +73,8 @@ struct AppSettingsView: View {
                 return "text.cursor"
             case .preview:
                 return "doc.text.image"
+            case .workflows:
+                return "calendar.badge.plus"
             case .assistant:
                 return "sparkles.rectangle.stack.fill"
             }
@@ -78,6 +88,8 @@ struct AppSettingsView: View {
                 return Color(red: 0.95, green: 0.52, blue: 0.26)
             case .preview:
                 return Color(red: 0.34, green: 0.78, blue: 0.66)
+            case .workflows:
+                return Color(red: 0.72, green: 0.54, blue: 0.96)
             case .assistant:
                 return Color(red: 0.44, green: 0.72, blue: 0.98)
             }
@@ -174,6 +186,9 @@ struct AppSettingsView: View {
             statusPill(preferences.previewFontChoice.title, systemImage: "text.justify", tint: selectedSection.accent)
             statusPill(preferences.previewCodeFontChoice.title, systemImage: "curlybraces", tint: .secondary)
             statusPill("\(Int(preferences.previewPageWidth)) px page", systemImage: "rectangle", tint: .secondary)
+        case .workflows:
+            statusPill(workflowConfiguration.dailyNotes.folderPath, systemImage: "calendar", tint: selectedSection.accent)
+            statusPill(workflowConfiguration.templates.folderPath, systemImage: "doc.on.doc", tint: .secondary)
         case .assistant:
             let currentModel = AssistantSettings.model(for: assistantSettings.selectedModel)
             if assistantSettings.isConfigured {
@@ -208,6 +223,8 @@ struct AppSettingsView: View {
             editorSection
         case .preview:
             previewSection
+        case .workflows:
+            workflowsSection
         case .assistant:
             connectionSection
             modelSection
@@ -360,6 +377,35 @@ struct AppSettingsView: View {
         }
     }
 
+    private var workflowsSection: some View {
+        Group {
+            settingsCard(
+                title: "Daily Notes",
+                description: "Open or create today's note from the toolbar without ever overwriting an existing file."
+            ) {
+                VStack(alignment: .leading, spacing: 16) {
+                    TextField("Daily Notes folder", text: dailyNotesFolderBinding)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("Date format", text: dailyNotesDateFormatBinding)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("Daily template path (optional)", text: dailyTemplateBinding)
+                        .textFieldStyle(.roundedBorder)
+                    Text("Examples: `YYYY-MM-DD` or `YYYY/MM/DD`. Template paths are relative to the Templates folder.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            settingsCard(
+                title: "Templates",
+                description: "Markdown files in this folder appear in the New from Template menu."
+            ) {
+                TextField("Templates folder", text: templatesFolderBinding)
+                    .textFieldStyle(.roundedBorder)
+            }
+        }
+    }
+
     private var connectionSection: some View {
         let currentModel = AssistantSettings.model(for: assistantSettings.selectedModel)
         let usesSubscription = currentModel?.requiresAPIKey == false
@@ -374,6 +420,8 @@ struct AppSettingsView: View {
                 HStack(spacing: 12) {
                     if usesSubscription {
                         statusPill("Using assistant subscription", systemImage: "person.crop.circle.badge.checkmark", tint: .green)
+                    } else if assistantSettings.apiKeyPersistenceError != nil {
+                        statusPill("Keychain needs attention", systemImage: "exclamationmark.triangle.fill", tint: .orange)
                     } else if assistantSettings.isConfigured {
                         statusPill("Key saved in app", systemImage: "checkmark.circle.fill", tint: .green)
                     } else {
@@ -392,10 +440,22 @@ struct AppSettingsView: View {
                         .textFieldStyle(.roundedBorder)
                         .focused($focusedField, equals: .apiKey)
 
+                    if let persistenceError = assistantSettings.apiKeyPersistenceError {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Label(persistenceError, systemImage: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                            Button("Retry") {
+                                assistantSettings.retryAPIKeyPersistence()
+                            }
+                            .buttonStyle(.link)
+                        }
+                        .font(.caption)
+                    }
+
                     HStack(spacing: 12) {
                         Link("Create or manage API keys", destination: AssistantSettings.authURL)
 
-                        Text(assistantSettings.isConfigured ? "Saved in the app’s local settings." : "The assistant stays disabled until a key is entered.")
+                        Text(assistantSettings.isConfigured ? "Saved securely in macOS Keychain." : "The assistant stays disabled until a key is entered.")
                             .foregroundStyle(.secondary)
                     }
                     .font(.caption)
@@ -549,7 +609,7 @@ struct AppSettingsView: View {
             VStack(alignment: .leading, spacing: 10) {
                 Label("The current note is sent as context with each assistant question.", systemImage: "doc.text")
                 Label("Messages reset automatically when you switch to another note.", systemImage: "arrow.triangle.2.circlepath")
-                Label("API keys are stored in the app’s local settings, not in the document files.", systemImage: "key")
+                Label("API keys are stored in macOS Keychain, not in settings or document files.", systemImage: "key")
             }
             .foregroundStyle(.secondary)
         }
@@ -562,6 +622,51 @@ struct AppSettingsView: View {
         case .byName:
             return "Name"
         }
+    }
+
+    private var dailyNotesFolderBinding: Binding<String> {
+        Binding(
+            get: { workflowConfiguration.dailyNotes.folderPath },
+            set: { value in
+                var configuration = workflowConfiguration.dailyNotes
+                configuration.folderPath = value
+                workflowConfiguration.dailyNotes = configuration
+            }
+        )
+    }
+
+    private var dailyNotesDateFormatBinding: Binding<String> {
+        Binding(
+            get: { workflowConfiguration.dailyNotes.dateFormat },
+            set: { value in
+                var configuration = workflowConfiguration.dailyNotes
+                configuration.dateFormat = value
+                workflowConfiguration.dailyNotes = configuration
+            }
+        )
+    }
+
+    private var dailyTemplateBinding: Binding<String> {
+        Binding(
+            get: { workflowConfiguration.dailyNotes.templateRelativePath ?? "" },
+            set: { value in
+                var configuration = workflowConfiguration.dailyNotes
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                configuration.templateRelativePath = trimmed.isEmpty ? nil : trimmed
+                workflowConfiguration.dailyNotes = configuration
+            }
+        )
+    }
+
+    private var templatesFolderBinding: Binding<String> {
+        Binding(
+            get: { workflowConfiguration.templates.folderPath },
+            set: { value in
+                var configuration = workflowConfiguration.templates
+                configuration.folderPath = value
+                workflowConfiguration.templates = configuration
+            }
+        )
     }
 
     private func sidebarButton(for section: SettingsSection) -> some View {

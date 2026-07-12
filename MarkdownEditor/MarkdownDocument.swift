@@ -57,7 +57,119 @@ enum ItemRenameError: LocalizedError, Equatable {
     }
 }
 
-private let markdownFileExtensions: Set<String> = ["md", "markdown", "mdown"]
+/// The result of an explicit or automatic save. Callers that are about to
+/// replace the editor buffer should only proceed when `allowsTransition` is
+/// true; conflicts and I/O failures deliberately keep the current note open.
+enum DocumentSaveResult: Equatable, Sendable {
+    case saved
+    case noChanges
+    case noEditableDocument
+    case conflict
+    case failed(String)
+
+    var allowsTransition: Bool {
+        switch self {
+        case .saved, .noChanges, .noEditableDocument:
+            true
+        case .conflict, .failed:
+            false
+        }
+    }
+}
+
+enum WorkspaceFileOperationError: LocalizedError {
+    case unsavedChanges(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unsavedChanges(let message):
+            message
+        }
+    }
+}
+
+struct RecoveryDraft: Codable, Equatable, Sendable {
+    let sourcePath: String
+    let content: String
+    let baseContent: String
+    let updatedAt: Date
+}
+
+/// A small, vault-independent crash-recovery store. Drafts live in Application
+/// Support rather than beside notes, so vaults remain clean and an unavailable
+/// iCloud container cannot take the only copy of unsaved text with it.
+struct RecoveryStore: Sendable {
+    let directoryURL: URL
+
+    init(directoryURL: URL = RecoveryStore.defaultDirectoryURL()) {
+        self.directoryURL = directoryURL.standardizedFileURL
+    }
+
+    func save(content: String, baseContent: String, for url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: directoryURL,
+            withIntermediateDirectories: true
+        )
+        let draft = RecoveryDraft(
+            sourcePath: url.standardizedFileURL.path,
+            content: content,
+            baseContent: baseContent,
+            updatedAt: Date()
+        )
+        try JSONEncoder().encode(draft).write(to: draftURL(for: url), options: .atomic)
+    }
+
+    func draft(for url: URL) -> RecoveryDraft? {
+        guard let data = try? Data(contentsOf: draftURL(for: url)),
+              let draft = try? JSONDecoder().decode(RecoveryDraft.self, from: data),
+              draft.sourcePath == url.standardizedFileURL.path else {
+            return nil
+        }
+        return draft
+    }
+
+    func removeDraft(for url: URL) {
+        try? FileManager.default.removeItem(at: draftURL(for: url))
+    }
+
+    func moveDraft(from oldURL: URL, to newURL: URL) {
+        guard let draft = draft(for: oldURL) else { return }
+        do {
+            try save(content: draft.content, baseContent: draft.baseContent, for: newURL)
+            removeDraft(for: oldURL)
+        } catch {
+            // Recovery is best-effort and must never make the primary rename or
+            // move fail. If this write fails, the old-path draft remains intact.
+        }
+    }
+
+    private func draftURL(for url: URL) -> URL {
+        directoryURL
+            .appendingPathComponent(Self.stablePathKey(url.standardizedFileURL.path))
+            .appendingPathExtension("json")
+    }
+
+    private static func stablePathKey(_ path: String) -> String {
+        // FNV-1a is deterministic across launches (unlike Swift's Hasher) and
+        // keeps filenames safely below APFS's component-length limit.
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in path.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return String(hash, radix: 16)
+    }
+
+    private static func defaultDirectoryURL() -> URL {
+        let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return baseURL
+            .appendingPathComponent("com.md.MarkdownEditor", isDirectory: true)
+            .appendingPathComponent("Recovery", isDirectory: true)
+    }
+}
+
+private let markdownFileExtensions: Set<String> = ["md", "markdown", "mdown", "txt"]
 private let imageFileExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "svg", "tiff", "bmp"]
 
 struct CachedMarkdownMetadata: Sendable {
@@ -89,7 +201,7 @@ struct NoteSearchEntry: Sendable, Identifiable {
     let title: String
     let relativePath: String?
     let body: String
-    fileprivate let foldedTitleHaystack: String
+    let foldedTitleHaystack: String
 }
 
 /// Result of a search pass. `Sendable` so the filtering can run off the main
@@ -112,6 +224,7 @@ final class Workspace {
         didSet {
             guard text != oldValue else { return }
             scheduleNoteGraphRefresh()
+            scheduleRecoveryDraft()
         }
     }
     var noteGraph: NoteGraphSnapshot = .empty
@@ -134,8 +247,14 @@ final class Workspace {
     /// Set when the file changed on disk since we last read/wrote it, so we can
     /// ask the user how to resolve instead of clobbering the external edits.
     var saveConflict: SaveConflict?
+    /// The note whose unsaved buffer was safely restored from local recovery.
+    /// This is observable so a future UI can show a non-blocking recovery badge.
+    var recoveredDraftURL: URL?
 
     var hasVault: Bool { vaultURL != nil }
+    var hasUnsavedChanges: Bool {
+        selectedFileIsMarkdown && persistedText != nil && persistedText != text
+    }
     var selectedFileIsMarkdown: Bool {
         guard let selectedFileURL else { return false }
         return Self.isMarkdownFile(selectedFileURL)
@@ -164,18 +283,29 @@ final class Workspace {
     private static let editorSelectionKeyPrefix = "editorSelection::"
     private static let noteGraphDebounceNanoseconds: UInt64 = 250_000_000
     private let preferences: AppPreferences
+    private let recoveryStore: RecoveryStore
     private var activeSecurityScopedVaultURL: URL?
     private var autosaveTask: Task<Void, Never>?
+    private var recoveryDraftTask: Task<Void, Never>?
     private var snapshotLoadTask: Task<Void, Never>?
     private var noteGraphRefreshTask: Task<Void, Never>?
+    private var externalChangeTask: Task<Void, Never>?
+    private var pendingExternalChanges: [VaultFileChange] = []
+    private var vaultFilePresenter: VaultFilePresenter?
     private var snapshotGeneration = 0
     private var cachedMarkdownMetadataByPath: [String: CachedMarkdownMetadata] = [:]
     private var assetLookupByFilename: [String: [URL]] = [:]
     private var pendingEditorSelectionsByKey: [String: [Int]] = [:]
     private var editorSelectionPersistTasksByKey: [String: Task<Void, Never>] = [:]
+    private var persistedText: String?
+    private var isReplacingEditorBuffer = false
 
-    init(preferences: AppPreferences = AppPreferences()) {
+    init(
+        preferences: AppPreferences = AppPreferences(),
+        recoveryStore: RecoveryStore = RecoveryStore()
+    ) {
         self.preferences = preferences
+        self.recoveryStore = recoveryStore
         self.sortOrder = preferences.defaultSortOrder
         if let data = UserDefaults.standard.data(forKey: Self.bookmarkKey) {
             restoreVault(from: data)
@@ -195,7 +325,10 @@ final class Workspace {
         openVault(url)
     }
 
-    func openVault(_ url: URL) {
+    @discardableResult
+    func openVault(_ url: URL) -> Bool {
+        guard saveCurrentFile().allowsTransition else { return false }
+
         beginAccessingVault(url)
         persistVaultBookmark(for: url)
         vaultURL = url
@@ -203,7 +336,8 @@ final class Workspace {
         files = []
         sidebarNodes = []
         selectedFileURL = nil
-        text = ""
+        replaceEditorBuffer(with: "", persistedContent: nil)
+        recoveredDraftURL = nil
         noteGraph = .empty
         cachedMarkdownMetadataByPath = [:]
         assetLookupByFilename = [:]
@@ -211,6 +345,7 @@ final class Workspace {
             preferredSelectionURL: restoreSelectedFileURL(),
             selectFirstFileIfNeeded: true
         )
+        return true
     }
 
     private func restoreVault(from bookmarkData: Data) {
@@ -237,7 +372,8 @@ final class Workspace {
         files = []
         sidebarNodes = []
         selectedFileURL = nil
-        text = ""
+        replaceEditorBuffer(with: "", persistedContent: nil)
+        recoveredDraftURL = nil
         noteGraph = .empty
         cachedMarkdownMetadataByPath = [:]
         assetLookupByFilename = [:]
@@ -277,82 +413,122 @@ final class Workspace {
             if let matchingURL = matchingSidebarURL(for: selectedFileURL) {
                 self.selectedFileURL = matchingURL
             } else {
-                self.selectedFileURL = nil
-                text = ""
-                clearStoredSelectedFileURL()
+                preserveDirtyBufferOrClearMissingSelection(selectedFileURL)
             }
         }
 
         refreshNoteGraph()
     }
 
-    func selectFile(_ url: URL) {
+    @discardableResult
+    func selectFile(_ url: URL) -> Bool {
         let canonicalURL = matchingSidebarURL(for: url) ?? url
         if let selectedFileURL, Self.urlsMatch(selectedFileURL, canonicalURL) {
-            return
+            return true
         }
 
-        saveCurrentFile()
-        if Self.isMarkdownFile(canonicalURL), let content = readFile(canonicalURL) {
-            let normalizedContent = Self.normalizedContent(
-                for: canonicalURL,
-                content: content,
-                persistIfMissingTitle: true
-            )
+        guard saveCurrentFile().allowsTransition else { return false }
+        if Self.isMarkdownFile(canonicalURL) {
+            let diskContent: String
+            do {
+                diskContent = try Self.readFileContentsThrowing(canonicalURL)
+            } catch {
+                saveError = Self.openErrorMessage(for: canonicalURL, error: error)
+                return false
+            }
+
             selectedFileURL = canonicalURL
-            text = normalizedContent
+            let recoveredContent = recoverableContent(for: canonicalURL, diskContent: diskContent)
+            replaceEditorBuffer(with: recoveredContent, persistedContent: diskContent)
             persistSelectedFileURL(canonicalURL)
-            updateCachedMetadata(for: canonicalURL, content: normalizedContent)
+            updateCachedMetadata(for: canonicalURL, content: diskContent)
         } else {
             selectedFileURL = canonicalURL
-            text = ""
+            replaceEditorBuffer(with: "", persistedContent: nil)
+            recoveredDraftURL = nil
             persistSelectedFileURL(canonicalURL)
         }
+        return true
+    }
+
+    /// Closes the active document without closing the vault. The transition is
+    /// refused when the current buffer cannot be saved, matching file and vault
+    /// switching semantics so closing the final tab cannot discard edits.
+    @discardableResult
+    func clearSelection() -> Bool {
+        guard saveCurrentFile().allowsTransition else { return false }
+        selectedFileURL = nil
+        replaceEditorBuffer(with: "", persistedContent: nil)
+        recoveredDraftURL = nil
+        clearStoredSelectedFileURL()
+        return true
     }
 
     private func readFile(_ url: URL) -> String? {
         Self.readFileContents(url)
     }
 
-    func saveCurrentFile() {
+    @discardableResult
+    func saveCurrentFile() -> DocumentSaveResult {
         autosaveTask?.cancel()
-        guard let url = selectedFileURL else { return }
-        guard Self.isMarkdownFile(url) else { return }
+        guard let url = selectedFileURL else { return .noEditableDocument }
+        guard Self.isMarkdownFile(url) else { return .noEditableDocument }
         // While a conflict alert is pending, don't keep re-writing/re-prompting.
-        guard saveConflict == nil else { return }
-        writeBuffer(text, to: url)
+        guard saveConflict == nil else {
+            persistRecoveryDraftNow()
+            return .conflict
+        }
+        guard persistedText != nil else {
+            let message = "Couldn’t save \(url.lastPathComponent) because its original contents were not loaded. Reopen the note before saving; the current buffer was kept unchanged."
+            saveError = message
+            return .failed(message)
+        }
+        guard persistedText != text else {
+            recoveryStore.removeDraft(for: url)
+            return .noChanges
+        }
+        return writeBuffer(text, to: url)
     }
 
     /// Writes `content` to `url`, but first guards against clobbering an
     /// external modification, and surfaces (rather than swallows) write errors.
-    private func writeBuffer(_ content: String, to url: URL) {
-        let key = Self.metadataCacheKey(for: url.standardizedFileURL)
-        // Read the on-disk date via FileManager rather than URL.resourceValues:
-        // URL caches resource values per instance, which would mask an external
-        // modification made after we first read the file.
-        let currentDate = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
-        if let knownDate = cachedMarkdownMetadataByPath[key]?.modificationDate,
-           let currentDate,
-           // 1s tolerance absorbs filesystem timestamp granularity and our own
-           // just-written timestamp; anything beyond that is an external write.
-           currentDate.timeIntervalSince(knownDate) > 1.0,
-           let diskContent = Self.readFileContents(url),
-           diskContent != content {
-            saveConflict = SaveConflict(
-                url: url,
-                fileName: url.lastPathComponent,
-                onDiskContent: diskContent,
-                editorContent: content
-            )
-            return
+    private func writeBuffer(_ content: String, to url: URL) -> DocumentSaveResult {
+        guard let persistedText else {
+            let message = "Couldn’t save \(url.lastPathComponent) because its original contents were not loaded."
+            saveError = message
+            return .failed(message)
         }
-
         do {
-            try Data(content.utf8).write(to: url, options: .atomic)
+            let outcome = try Self.coordinatedConditionalWrite(
+                Data(content.utf8),
+                expectedContent: persistedText,
+                to: url
+            )
+            if case .conflict(let diskContent) = outcome {
+                saveConflict = SaveConflict(
+                    url: url,
+                    fileName: url.lastPathComponent,
+                    onDiskContent: diskContent,
+                    editorContent: content
+                )
+                _ = persistRecoveryDraftNow()
+                return .conflict
+            }
+
             saveError = nil
+            self.persistedText = content
+            recoveryStore.removeDraft(for: url)
             updateCachedMetadata(for: url, content: content)
+            return .saved
         } catch {
-            saveError = "Couldn\u{2019}t save \(url.lastPathComponent): \(error.localizedDescription)"
+            let recoverySaved = persistRecoveryDraftNow()
+            let message = Self.saveErrorMessage(
+                for: url,
+                error: error,
+                recoverySaved: recoverySaved
+            )
+            saveError = message
+            return .failed(message)
         }
     }
 
@@ -361,11 +537,20 @@ final class Workspace {
         guard let conflict = saveConflict else { return }
         saveConflict = nil
         do {
-            try Data(conflict.editorContent.utf8).write(to: conflict.url, options: .atomic)
+            try Self.coordinatedWrite(Data(conflict.editorContent.utf8), to: conflict.url)
             saveError = nil
+            if let selectedFileURL, Self.urlsMatch(selectedFileURL, conflict.url) {
+                persistedText = conflict.editorContent
+            }
+            recoveryStore.removeDraft(for: conflict.url)
             updateCachedMetadata(for: conflict.url, content: conflict.editorContent)
         } catch {
-            saveError = "Couldn\u{2019}t save \(conflict.fileName): \(error.localizedDescription)"
+            let recoverySaved = persistRecoveryDraftNow()
+            saveError = Self.saveErrorMessage(
+                for: conflict.url,
+                error: error,
+                recoverySaved: recoverySaved
+            )
         }
     }
 
@@ -375,8 +560,10 @@ final class Workspace {
         guard let conflict = saveConflict else { return }
         saveConflict = nil
         if let selectedFileURL, Self.urlsMatch(selectedFileURL, conflict.url) {
-            text = conflict.onDiskContent
+            replaceEditorBuffer(with: conflict.onDiskContent, persistedContent: conflict.onDiskContent)
+            recoveredDraftURL = nil
         }
+        recoveryStore.removeDraft(for: conflict.url)
         updateCachedMetadata(for: conflict.url, content: conflict.onDiskContent)
     }
 
@@ -390,6 +577,63 @@ final class Workspace {
             guard !Task.isCancelled else { return }
             self?.saveCurrentFile()
         }
+    }
+
+    private func scheduleRecoveryDraft() {
+        guard !isReplacingEditorBuffer, selectedFileIsMarkdown, persistedText != nil else { return }
+        recoveryDraftTask?.cancel()
+
+        guard hasUnsavedChanges else {
+            if let selectedFileURL {
+                recoveryStore.removeDraft(for: selectedFileURL)
+            }
+            return
+        }
+
+        recoveryDraftTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard let self, !Task.isCancelled else { return }
+            self.persistRecoveryDraftNow()
+        }
+    }
+
+    /// Flushes the current dirty buffer to local recovery immediately. Save
+    /// failure and conflict paths call this synchronously before returning.
+    @discardableResult
+    func persistRecoveryDraftNow() -> Bool {
+        recoveryDraftTask?.cancel()
+        guard let selectedFileURL,
+              selectedFileIsMarkdown,
+              let persistedText,
+              persistedText != text else {
+            return false
+        }
+        do {
+            try recoveryStore.save(content: text, baseContent: persistedText, for: selectedFileURL)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    func recoveryDraft(for url: URL) -> RecoveryDraft? {
+        recoveryStore.draft(for: url)
+    }
+
+    /// Allows a future recovery UI to restore even a draft whose base no longer
+    /// matches disk. Automatic restore is intentionally stricter (see below).
+    @discardableResult
+    func restoreRecoveryDraft(for url: URL) -> Bool {
+        guard let selectedFileURL,
+              Self.urlsMatch(selectedFileURL, url),
+              let draft = recoveryStore.draft(for: url) else {
+            return false
+        }
+        isReplacingEditorBuffer = true
+        text = draft.content
+        isReplacingEditorBuffer = false
+        recoveredDraftURL = url.standardizedFileURL
+        return true
     }
 
     func createNewFile(in directoryURL: URL? = nil) {
@@ -421,6 +665,11 @@ final class Workspace {
             deletedItem(itemURL, isDirectory: isDirectory, contains: $0)
         } ?? false
 
+        if shouldClearSelectedFile, selectedFileIsMarkdown,
+           !saveCurrentFile().allowsTransition {
+            return
+        }
+
         guard (try? FileManager.default.trashItem(at: itemURL, resultingItemURL: nil)) != nil else {
             return
         }
@@ -428,8 +677,12 @@ final class Workspace {
         clearStoredEditorSelections(forKeys: editorSelectionKeysToClear)
 
         if shouldClearSelectedFile {
-            text = ""
+            if let selectedFileURL {
+                recoveryStore.removeDraft(for: selectedFileURL)
+            }
             self.selectedFileURL = nil
+            replaceEditorBuffer(with: "", persistedContent: nil)
+            recoveredDraftURL = nil
             clearStoredSelectedFileURL()
         }
 
@@ -437,14 +690,52 @@ final class Workspace {
     }
 
     func importDroppedFile(_ url: URL) {
-        openRequestedFiles([url])
+        let sourceURL = url.resolvingSymlinksInPath().standardizedFileURL
+        guard Self.isMarkdownFile(sourceURL), let vaultURL else {
+            _ = openRequestedFiles([sourceURL])
+            return
+        }
+
+        if sourceURL.path.hasPrefix(vaultURL.standardizedFileURL.path + "/") {
+            _ = selectFile(sourceURL)
+            return
+        }
+
+        guard saveCurrentFile().allowsTransition else { return }
+        let destinationURL = uniqueImportURL(
+            for: sourceURL.lastPathComponent,
+            in: vaultURL.standardizedFileURL
+        )
+        do {
+            try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+            refreshFiles()
+            _ = selectFile(destinationURL)
+        } catch {
+            saveError = "Couldn’t import \(sourceURL.lastPathComponent): \(error.localizedDescription)"
+        }
     }
 
-    func openRequestedFiles(_ urls: [URL]) {
+    private func uniqueImportURL(for filename: String, in directoryURL: URL) -> URL {
+        let pathExtension = (filename as NSString).pathExtension
+        let baseName = (filename as NSString).deletingPathExtension
+        var candidate = directoryURL.appendingPathComponent(filename)
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            let nextName = pathExtension.isEmpty
+                ? "\(baseName) \(suffix)"
+                : "\(baseName) \(suffix).\(pathExtension)"
+            candidate = directoryURL.appendingPathComponent(nextName)
+            suffix += 1
+        }
+        return candidate
+    }
+
+    @discardableResult
+    func openRequestedFiles(_ urls: [URL]) -> Bool {
         guard let url = urls
             .map({ $0.resolvingSymlinksInPath().standardizedFileURL })
             .first(where: { Self.isMarkdownFile($0) || Self.isImageFile($0) }) else {
-            return
+            return false
         }
 
         // If the file already lives inside the open vault, just select it.
@@ -452,11 +743,22 @@ final class Workspace {
         // selection) is jarring and unnecessary for an in-vault file.
         if let vaultURL,
            url.standardizedFileURL.path.hasPrefix(vaultURL.standardizedFileURL.path + "/") {
-            selectFile(url)
-            return
+            return selectFile(url)
         }
 
-        saveCurrentFile()
+        guard saveCurrentFile().allowsTransition else { return false }
+
+        let diskContent: String?
+        if Self.isMarkdownFile(url) {
+            do {
+                diskContent = try Self.readFileContentsThrowing(url)
+            } catch {
+                saveError = Self.openErrorMessage(for: url, error: error)
+                return false
+            }
+        } else {
+            diskContent = nil
+        }
 
         let parentURL = url.deletingLastPathComponent()
         beginAccessingVault(parentURL)
@@ -465,22 +767,20 @@ final class Workspace {
         vaultURL = parentURL
         restoreSortOrder()
 
-        if Self.isMarkdownFile(url), let content = readFile(url) {
-            let normalizedContent = Self.normalizedContent(
-                for: url,
-                content: content,
-                persistIfMissingTitle: true
-            )
-            ensureOpenedFileIsVisible(at: url, markdownContent: normalizedContent)
-            text = normalizedContent
+        if let diskContent {
+            ensureOpenedFileIsVisible(at: url, markdownContent: diskContent)
+            let recoveredContent = recoverableContent(for: url, diskContent: diskContent)
+            replaceEditorBuffer(with: recoveredContent, persistedContent: diskContent)
         } else {
             ensureOpenedFileIsVisible(at: url, markdownContent: nil)
-            text = ""
+            replaceEditorBuffer(with: "", persistedContent: nil)
+            recoveredDraftURL = nil
         }
 
         selectedFileURL = url
         persistSelectedFileURL(url)
         refreshFilesInBackground(preferredSelectionURL: url, selectFirstFileIfNeeded: false)
+        return true
     }
 
     func createNewFolder(in directoryURL: URL? = nil) {
@@ -529,21 +829,41 @@ final class Workspace {
             return false
         }
 
-        let isSelectedFile = selectedFileURL.map { Self.urlsMatch($0, standardizedSourceURL) } ?? false
-        if isSelectedFile, Self.isMarkdownFile(standardizedSourceURL) {
-            saveCurrentFile()
+        let sourceIsDirectory = isDirectoryURL(standardizedSourceURL)
+        let selectedURLAfterMove = selectedFileURL.flatMap {
+            remappedURL(
+                $0,
+                from: standardizedSourceURL,
+                to: destinationURL,
+                sourceIsDirectory: sourceIsDirectory
+            )
         }
+        if selectedFileIsMarkdown, !saveCurrentFile().allowsTransition {
+            return false
+        }
+
+        let linkRefactorEdits = makeLinkRefactorEdits(
+            moving: standardizedSourceURL,
+            to: destinationURL,
+            sourceIsDirectory: sourceIsDirectory
+        )
 
         guard (try? FileManager.default.moveItem(at: standardizedSourceURL, to: destinationURL)) != nil else {
             return false
         }
 
-        if isSelectedFile {
-            selectedFileURL = destinationURL
-            persistSelectedFileURL(destinationURL)
+        if let selectedURLAfterMove, let oldSelectedFileURL = selectedFileURL {
+            selectedFileURL = selectedURLAfterMove
+            persistSelectedFileURL(selectedURLAfterMove)
+            recoveryStore.moveDraft(from: oldSelectedFileURL, to: selectedURLAfterMove)
         }
 
-        moveStoredEditorSelection(from: standardizedSourceURL, to: destinationURL)
+        moveStoredEditorSelections(
+            from: standardizedSourceURL,
+            to: destinationURL,
+            sourceIsDirectory: sourceIsDirectory
+        )
+        applyLinkRefactorEdits(linkRefactorEdits, operationName: "move")
         refreshFiles()
         return true
     }
@@ -553,42 +873,109 @@ final class Workspace {
         let newURL = try validatedRenamedURL(for: url, proposedName: newName)
         guard newURL != url else { return url }
 
+        let sourceIsDirectory = isDirectoryURL(url)
         let isSelectedFile = selectedFileURL.map { Self.urlsMatch($0, url) } ?? false
+        let selectedURLAfterRename = selectedFileURL.flatMap {
+            remappedURL($0, from: url, to: newURL, sourceIsDirectory: sourceIsDirectory)
+        }
         let existingContent = Self.isMarkdownFile(url)
             ? (isSelectedFile ? text : readFile(url))
             : nil
 
-        if isSelectedFile {
-            saveCurrentFile()
+        if selectedFileIsMarkdown {
+            let result = saveCurrentFile()
+            guard result.allowsTransition else {
+                let message = saveError ?? "Resolve the unsaved changes before renaming this item."
+                throw WorkspaceFileOperationError.unsavedChanges(message)
+            }
         }
+
+
+        let updatedContent = existingContent.map {
+            contentAfterRename(oldURL: url, newURL: newURL, existingContent: $0)
+        }
+        let bodyOverrides = updatedContent.map { [url.standardizedFileURL: $0] } ?? [:]
+        let linkRefactorEdits = makeLinkRefactorEdits(
+            moving: url,
+            to: newURL,
+            sourceIsDirectory: sourceIsDirectory,
+            bodyOverrides: bodyOverrides
+        )
 
         try moveItemForRename(at: url, to: newURL)
 
-        if let existingContent {
-            let updatedContent = contentAfterRename(
-                oldURL: url,
-                newURL: newURL,
-                existingContent: existingContent
-            )
+        if let selectedURLAfterRename, let oldSelectedFileURL = selectedFileURL {
+            selectedFileURL = selectedURLAfterRename
+            persistSelectedFileURL(selectedURLAfterRename)
+            recoveryStore.moveDraft(from: oldSelectedFileURL, to: selectedURLAfterRename)
+        }
+        moveStoredEditorSelections(
+            from: url,
+            to: newURL,
+            sourceIsDirectory: sourceIsDirectory
+        )
 
+        if let existingContent, let updatedContent {
             if updatedContent != existingContent {
-                try Data(updatedContent.utf8).write(to: newURL, options: .atomic)
+                try Self.coordinatedWrite(Data(updatedContent.utf8), to: newURL)
             }
 
             if isSelectedFile {
-                text = updatedContent
+                replaceEditorBuffer(with: updatedContent, persistedContent: updatedContent)
+                recoveryStore.removeDraft(for: newURL)
             }
         }
 
-        if isSelectedFile {
-            selectedFileURL = newURL
-            persistSelectedFileURL(newURL)
-        }
-
-        moveStoredEditorSelection(from: url, to: newURL)
+        applyLinkRefactorEdits(linkRefactorEdits, operationName: "rename")
 
         refreshFiles()
         return newURL
+    }
+
+    private func makeLinkRefactorEdits(
+        moving oldRoot: URL,
+        to newRoot: URL,
+        sourceIsDirectory: Bool,
+        bodyOverrides: [URL: String] = [:]
+    ) -> [VaultLinkRefactorEdit] {
+        guard let vaultURL else { return [] }
+        let notes = files.compactMap { file -> VaultLinkNoteSnapshot? in
+            let standardizedURL = file.url.standardizedFileURL
+            guard let body = bodyOverrides[standardizedURL] ?? noteBody(for: standardizedURL) else {
+                return nil
+            }
+            let aliases = ObsidianMetadataParser.parse(body).aliases
+            return VaultLinkNoteSnapshot(url: standardizedURL, body: body, aliases: aliases)
+        }
+        return VaultLinkRefactor.edits(
+            notes: notes,
+            moving: oldRoot,
+            to: newRoot,
+            sourceIsDirectory: sourceIsDirectory,
+            vaultURL: vaultURL
+        )
+    }
+
+    private func applyLinkRefactorEdits(
+        _ edits: [VaultLinkRefactorEdit],
+        operationName: String
+    ) {
+        guard !edits.isEmpty else { return }
+        do {
+            try VaultLinkRefactor.apply(edits)
+            if let selectedFileURL,
+               let selectedEdit = edits.first(where: {
+                   Self.urlsMatch($0.destinationURL, selectedFileURL)
+               }) {
+                replaceEditorBuffer(
+                    with: selectedEdit.updatedBody,
+                    persistedContent: selectedEdit.updatedBody
+                )
+                recoveryStore.removeDraft(for: selectedFileURL)
+            }
+        } catch {
+            saveError = "The item was \(operationName)d, but linked notes could not be updated safely: \(error.localizedDescription)"
+        }
     }
 
     func persistEditorSelection(_ selection: NSRange, for url: URL?) {
@@ -842,6 +1229,88 @@ final class Workspace {
     }
 
 
+    private func replaceEditorBuffer(with content: String, persistedContent: String?) {
+        recoveryDraftTask?.cancel()
+        persistedText = persistedContent
+        isReplacingEditorBuffer = true
+        text = content
+        isReplacingEditorBuffer = false
+    }
+
+    private func recoverableContent(for url: URL, diskContent: String) -> String {
+        guard let draft = recoveryStore.draft(for: url) else {
+            recoveredDraftURL = nil
+            return diskContent
+        }
+
+        if draft.content == diskContent {
+            recoveryStore.removeDraft(for: url)
+            recoveredDraftURL = nil
+            return diskContent
+        }
+
+        // Automatic recovery is safe only if the file is still the exact base
+        // the unsaved edits were made against. A divergent draft remains on
+        // disk for explicit recovery instead of overwriting external changes.
+        guard draft.baseContent == diskContent else {
+            recoveredDraftURL = nil
+            return diskContent
+        }
+
+        recoveredDraftURL = url.standardizedFileURL
+        return draft.content
+    }
+
+    private func preserveDirtyBufferOrClearMissingSelection(_ missingURL: URL) {
+        guard hasUnsavedChanges else {
+            selectedFileURL = nil
+            replaceEditorBuffer(with: "", persistedContent: nil)
+            recoveredDraftURL = nil
+            clearStoredSelectedFileURL()
+            return
+        }
+
+        let recoverySaved = persistRecoveryDraftNow()
+        let recoveryStatus = recoverySaved
+            ? "A recovery draft was kept."
+            : "The recovery draft could not be written, so keep this window open and copy your text somewhere safe."
+        saveError = "Couldn’t find \(missingURL.lastPathComponent). Your unsaved text is still open. \(recoveryStatus) Restore the file or use Save again after making it available."
+    }
+
+    private nonisolated static func openErrorMessage(for url: URL, error: Error) -> String {
+        "Couldn’t open \(url.lastPathComponent): \(error.localizedDescription). The current note was kept unchanged."
+    }
+
+    private nonisolated static func saveErrorMessage(
+        for url: URL,
+        error: Error,
+        recoverySaved: Bool
+    ) -> String {
+        let recoveryStatus = recoverySaved
+            ? "Your text is still open and was copied to local recovery."
+            : "Your text is still open, but local recovery could not be written; copy it somewhere safe before closing the app."
+        return "Couldn’t save \(url.lastPathComponent): \(error.localizedDescription). \(recoveryStatus)"
+    }
+
+    private func remappedURL(
+        _ candidateURL: URL,
+        from sourceURL: URL,
+        to destinationURL: URL,
+        sourceIsDirectory: Bool
+    ) -> URL? {
+        let candidate = candidateURL.standardizedFileURL
+        let source = sourceURL.standardizedFileURL
+        if Self.urlsMatch(candidate, source) {
+            return destinationURL.standardizedFileURL
+        }
+
+        guard sourceIsDirectory else { return nil }
+        let sourcePrefix = source.path.hasSuffix("/") ? source.path : source.path + "/"
+        guard candidate.path.hasPrefix(sourcePrefix) else { return nil }
+        let relativePath = String(candidate.path.dropFirst(sourcePrefix.count))
+        return destinationURL.appendingPathComponent(relativePath).standardizedFileURL
+    }
+
     private func validatedRenamedURL(for url: URL, proposedName: String) throws -> URL {
         let trimmedName = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
@@ -981,6 +1450,7 @@ final class Workspace {
             ?? cachedMarkdownMetadataByPath[metadataKey]?.modificationDate
             ?? Date()
         let noteTitle = Self.extractTitle(from: content)
+            ?? standardizedURL.deletingPathExtension().lastPathComponent
         let noteLinks = MarkdownNoteLinkExtractor.references(in: content)
 
         cachedMarkdownMetadataByPath[metadataKey] = CachedMarkdownMetadata(
@@ -1015,7 +1485,8 @@ final class Workspace {
             files = []
             sidebarNodes = []
             selectedFileURL = nil
-            text = ""
+            replaceEditorBuffer(with: "", persistedContent: nil)
+            recoveredDraftURL = nil
             cachedMarkdownMetadataByPath = [:]
             assetLookupByFilename = [:]
             noteGraph = .empty
@@ -1056,9 +1527,7 @@ final class Workspace {
                 if let matchingURL = self.matchingSidebarURL(for: selectedFileURL) {
                     self.selectedFileURL = matchingURL
                 } else {
-                    self.selectedFileURL = nil
-                    self.text = ""
-                    self.clearStoredSelectedFileURL()
+                    self.preserveDirtyBufferOrClearMissingSelection(selectedFileURL)
                 }
             } else if selectFirstFileIfNeeded, let first = self.sortedFiles.first {
                 self.selectFile(first.url)
@@ -1173,14 +1642,12 @@ final class Workspace {
             noteLinks = cachedMetadata.noteLinks
             noteBody = cachedMetadata.noteBody
         } else if let content = readFileContents(url) {
-            let normalized = normalizedContent(
-                for: url,
-                content: content,
-                persistIfMissingTitle: false
-            )
-            noteTitle = Self.extractTitle(from: normalized)
-            noteLinks = MarkdownNoteLinkExtractor.references(in: normalized)
-            noteBody = normalized
+            // Filename fallback is presentation metadata only. Opening/indexing
+            // a note must never inject an H1 or otherwise rewrite its bytes.
+            noteTitle = Self.extractTitle(from: content)
+                ?? url.deletingPathExtension().lastPathComponent
+            noteLinks = MarkdownNoteLinkExtractor.references(in: content)
+            noteBody = content
         } else {
             noteTitle = nil
             noteLinks = []
@@ -1256,64 +1723,120 @@ final class Workspace {
         }
     }
 
-    private nonisolated static func normalizedContent(
-        for url: URL,
-        content: String,
-        persistIfMissingTitle: Bool
-    ) -> String {
-        if Self.extractTitle(from: content) != nil {
-            return content
-        }
-
-        let trimmedLeadingNewlines = String(content.drop(while: \.isNewline))
-        let title = url.deletingPathExtension().lastPathComponent
-        let body = trimmedLeadingNewlines.isEmpty ? "" : "\n\n\(trimmedLeadingNewlines)"
-        let normalized = "# \(title)\(body)"
-
-        if persistIfMissingTitle, normalized != content {
-            try? Data(normalized.utf8).write(to: url, options: .atomic)
-        }
-
-        return normalized
-    }
-
     private nonisolated static func readFileContents(_ url: URL) -> String? {
-        if let string = decodeFileContents(url) {
-            return string
-        }
-
-        let accessed = url.startAccessingSecurityScopedResource()
-        defer {
-            if accessed {
-                url.stopAccessingSecurityScopedResource()
-            }
-        }
-
-        return decodeFileContents(url)
+        try? readFileContentsThrowing(url)
     }
 
-    /// Decodes a text file, tolerating non-UTF-8 encodings. We try the system's
-    /// BOM/heuristic detector first, then UTF-8, UTF-16, and finally ISO-Latin-1
-    /// (which maps every byte to a character and so never fails). This prevents
-    /// a non-UTF-8 note from appearing empty in the editor and then being
-    /// silently overwritten with an empty file on the next save.
-    private nonisolated static func decodeFileContents(_ url: URL) -> String? {
-        var detectedEncoding = String.Encoding.utf8
-        if let string = try? String(contentsOf: url, usedEncoding: &detectedEncoding) {
+    /// Coordinated reads are important for iCloud/ubiquitous documents: a read
+    /// either returns a complete version or throws. A thrown read never becomes
+    /// an empty editor buffer that autosave could later write over the note.
+    private nonisolated static func readFileContentsThrowing(_ url: URL) throws -> String {
+        let data: Data
+        do {
+            data = try coordinatedRead(from: url)
+        } catch {
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer {
+                if accessed {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+            data = try coordinatedRead(from: url)
+        }
+
+        if let string = String(data: data, encoding: .utf8) {
             return string
         }
 
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        // NB: we intentionally do NOT try .utf16 here — without a BOM it
-        // "succeeds" on arbitrary even-length byte runs and yields garbage.
-        // BOM-tagged UTF-16 is already handled by the usedEncoding attempt
-        // above; .isoLatin1 maps any byte and so is the safe final fallback.
-        for encoding in [String.Encoding.utf8, .isoLatin1] {
-            if let string = String(data: data, encoding: encoding) {
-                return string
+        // Only try UTF-16 when a byte-order mark proves the encoding. Blindly
+        // decoding arbitrary even-length data as UTF-16 can silently produce
+        // garbage. ISO Latin-1 is the lossless final fallback for every byte.
+        let bytes = [UInt8](data.prefix(2))
+        if bytes == [0xFF, 0xFE] || bytes == [0xFE, 0xFF],
+           let string = String(data: data, encoding: .utf16) {
+            return string
+        }
+        if let string = String(data: data, encoding: .isoLatin1) {
+            return string
+        }
+        throw CocoaError(.fileReadInapplicableStringEncoding)
+    }
+
+    private nonisolated static func coordinatedRead(from url: URL) throws -> Data {
+        let coordinator = NSFileCoordinator()
+        var coordinationError: NSError?
+        var result: Result<Data, Error>?
+        coordinator.coordinate(readingItemAt: url, options: [], error: &coordinationError) { coordinatedURL in
+            result = Result { try Data(contentsOf: coordinatedURL) }
+        }
+        if let coordinationError { throw coordinationError }
+        guard let result else { throw CocoaError(.fileReadUnknown) }
+        return try result.get()
+    }
+
+    private nonisolated static func coordinatedWrite(_ data: Data, to url: URL) throws {
+        let coordinator = NSFileCoordinator()
+        var coordinationError: NSError?
+        var accessorError: Error?
+        coordinator.coordinate(writingItemAt: url, options: .forReplacing, error: &coordinationError) { coordinatedURL in
+            do {
+                try data.write(to: coordinatedURL, options: .atomic)
+            } catch {
+                accessorError = error
             }
         }
-        return nil
+        if let coordinationError { throw coordinationError }
+        if let accessorError { throw accessorError }
+    }
+
+    private enum CoordinatedConditionalWriteOutcome {
+        case written
+        case conflict(String)
+    }
+
+    /// Reads the current version and replaces it inside one file-coordination
+    /// accessor. iCloud and other coordinated writers therefore cannot land a
+    /// new version between our conflict check and write.
+    private nonisolated static func coordinatedConditionalWrite(
+        _ data: Data,
+        expectedContent: String,
+        to url: URL
+    ) throws -> CoordinatedConditionalWriteOutcome {
+        let coordinator = NSFileCoordinator()
+        var coordinationError: NSError?
+        var accessorResult: Result<CoordinatedConditionalWriteOutcome, Error>?
+
+        coordinator.coordinate(writingItemAt: url, options: .forReplacing, error: &coordinationError) { coordinatedURL in
+            accessorResult = Result {
+                let diskData = try Data(contentsOf: coordinatedURL)
+                let diskContent = try decodeTextData(diskData)
+                let proposedContent = String(decoding: data, as: UTF8.self)
+                if diskContent != expectedContent, diskContent != proposedContent {
+                    return .conflict(diskContent)
+                }
+                try data.write(to: coordinatedURL, options: .atomic)
+                return .written
+            }
+        }
+
+        if let coordinationError { throw coordinationError }
+        guard let accessorResult else { throw CocoaError(.fileWriteUnknown) }
+        return try accessorResult.get()
+    }
+
+    private nonisolated static func decodeTextData(_ data: Data) throws -> String {
+        if let string = String(data: data, encoding: .utf8) {
+            return string
+        }
+        let bytes = [UInt8](data.prefix(2))
+        if bytes == [0xFF, 0xFE] || bytes == [0xFE, 0xFF],
+           let string = String(data: data, encoding: .utf16) {
+            return string
+        }
+        if let string = String(data: data, encoding: .isoLatin1) {
+            return string
+        }
+        throw CocoaError(.fileReadInapplicableStringEncoding)
     }
 
     nonisolated static func isMarkdownFile(_ url: URL) -> Bool {
@@ -1524,7 +2047,39 @@ final class Workspace {
         UserDefaults.standard.set(url.standardizedFileURL.path, forKey: storageKey)
     }
 
-    private func moveStoredEditorSelection(from oldURL: URL, to newURL: URL) {
+    private func moveStoredEditorSelections(
+        from oldRootURL: URL,
+        to newRootURL: URL,
+        sourceIsDirectory: Bool
+    ) {
+        let defaults = UserDefaults.standard
+        var storedURLs: Set<URL> = []
+
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(Self.editorSelectionKeyPrefix) {
+            let path = String(key.dropFirst(Self.editorSelectionKeyPrefix.count))
+            storedURLs.insert(URL(fileURLWithPath: path).standardizedFileURL)
+        }
+        for key in pendingEditorSelectionsByKey.keys where key.hasPrefix(Self.editorSelectionKeyPrefix) {
+            let path = String(key.dropFirst(Self.editorSelectionKeyPrefix.count))
+            storedURLs.insert(URL(fileURLWithPath: path).standardizedFileURL)
+        }
+
+        // Include the exact root even if no cursor state currently exists; the
+        // helper is a no-op in that case and this keeps file moves simple.
+        storedURLs.insert(oldRootURL.standardizedFileURL)
+
+        for oldURL in storedURLs {
+            guard let newURL = remappedURL(
+                oldURL,
+                from: oldRootURL,
+                to: newRootURL,
+                sourceIsDirectory: sourceIsDirectory
+            ) else { continue }
+            moveStoredEditorSelectionExactly(from: oldURL, to: newURL)
+        }
+    }
+
+    private func moveStoredEditorSelectionExactly(from oldURL: URL, to newURL: URL) {
         let defaults = UserDefaults.standard
         let oldKey = editorSelectionStorageKey(for: oldURL)
         let newKey = editorSelectionStorageKey(for: newURL)
@@ -1648,6 +2203,17 @@ final class Workspace {
     private func beginAccessingVault(_ url: URL) {
         let standardizedURL = url.standardizedFileURL
 
+        if vaultFilePresenter?.presentedItemURL?.standardizedFileURL != standardizedURL {
+            vaultFilePresenter?.stop()
+            let presenter = VaultFilePresenter(vaultURL: standardizedURL) { [weak self] change in
+                Task { @MainActor [weak self] in
+                    self?.scheduleExternalChangeHandling(change)
+                }
+            }
+            vaultFilePresenter = presenter
+            presenter.start()
+        }
+
         if activeSecurityScopedVaultURL?.standardizedFileURL == standardizedURL {
             return
         }
@@ -1660,6 +2226,92 @@ final class Workspace {
             activeSecurityScopedVaultURL = standardizedURL
         } else {
             activeSecurityScopedVaultURL = nil
+        }
+    }
+
+    private func scheduleExternalChangeHandling(_ change: VaultFileChange) {
+        pendingExternalChanges.append(change)
+        externalChangeTask?.cancel()
+        externalChangeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(180))
+            guard let self, !Task.isCancelled else { return }
+            let changes = self.pendingExternalChanges
+            self.pendingExternalChanges.removeAll(keepingCapacity: true)
+            self.handleExternalChanges(changes)
+        }
+    }
+
+    /// Applies the entire debounced change batch. Keeping move pairs intact and
+    /// checking the selected file for every batch prevents a later, unrelated
+    /// iCloud notification from hiding an earlier note update.
+    func handleExternalChanges(_ changes: [VaultFileChange]) {
+        remapSelectionForExternalMoves(in: changes)
+
+        if let selectedFileURL,
+           selectedFileIsMarkdown,
+           let diskContent = try? Self.readFileContentsThrowing(selectedFileURL),
+           diskContent != text {
+            if hasUnsavedChanges {
+                // A file-presenter callback for another item must not turn a
+                // normal dirty buffer into a conflict merely because disk is
+                // still at our known base version.
+                if diskContent != persistedText {
+                    _ = persistRecoveryDraftNow()
+                    saveConflict = SaveConflict(
+                        url: selectedFileURL,
+                        fileName: selectedFileURL.lastPathComponent,
+                        onDiskContent: diskContent,
+                        editorContent: text
+                    )
+                }
+            } else {
+                replaceEditorBuffer(with: diskContent, persistedContent: diskContent)
+                recoveryStore.removeDraft(for: selectedFileURL)
+                updateCachedMetadata(for: selectedFileURL, content: diskContent)
+            }
+        }
+
+        // File-presenter callbacks arrive on save and in iCloud bursts. Build
+        // the recursive inventory off the main actor so those bursts cannot
+        // freeze editing in a large vault.
+        refreshFilesInBackground(
+            preferredSelectionURL: nil,
+            selectFirstFileIfNeeded: false
+        )
+    }
+
+    private func remapSelectionForExternalMoves(in changes: [VaultFileChange]) {
+        guard let selectedFileURL else { return }
+        let selectedPath = selectedFileURL.standardizedFileURL.path
+
+        for change in changes {
+            guard case .moved(let oldURL, let newURL) = change else { continue }
+            let oldPath = oldURL.standardizedFileURL.path
+            let suffix: String
+            if selectedPath == oldPath {
+                suffix = ""
+            } else if selectedPath.hasPrefix(oldPath + "/") {
+                suffix = String(selectedPath.dropFirst(oldPath.count))
+            } else {
+                continue
+            }
+
+            let remappedURL = URL(fileURLWithPath: newURL.standardizedFileURL.path + suffix)
+                .standardizedFileURL
+            guard let vaultURL,
+                  isDescendant(remappedURL, of: vaultURL, allowEqual: false) else {
+                continue
+            }
+
+            self.selectedFileURL = remappedURL
+            persistSelectedFileURL(remappedURL)
+            recoveryStore.moveDraft(from: selectedFileURL, to: remappedURL)
+            moveStoredEditorSelections(
+                from: oldURL,
+                to: newURL,
+                sourceIsDirectory: selectedPath != oldPath
+            )
+            return
         }
     }
 
