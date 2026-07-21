@@ -3,6 +3,7 @@ import SwiftUI
 struct NoteTabBar: View {
     let workspace: Workspace
     let session: WorkspaceSession
+    var isCompact = false
 
     var body: some View {
         if !session.tabs.isEmpty {
@@ -12,10 +13,9 @@ struct NoteTabBar: View {
                         tab(for: url)
                     }
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
+                .padding(.horizontal, isCompact ? 4 : 8)
+                .padding(.vertical, isCompact ? 2 : 6)
             }
-            .background(.bar)
         }
     }
 
@@ -49,8 +49,8 @@ struct NoteTabBar: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Close \(workspace.tabTitle(for: url))")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.horizontal, isCompact ? 8 : 10)
+        .padding(.vertical, isCompact ? 4 : 6)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.055))

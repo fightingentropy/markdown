@@ -1,8 +1,50 @@
+import AppKit
 import XCTest
 
 @testable import Markdown
 
 final class EditorLinkPreviewTests: XCTestCase {
+    @MainActor
+    func testViewportAnchorKeepsCaretFixedWhenContentAboveItExpands() throws {
+        let scrollView = NSTextView.scrollableTextView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 640, height: 320)
+        let textView = try XCTUnwrap(scrollView.documentView as? NSTextView)
+        textView.isVerticallyResizable = true
+        textView.minSize = NSSize(width: 0, height: 320)
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.containerSize = NSSize(
+            width: 560,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.string = (0..<80).map { "Line \($0)" }.joined(separator: "\n")
+        textView.layoutManager?.ensureLayout(for: try XCTUnwrap(textView.textContainer))
+
+        let caret = (textView.string as NSString).length
+        textView.setSelectedRange(NSRange(location: caret, length: 0))
+        textView.scrollRangeToVisible(textView.selectedRange())
+        let anchor = try XCTUnwrap(EditorViewportAnchor.capture(in: textView))
+        let originBeforeExpansion = scrollView.contentView.bounds.origin.y
+
+        let firstParagraph = (textView.string as NSString).paragraphRange(
+            for: NSRange(location: 0, length: 0)
+        )
+        let style = NSMutableParagraphStyle()
+        style.paragraphSpacing = 500
+        textView.textStorage?.addAttribute(.paragraphStyle, value: style, range: firstParagraph)
+        textView.layoutManager?.ensureLayout(for: try XCTUnwrap(textView.textContainer))
+
+        anchor.restore(in: textView)
+
+        XCTAssertEqual(
+            scrollView.contentView.bounds.origin.y - originBeforeExpansion,
+            500,
+            accuracy: 1
+        )
+    }
+
     func testRecognizesBareXStatusAndYouTubeLinks() {
         let previews = EditorLinkPreviewDetector.previews(in: """
         https://x.com/tishray/status/2031783721397809397

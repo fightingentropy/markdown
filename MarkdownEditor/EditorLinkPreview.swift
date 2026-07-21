@@ -259,6 +259,146 @@ enum EditorLinkPreviewDetector {
     }
 }
 
+/// Keeps the visible text line fixed while attributes above it change the
+/// document's layout. Preserving the raw scroll offset is not enough here: an
+/// embed growing above the viewport moves the caret even when that offset is
+/// restored exactly.
+@MainActor
+struct EditorViewportAnchor {
+    private let characterLocation: Int
+    private let verticalOffset: CGFloat
+    private let horizontalOrigin: CGFloat
+
+    static func capture(in textView: NSTextView) -> EditorViewportAnchor? {
+        guard let scrollView = textView.enclosingScrollView,
+              let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer else {
+            return nil
+        }
+
+        layoutManager.ensureLayout(for: textContainer)
+        let visibleRect = scrollView.contentView.bounds
+        let textLength = textView.textStorage?.length ?? 0
+        let selectionLocation = min(NSMaxRange(textView.selectedRange()), textLength)
+
+        let anchorLocation: Int
+        let anchorFrame: NSRect
+        if let selectionFrame = lineFrame(
+            at: selectionLocation,
+            in: textView,
+            layoutManager: layoutManager,
+            textContainer: textContainer
+        ), selectionFrame.intersects(visibleRect) {
+            anchorLocation = selectionLocation
+            anchorFrame = selectionFrame
+        } else {
+            let containerOrigin = textView.textContainerOrigin
+            let pointNearVisibleTop = CGPoint(
+                x: 0,
+                y: max(0, visibleRect.minY - containerOrigin.y + 1)
+            )
+            let location = min(
+                layoutManager.characterIndex(
+                    for: pointNearVisibleTop,
+                    in: textContainer,
+                    fractionOfDistanceBetweenInsertionPoints: nil
+                ),
+                textLength
+            )
+            guard let visibleLineFrame = lineFrame(
+                at: location,
+                in: textView,
+                layoutManager: layoutManager,
+                textContainer: textContainer
+            ) else {
+                return nil
+            }
+            anchorLocation = location
+            anchorFrame = visibleLineFrame
+        }
+
+        return EditorViewportAnchor(
+            characterLocation: anchorLocation,
+            verticalOffset: anchorFrame.minY - visibleRect.minY,
+            horizontalOrigin: visibleRect.minX
+        )
+    }
+
+    func restore(in textView: NSTextView) {
+        guard let scrollView = textView.enclosingScrollView,
+              let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer else {
+            return
+        }
+
+        layoutManager.ensureLayout(for: textContainer)
+        let textLength = textView.textStorage?.length ?? 0
+        guard let anchorFrame = Self.lineFrame(
+            at: min(characterLocation, textLength),
+            in: textView,
+            layoutManager: layoutManager,
+            textContainer: textContainer
+        ) else {
+            return
+        }
+
+        let contentView = scrollView.contentView
+        let documentHeight = max(
+            textView.frame.height,
+            layoutManager.usedRect(for: textContainer).maxY + textView.textContainerInset.height
+        )
+        let maxX = max(0, textView.frame.width - contentView.bounds.width)
+        let maxY = max(0, documentHeight - contentView.bounds.height)
+        let origin = CGPoint(
+            x: min(max(horizontalOrigin, 0), maxX),
+            y: min(max(anchorFrame.minY - verticalOffset, 0), maxY)
+        )
+
+        contentView.scroll(to: origin)
+        scrollView.reflectScrolledClipView(contentView)
+    }
+
+    private static func lineFrame(
+        at characterLocation: Int,
+        in textView: NSTextView,
+        layoutManager: NSLayoutManager,
+        textContainer: NSTextContainer
+    ) -> NSRect? {
+        let textLength = textView.textStorage?.length ?? 0
+        let containerOrigin = textView.textContainerOrigin
+
+        if characterLocation >= textLength,
+           layoutManager.extraLineFragmentTextContainer === textContainer {
+            return layoutManager.extraLineFragmentRect.offsetBy(
+                dx: containerOrigin.x,
+                dy: containerOrigin.y
+            )
+        }
+
+        guard textLength > 0 else {
+            let font = textView.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+            return NSRect(
+                x: containerOrigin.x,
+                y: containerOrigin.y,
+                width: 0,
+                height: layoutManager.defaultLineHeight(for: font)
+            )
+        }
+
+        let characterIndex = min(characterLocation, textLength - 1)
+        let glyphRange = layoutManager.glyphRange(
+            forCharacterRange: NSRange(location: characterIndex, length: 1),
+            actualCharacterRange: nil
+        )
+        guard glyphRange.length > 0 else { return nil }
+
+        return layoutManager.lineFragmentRect(
+            forGlyphAt: glyphRange.location,
+            effectiveRange: nil
+        ).offsetBy(dx: containerOrigin.x, dy: containerOrigin.y)
+    }
+}
+
 @MainActor
 final class EditorLinkPreviewController {
     private static let initialXCardHeight: CGFloat = 220
@@ -288,6 +428,7 @@ final class EditorLinkPreviewController {
         in textView: NSTextView,
         openURL: @escaping (URL) -> Void
     ) {
+        let viewportAnchor = EditorViewportAnchor.capture(in: textView)
         installScrollWheelForwarding(in: textView)
         clearSourcePresentation(in: textView)
         previews = EditorLinkPreviewDetector.previews(in: textView.string)
@@ -297,6 +438,7 @@ final class EditorLinkPreviewController {
         hoveredPreviewIDs.formIntersection(activeIDs)
         applyReservedSpacing(in: textView)
         updateSourcePresentation(in: textView)
+        viewportAnchor?.restore(in: textView)
         layoutCards(in: textView)
     }
 
@@ -584,8 +726,10 @@ final class EditorLinkPreviewController {
         )
         guard abs((measuredXCardHeights[preview.id] ?? 0) - height) > 2 else { return }
 
+        let viewportAnchor = EditorViewportAnchor.capture(in: textView)
         measuredXCardHeights[preview.id] = height
         applyReservedSpacing(in: textView)
+        viewportAnchor?.restore(in: textView)
         layoutCards(in: textView)
     }
 }

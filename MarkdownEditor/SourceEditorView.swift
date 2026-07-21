@@ -652,13 +652,14 @@ struct SourceEditorView: NSViewRepresentable {
             preservingViewport: Bool = true,
             editedRange: NSRange? = nil
         ) {
+            // A full pass resets paragraph styles before link previews reserve
+            // their space again, so anchor across both halves of that reflow.
+            let fullRefreshAnchor = editedRange == nil
+                ? EditorViewportAnchor.capture(in: textView)
+                : nil
             let applyHighlighting = {
                 guard let storage = textView.textStorage else { return }
                 self.highlighter.highlight(storage, editedRange: editedRange)
-                if editedRange == nil {
-                    self.cancelPendingLinkPreviewRefresh()
-                    self.refreshLinkPreviews(in: textView)
-                }
             }
 
             if preservingViewport {
@@ -667,7 +668,11 @@ struct SourceEditorView: NSViewRepresentable {
                 applyHighlighting()
             }
 
-            if editedRange != nil {
+            if editedRange == nil {
+                cancelPendingLinkPreviewRefresh()
+                refreshLinkPreviews(in: textView)
+                fullRefreshAnchor?.restore(in: textView)
+            } else {
                 scheduleLinkPreviewRefresh(for: textView)
             }
         }
@@ -776,9 +781,7 @@ struct SourceEditorView: NSViewRepresentable {
             let workItem = DispatchWorkItem { [weak self, weak textView] in
                 guard let self, let textView else { return }
                 self.pendingLinkPreviewRefresh = nil
-                self.withPreservedViewport(for: textView, revealSelectionAfterUpdate: false) {
-                    self.refreshLinkPreviews(in: textView)
-                }
+                self.refreshLinkPreviews(in: textView)
             }
             pendingLinkPreviewRefresh = workItem
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: workItem)

@@ -37,14 +37,19 @@ struct ContentView: View {
                 .focusedValue(\.editorController, controller)
         }
         .navigationSplitViewStyle(.balanced)
-        .navigationTitle(workspace.selectedFileName)
+        .navigationTitle("")
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                titlebarTabs
+            }
+        }
         .frame(minWidth: 700, minHeight: 500)
         .inspector(isPresented: $isInspectorPresented) {
             NoteInspectorView(workspace: workspace, controller: controller)
                 .inspectorColumnWidth(min: 270, ideal: 320, max: 440)
         }
-        .background(WindowToolbarConfigurator())
-        .background(TitlebarAccessoryInstaller(content: noteViewToolbar))
+        .background(WindowToolbarConfigurator(title: workspace.selectedFileName))
+        .background(TitlebarAccessoryInstaller(content: noteViewToolbar, layoutAttribute: .right))
         .overlay {
             if workspace.isCommandPalettePresented {
                 CommandPaletteView(workspace: workspace) {
@@ -230,17 +235,18 @@ struct ContentView: View {
     // MARK: - Detail
 
     private var detail: some View {
-        VStack(spacing: 0) {
-            detailHeader
-            Divider()
-            detailContent
-        }
+        detailContent
     }
 
-    private var detailHeader: some View {
-        NoteTabBar(workspace: workspace, session: workspaceSession)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.bar)
+    @ViewBuilder
+    private var titlebarTabs: some View {
+        if !workspaceSession.tabs.isEmpty {
+            NoteTabBar(workspace: workspace, session: workspaceSession, isCompact: true)
+                // A horizontal ScrollView reports a zero ideal width before its
+                // first layout pass. Give the titlebar a real starting width so
+                // the restored tab is visible while still allowing it to scroll.
+                .frame(minWidth: 120, maxWidth: 520, alignment: .leading)
+        }
     }
 
     private var noteViewToolbar: some View {
@@ -253,10 +259,10 @@ struct ContentView: View {
                 }
             }
             .pickerStyle(.segmented)
-            .controlSize(.large)
+            .controlSize(.regular)
             .labelsHidden()
-            .font(.system(size: 16, weight: .medium))
-            .frame(width: 190)
+            .font(.system(size: 14, weight: .medium))
+            .frame(width: 164)
             .help("Editor, Preview, Graph, and Bases")
             .accessibilityLabel("Note View")
 
@@ -264,11 +270,11 @@ struct ContentView: View {
                 workspaceSession.splitPreview.toggle()
             } label: {
                 Image(systemName: "rectangle.split.2x1")
-                    .font(.system(size: 16, weight: .medium))
-                    .frame(width: 24, height: 24)
+                    .font(.system(size: 14, weight: .medium))
+                    .frame(width: 20, height: 20)
             }
             .buttonStyle(.bordered)
-            .controlSize(.large)
+            .controlSize(.regular)
             .help(workspaceSession.splitPreview ? "Hide Split Preview" : "Show Split Preview")
             .disabled(!workspace.selectedFileIsMarkdown || viewMode != .editor)
             .tint(workspaceSession.splitPreview ? .accentColor : nil)
@@ -277,22 +283,18 @@ struct ContentView: View {
                 isInspectorPresented.toggle()
             } label: {
                 Image(systemName: "sidebar.trailing")
-                    .font(.system(size: 16, weight: .medium))
-                    .frame(width: 24, height: 24)
+                    .font(.system(size: 14, weight: .medium))
+                    .frame(width: 20, height: 20)
             }
             .buttonStyle(.bordered)
-            .controlSize(.large)
+            .controlSize(.regular)
             .help(isInspectorPresented ? "Hide Note Inspector" : "Show Note Inspector")
             .tint(isInspectorPresented ? .accentColor : nil)
 
             moreNoteActionsMenu
         }
         .fixedSize()
-        // Titlebar accessories are top-aligned by AppKit. Give the controls
-        // breathing room above so they sit visually centered in the tall
-        // unified titlebar instead of crowding the menu-bar edge.
-        .padding(.top, 14)
-        .padding(.bottom, 2)
+        .padding(.vertical, 3)
     }
 
     private var moreNoteActionsMenu: some View {
@@ -349,11 +351,11 @@ struct ContentView: View {
             }
         } label: {
             Image(systemName: "ellipsis.circle")
-                .font(.system(size: 18, weight: .medium))
-                .frame(width: 28, height: 28)
+                .font(.system(size: 16, weight: .medium))
+                .frame(width: 24, height: 24)
         }
         .menuStyle(.borderlessButton)
-        .controlSize(.large)
+        .controlSize(.regular)
         .fixedSize()
         .help("More Note Actions")
         .accessibilityLabel("More Note Actions")
@@ -631,6 +633,8 @@ private struct SaveStatusAlerts: ViewModifier {
 // MARK: - Window Toolbar Configurator
 
 private struct WindowToolbarConfigurator: NSViewRepresentable {
+    let title: String
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         DispatchQueue.main.async {
@@ -647,6 +651,8 @@ private struct WindowToolbarConfigurator: NSViewRepresentable {
 
     private func configureToolbar(for view: NSView) {
         guard let window = view.window, let toolbar = window.toolbar else { return }
+        window.title = title
+        window.titleVisibility = .hidden
         window.toolbarStyle = .unified
         toolbar.displayMode = .iconOnly
         toolbar.sizeMode = .regular
@@ -657,22 +663,31 @@ private struct WindowToolbarConfigurator: NSViewRepresentable {
 
 private struct TitlebarAccessoryInstaller<Content: View>: NSViewRepresentable {
     let content: Content
+    let layoutAttribute: NSLayoutConstraint.Attribute
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(content: content)
+        Coordinator(content: content, layoutAttribute: layoutAttribute)
     }
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         DispatchQueue.main.async {
-            context.coordinator.update(content: content, in: view)
+            context.coordinator.update(
+                content: content,
+                layoutAttribute: layoutAttribute,
+                in: view
+            )
         }
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
         DispatchQueue.main.async {
-            context.coordinator.update(content: content, in: nsView)
+            context.coordinator.update(
+                content: content,
+                layoutAttribute: layoutAttribute,
+                in: nsView
+            )
         }
     }
 
@@ -682,24 +697,66 @@ private struct TitlebarAccessoryInstaller<Content: View>: NSViewRepresentable {
 
     @MainActor
     final class Coordinator {
+        private let titlebarHeight: CGFloat = 44
+
         private let accessoryController = NSTitlebarAccessoryViewController()
+        private let accessoryView = NSView()
         private let hostingView: NSHostingView<Content>
         private weak var attachedWindow: NSWindow?
+        private var installedSize = NSSize.zero
 
-        init(content: Content) {
+        init(content: Content, layoutAttribute: NSLayoutConstraint.Attribute) {
             hostingView = NSHostingView(rootView: content)
-            accessoryController.layoutAttribute = .right
-            accessoryController.view = hostingView
+            accessoryView.addSubview(hostingView)
+            accessoryController.layoutAttribute = layoutAttribute
+            accessoryController.view = accessoryView
         }
 
-        func update(content: Content, in containerView: NSView) {
+        func update(
+            content: Content,
+            layoutAttribute: NSLayoutConstraint.Attribute,
+            in containerView: NSView
+        ) {
             hostingView.rootView = content
-            hostingView.setFrameSize(hostingView.fittingSize)
+            accessoryController.layoutAttribute = layoutAttribute
+
+            let fittingSize = hostingView.fittingSize
+            let targetSize = NSSize(
+                width: ceil(max(0, fittingSize.width)),
+                height: titlebarHeight
+            )
+            let sizeChanged = abs(targetSize.width - installedSize.width) > 0.5
+                || abs(targetSize.height - installedSize.height) > 0.5
+
+            hostingView.frame = NSRect(
+                x: 0,
+                y: max(0, (targetSize.height - fittingSize.height) / 2),
+                width: targetSize.width,
+                height: fittingSize.height
+            )
+            accessoryView.setFrameSize(targetSize)
+            installedSize = targetSize
 
             guard let window = containerView.window else { return }
-            guard attachedWindow !== window else { return }
 
-            detach()
+            // An empty accessory has no useful titlebar presence. Waiting until it
+            // has a width also avoids AppKit caching a zero-width view.
+            guard targetSize.width > 0.5 else {
+                detach()
+                return
+            }
+
+            if attachedWindow === window {
+                guard sizeChanged else { return }
+
+                // AppKit does not reliably relayout an already-installed titlebar
+                // accessory when its SwiftUI hosting view changes intrinsic width.
+                // Reinstalling is cheap and keeps the accessory positioned correctly.
+                detach()
+            } else {
+                detach()
+            }
+
             window.addTitlebarAccessoryViewController(accessoryController)
             attachedWindow = window
         }
