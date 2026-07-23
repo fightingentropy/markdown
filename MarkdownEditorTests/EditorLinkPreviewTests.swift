@@ -45,6 +45,282 @@ final class EditorLinkPreviewTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testViewportAnchorPinsVisibleEndCaretToDocumentBottom() throws {
+        let scrollView = NSTextView.scrollableTextView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 640, height: 320)
+        let textView = try XCTUnwrap(scrollView.documentView as? NSTextView)
+        textView.isVerticallyResizable = true
+        textView.minSize = NSSize(width: 0, height: 320)
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.containerSize = NSSize(
+            width: 560,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.string = (0..<80).map { "Line \($0)" }.joined(separator: "\n")
+        let textContainer = try XCTUnwrap(textView.textContainer)
+        let layoutManager = try XCTUnwrap(textView.layoutManager)
+        layoutManager.ensureLayout(for: textContainer)
+
+        let caret = (textView.string as NSString).length
+        textView.setSelectedRange(NSRange(location: caret, length: 0))
+        textView.scrollRangeToVisible(textView.selectedRange())
+
+        // Leave the last line visible but a few points above the physical
+        // bottom. A preview reflow should settle the end caret back at the
+        // bottom, not preserve this small vertical wobble.
+        let bottomBeforeExpansion = maximumScrollOriginY(
+            for: textView,
+            in: scrollView,
+            layoutManager: layoutManager,
+            textContainer: textContainer
+        )
+        scrollView.contentView.scroll(
+            to: CGPoint(x: 0, y: max(0, bottomBeforeExpansion - 6))
+        )
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        let anchor = try XCTUnwrap(EditorViewportAnchor.capture(in: textView))
+
+        let firstParagraph = (textView.string as NSString).paragraphRange(
+            for: NSRange(location: 0, length: 0)
+        )
+        let style = NSMutableParagraphStyle()
+        style.paragraphSpacing = 500
+        textView.textStorage?.addAttribute(.paragraphStyle, value: style, range: firstParagraph)
+        layoutManager.ensureLayout(for: textContainer)
+
+        anchor.restore(in: textView)
+
+        XCTAssertEqual(
+            scrollView.contentView.bounds.origin.y,
+            maximumScrollOriginY(
+                for: textView,
+                in: scrollView,
+                layoutManager: layoutManager,
+                textContainer: textContainer
+            ),
+            accuracy: 1
+        )
+    }
+
+    @MainActor
+    func testEndCaretRestoresAfterDeferredDocumentViewGrowth() async throws {
+        let scrollView = NSTextView.scrollableTextView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 640, height: 320)
+        let textView = try XCTUnwrap(scrollView.documentView as? NSTextView)
+        textView.isVerticallyResizable = true
+        textView.minSize = NSSize(width: 0, height: 320)
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.containerSize = NSSize(
+            width: 560,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.string = (0..<80).map { "Line \($0)" }.joined(separator: "\n")
+        let textContainer = try XCTUnwrap(textView.textContainer)
+        let layoutManager = try XCTUnwrap(textView.layoutManager)
+        layoutManager.ensureLayout(for: textContainer)
+
+        let caret = (textView.string as NSString).length
+        textView.setSelectedRange(NSRange(location: caret, length: 0))
+        textView.scrollRangeToVisible(textView.selectedRange())
+        let anchor = try XCTUnwrap(EditorViewportAnchor.capture(in: textView))
+
+        anchor.restoreAfterPendingLayout(in: textView)
+        textView.frame.size.height += 500
+
+        let deferredRestoreFinished = expectation(description: "Deferred bottom restore")
+        DispatchQueue.main.async {
+            deferredRestoreFinished.fulfill()
+        }
+        await fulfillment(of: [deferredRestoreFinished], timeout: 1)
+
+        XCTAssertEqual(
+            scrollView.contentView.bounds.origin.y,
+            maximumScrollOriginY(
+                for: textView,
+                in: scrollView,
+                layoutManager: layoutManager,
+                textContainer: textContainer
+            ),
+            accuracy: 1
+        )
+    }
+
+    @MainActor
+    func testRefreshDoesNotRenderOffscreenLinksOrRewriteUnchangedSpacing() throws {
+        let scrollView = NSTextView.scrollableTextView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 640, height: 320)
+        let textView = try XCTUnwrap(scrollView.documentView as? NSTextView)
+        textView.isVerticallyResizable = true
+        textView.minSize = NSSize(width: 0, height: 320)
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.containerSize = NSSize(
+            width: 560,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.string = (0..<200).map { "Plain line \($0)" }.joined(separator: "\n")
+            + "\nhttps://youtu.be/AVEZBy1uAk8\nAfter link\nEnd"
+        let controller = EditorLinkPreviewController()
+
+        XCTAssertEqual(controller.refresh(in: textView, openURL: { _ in }), 1)
+        XCTAssertEqual(controller.visibleCardCount, 0)
+        XCTAssertEqual(controller.refresh(in: textView, openURL: { _ in }), 0)
+        XCTAssertEqual(controller.visibleCardCount, 0)
+
+        let documentEnd = (textView.string as NSString).length
+        textView.layoutManager?.ensureLayout(
+            forCharacterRange: NSRange(location: documentEnd - 1, length: 1)
+        )
+        textView.setSelectedRange(NSRange(location: documentEnd, length: 0))
+        let textContainer = try XCTUnwrap(textView.textContainer)
+        let layoutManager = try XCTUnwrap(textView.layoutManager)
+        scrollView.contentView.scroll(
+            to: CGPoint(
+                x: 0,
+                y: maximumScrollOriginY(
+                    for: textView,
+                    in: scrollView,
+                    layoutManager: layoutManager,
+                    textContainer: textContainer
+                )
+            )
+        )
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        controller.layoutCards(in: textView)
+        XCTAssertEqual(controller.visibleCardCount, 1)
+        XCTAssertEqual(controller.retainedCardCount, 1)
+
+        scrollView.contentView.scroll(to: .zero)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        controller.layoutCards(in: textView)
+        XCTAssertEqual(controller.visibleCardCount, 0)
+        XCTAssertEqual(controller.retainedCardCount, 1)
+
+        scrollView.contentView.scroll(
+            to: CGPoint(
+                x: 0,
+                y: maximumScrollOriginY(
+                    for: textView,
+                    in: scrollView,
+                    layoutManager: layoutManager,
+                    textContainer: textContainer
+                )
+            )
+        )
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        controller.layoutCards(in: textView)
+        XCTAssertEqual(controller.visibleCardCount, 1)
+        XCTAssertEqual(controller.retainedCardCount, 1)
+    }
+
+    @MainActor
+    func testEmbedCachePersistsXHeightAndSnapshotAcrossInstances() throws {
+        let suiteName = "EditorLinkPreviewTests.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let snapshotDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            userDefaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: snapshotDirectory)
+        }
+
+        let firstCache = EditorEmbedCache(
+            userDefaults: userDefaults,
+            heightStorageKey: "heights",
+            snapshotDirectoryURL: snapshotDirectory
+        )
+        firstCache.saveXHeight(438, for: "2031783721397809397")
+
+        let representation = try XCTUnwrap(
+            NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: 8,
+                pixelsHigh: 8,
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: 0,
+                bitsPerPixel: 0
+            )
+        )
+        let image = NSImage(size: NSSize(width: 8, height: 8))
+        image.addRepresentation(representation)
+        firstCache.saveSnapshot(image, for: "x-2031783721397809397-dark")
+
+        let restoredCache = EditorEmbedCache(
+            userDefaults: userDefaults,
+            heightStorageKey: "heights",
+            snapshotDirectoryURL: snapshotDirectory
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(restoredCache.xHeight(for: "2031783721397809397")),
+            438,
+            accuracy: 0.5
+        )
+        XCTAssertNotNil(restoredCache.snapshot(for: "x-2031783721397809397-dark"))
+    }
+
+    @MainActor
+    func testRefreshUsesPersistedXHeightBeforeRenderingOffscreenEmbed() throws {
+        let suiteName = "EditorLinkPreviewTests.\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let snapshotDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            userDefaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: snapshotDirectory)
+        }
+        let cache = EditorEmbedCache(
+            userDefaults: userDefaults,
+            heightStorageKey: "heights",
+            snapshotDirectoryURL: snapshotDirectory
+        )
+        cache.saveXHeight(438, for: "2031783721397809397")
+
+        let scrollView = NSTextView.scrollableTextView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 640, height: 320)
+        let textView = try XCTUnwrap(scrollView.documentView as? NSTextView)
+        textView.isVerticallyResizable = true
+        textView.minSize = NSSize(width: 0, height: 320)
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.containerSize = NSSize(
+            width: 560,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.string = (0..<200).map { "Plain line \($0)" }.joined(separator: "\n")
+            + "\nhttps://x.com/tishray/status/2031783721397809397\nEnd"
+
+        let controller = EditorLinkPreviewController(embedCache: cache)
+        XCTAssertEqual(controller.refresh(in: textView, openURL: { _ in }), 1)
+        XCTAssertEqual(controller.visibleCardCount, 0)
+
+        let linkRange = (textView.string as NSString).range(
+            of: "https://x.com/tishray/status/2031783721397809397"
+        )
+        let paragraphStyle = try XCTUnwrap(
+            textView.textStorage?.attribute(
+                .paragraphStyle,
+                at: linkRange.location,
+                effectiveRange: nil
+            ) as? NSParagraphStyle
+        )
+        XCTAssertEqual(paragraphStyle.paragraphSpacing, 448, accuracy: 0.5)
+    }
+
     func testRecognizesBareXStatusAndYouTubeLinks() {
         let previews = EditorLinkPreviewDetector.previews(in: """
         https://x.com/tishray/status/2031783721397809397
@@ -184,5 +460,20 @@ final class EditorLinkPreviewTests: XCTestCase {
         XCTAssertEqual(query["autoplay"], "0")
         XCTAssertEqual(query["controls"], "1")
         XCTAssertEqual(query["start"], "611")
+    }
+
+    @MainActor
+    private func maximumScrollOriginY(
+        for textView: NSTextView,
+        in scrollView: NSScrollView,
+        layoutManager: NSLayoutManager,
+        textContainer: NSTextContainer
+    ) -> CGFloat {
+        layoutManager.ensureLayout(for: textContainer)
+        let documentHeight = max(
+            textView.frame.height,
+            layoutManager.usedRect(for: textContainer).maxY + textView.textContainerInset.height
+        )
+        return max(0, documentHeight - scrollView.contentView.bounds.height)
     }
 }

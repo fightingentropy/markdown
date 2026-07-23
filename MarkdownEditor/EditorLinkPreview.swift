@@ -12,6 +12,165 @@ private final class ScrollWheelMonitorToken: @unchecked Sendable {
     }
 }
 
+@MainActor
+final class EditorEmbedCache {
+    static let shared = EditorEmbedCache()
+
+    private let userDefaults: UserDefaults
+    private let heightStorageKey: String
+    private let snapshotDirectoryURL: URL
+    private let imageCache = NSCache<NSString, NSImage>()
+
+    init(
+        userDefaults: UserDefaults = .standard,
+        heightStorageKey: String = "editorEmbedCache.xHeights",
+        snapshotDirectoryURL: URL? = nil
+    ) {
+        self.userDefaults = userDefaults
+        self.heightStorageKey = heightStorageKey
+        let baseURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        self.snapshotDirectoryURL = snapshotDirectoryURL
+            ?? baseURL
+                .appendingPathComponent("Markdown", isDirectory: true)
+                .appendingPathComponent("EmbedSnapshots", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: self.snapshotDirectoryURL,
+            withIntermediateDirectories: true
+        )
+        imageCache.countLimit = 24
+    }
+
+    func xHeight(for statusID: String) -> CGFloat? {
+        guard let value = storedXHeights()[statusID],
+              value.isFinite,
+              value > 0 else {
+            return nil
+        }
+        return CGFloat(value)
+    }
+
+    func saveXHeight(_ height: CGFloat, for statusID: String) {
+        guard height.isFinite, height > 0 else { return }
+        var heights = storedXHeights()
+        heights[statusID] = Double(height)
+        userDefaults.set(heights, forKey: heightStorageKey)
+    }
+
+    func snapshot(for key: String) -> NSImage? {
+        let cacheKey = key as NSString
+        if let image = imageCache.object(forKey: cacheKey) {
+            return image
+        }
+        guard let image = NSImage(contentsOf: snapshotURL(for: key)) else {
+            return nil
+        }
+        imageCache.setObject(image, forKey: cacheKey)
+        return image
+    }
+
+    func saveSnapshot(_ image: NSImage, for key: String) {
+        guard let tiffData = image.tiffRepresentation,
+              let representation = NSBitmapImageRep(data: tiffData),
+              let pngData = representation.representation(using: .png, properties: [:]) else {
+            return
+        }
+        try? FileManager.default.createDirectory(
+            at: snapshotDirectoryURL,
+            withIntermediateDirectories: true
+        )
+        try? pngData.write(to: snapshotURL(for: key), options: .atomic)
+        imageCache.setObject(image, forKey: key as NSString)
+    }
+
+    private func storedXHeights() -> [String: Double] {
+        userDefaults.dictionary(forKey: heightStorageKey)?.reduce(into: [:]) { result, item in
+            if let value = item.value as? NSNumber {
+                result[item.key] = value.doubleValue
+            }
+        } ?? [:]
+    }
+
+    private func snapshotURL(for key: String) -> URL {
+        let allowedCharacters = CharacterSet.alphanumerics.union(
+            CharacterSet(charactersIn: "-_")
+        )
+        let safeKey = key.addingPercentEncoding(withAllowedCharacters: allowedCharacters) ?? key
+        return snapshotDirectoryURL.appendingPathComponent("\(safeKey).png")
+    }
+}
+
+@MainActor
+final class CachedEmbedWebView: NSView {
+    let webView: WKWebView
+
+    private let snapshotView = NSImageView()
+    private var representedSnapshotKey: String?
+    private var completedSnapshotKey: String?
+    private var snapshotIsPending = false
+    private var snapshotWaitingForLayoutKey: String?
+
+    init(webView: WKWebView) {
+        self.webView = webView
+        super.init(frame: .zero)
+
+        addSubview(webView)
+        snapshotView.imageScaling = .scaleAxesIndependently
+        snapshotView.isHidden = true
+        snapshotView.setAccessibilityElement(false)
+        addSubview(snapshotView, positioned: .above, relativeTo: webView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        webView.frame = bounds
+        snapshotView.frame = bounds
+        if let snapshotWaitingForLayoutKey, bounds.width > 1, bounds.height > 1 {
+            self.snapshotWaitingForLayoutKey = nil
+            finishLoading(snapshotKey: snapshotWaitingForLayoutKey)
+        }
+    }
+
+    func prepare(snapshotKey: String) {
+        guard representedSnapshotKey != snapshotKey else { return }
+        representedSnapshotKey = snapshotKey
+        completedSnapshotKey = nil
+        snapshotIsPending = false
+        snapshotWaitingForLayoutKey = nil
+        snapshotView.image = EditorEmbedCache.shared.snapshot(for: snapshotKey)
+        snapshotView.isHidden = snapshotView.image == nil
+    }
+
+    func finishLoading(snapshotKey: String) {
+        guard representedSnapshotKey == snapshotKey,
+              completedSnapshotKey != snapshotKey,
+              !snapshotIsPending else {
+            return
+        }
+        guard bounds.width > 1, bounds.height > 1 else {
+            snapshotWaitingForLayoutKey = snapshotKey
+            return
+        }
+
+        snapshotWaitingForLayoutKey = nil
+        snapshotIsPending = true
+        webView.takeSnapshot(with: nil) { [weak self] image, _ in
+            guard let self, self.representedSnapshotKey == snapshotKey else { return }
+            self.snapshotIsPending = false
+            self.completedSnapshotKey = snapshotKey
+            if let image {
+                EditorEmbedCache.shared.saveSnapshot(image, for: snapshotKey)
+            }
+            self.snapshotView.isHidden = true
+        }
+    }
+}
+
 enum EditorLinkPreviewKind: Equatable {
     case xPost(username: String, statusID: String)
     case youtube(videoID: String)
@@ -265,8 +424,12 @@ enum EditorLinkPreviewDetector {
 /// restored exactly.
 @MainActor
 struct EditorViewportAnchor {
-    private let characterLocation: Int
-    private let verticalOffset: CGFloat
+    private enum VerticalPosition {
+        case line(characterLocation: Int, offset: CGFloat)
+        case documentBottom
+    }
+
+    private let verticalPosition: VerticalPosition
     private let horizontalOrigin: CGFloat
 
     static func capture(in textView: NSTextView) -> EditorViewportAnchor? {
@@ -276,10 +439,16 @@ struct EditorViewportAnchor {
             return nil
         }
 
-        layoutManager.ensureLayout(for: textContainer)
         let visibleRect = scrollView.contentView.bounds
         let textLength = textView.textStorage?.length ?? 0
-        let selectionLocation = min(NSMaxRange(textView.selectedRange()), textLength)
+        let selection = textView.selectedRange()
+        let selectionLocation = min(NSMaxRange(selection), textLength)
+        ensureLayout(
+            at: selectionLocation,
+            in: textView,
+            layoutManager: layoutManager,
+            textContainer: textContainer
+        )
 
         let anchorLocation: Int
         let anchorFrame: NSRect
@@ -317,9 +486,19 @@ struct EditorViewportAnchor {
             anchorFrame = visibleLineFrame
         }
 
+        let isVisibleCaretAtDocumentEnd =
+            selection.length == 0
+            && selection.location == textLength
+            && anchorLocation == selectionLocation
+            && anchorFrame.intersects(visibleRect)
+
         return EditorViewportAnchor(
-            characterLocation: anchorLocation,
-            verticalOffset: anchorFrame.minY - visibleRect.minY,
+            verticalPosition: isVisibleCaretAtDocumentEnd
+                ? .documentBottom
+                : .line(
+                    characterLocation: anchorLocation,
+                    offset: anchorFrame.minY - visibleRect.minY
+                ),
             horizontalOrigin: visibleRect.minX
         )
     }
@@ -331,31 +510,101 @@ struct EditorViewportAnchor {
             return
         }
 
-        layoutManager.ensureLayout(for: textContainer)
         let textLength = textView.textStorage?.length ?? 0
-        guard let anchorFrame = Self.lineFrame(
-            at: min(characterLocation, textLength),
-            in: textView,
-            layoutManager: layoutManager,
-            textContainer: textContainer
-        ) else {
-            return
+        let contentView = scrollView.contentView
+        let desiredY: CGFloat
+
+        switch verticalPosition {
+        case .documentBottom:
+            Self.ensureLayout(
+                at: textLength,
+                in: textView,
+                layoutManager: layoutManager,
+                textContainer: textContainer
+            )
+            desiredY = Self.documentHeight(
+                for: textView,
+                layoutManager: layoutManager,
+                textContainer: textContainer
+            ) - contentView.bounds.height
+
+        case .line(let characterLocation, let verticalOffset):
+            Self.ensureLayout(
+                at: min(characterLocation, textLength),
+                in: textView,
+                layoutManager: layoutManager,
+                textContainer: textContainer
+            )
+            guard let anchorFrame = Self.lineFrame(
+                at: min(characterLocation, textLength),
+                in: textView,
+                layoutManager: layoutManager,
+                textContainer: textContainer
+            ) else {
+                return
+            }
+            desiredY = anchorFrame.minY - verticalOffset
         }
 
-        let contentView = scrollView.contentView
-        let documentHeight = max(
-            textView.frame.height,
-            layoutManager.usedRect(for: textContainer).maxY + textView.textContainerInset.height
+        let documentHeight = Self.documentHeight(
+            for: textView,
+            layoutManager: layoutManager,
+            textContainer: textContainer
         )
         let maxX = max(0, textView.frame.width - contentView.bounds.width)
         let maxY = max(0, documentHeight - contentView.bounds.height)
         let origin = CGPoint(
             x: min(max(horizontalOrigin, 0), maxX),
-            y: min(max(anchorFrame.minY - verticalOffset, 0), maxY)
+            y: min(max(desiredY, 0), maxY)
         )
 
         contentView.scroll(to: origin)
         scrollView.reflectScrolledClipView(contentView)
+    }
+
+    /// `NSTextView` updates its document-view height one run-loop after some
+    /// paragraph-spacing changes. An end caret needs one final bottom restore
+    /// after that resize; otherwise the newly measured tail embed can leave the
+    /// caret just below the viewport.
+    func restoreAfterPendingLayout(in textView: NSTextView) {
+        restore(in: textView)
+        guard case .documentBottom = verticalPosition else { return }
+
+        DispatchQueue.main.async { [weak textView] in
+            guard let textView else { return }
+            restore(in: textView)
+        }
+    }
+
+    private static func ensureLayout(
+        at characterLocation: Int,
+        in textView: NSTextView,
+        layoutManager: NSLayoutManager,
+        textContainer: NSTextContainer
+    ) {
+        let textLength = textView.textStorage?.length ?? 0
+        guard textLength > 0 else {
+            layoutManager.ensureLayout(forBoundingRect: .zero, in: textContainer)
+            return
+        }
+
+        layoutManager.ensureLayout(
+            forCharacterRange: NSRange(
+                location: min(characterLocation, textLength - 1),
+                length: 1
+            )
+        )
+    }
+
+    private static func documentHeight(
+        for textView: NSTextView,
+        layoutManager: NSLayoutManager,
+        textContainer: NSTextContainer
+    ) -> CGFloat {
+        max(
+            textView.frame.height,
+            layoutManager.usedRect(for: textContainer).maxY + textView.textContainerInset.height
+        )
     }
 
     private static func lineFrame(
@@ -406,17 +655,33 @@ final class EditorLinkPreviewController {
     private static let cardTopSpacing: CGFloat = 2
     private static let youtubeCardWidth: CGFloat = 640
     private static let xCardWidth: CGFloat = 550
-    private static let verticalPreloadMargin: CGFloat = 1_200
-    private static let maximumRetainedCardCount = 16
 
+    private let embedCache: EditorEmbedCache
+    private let retainedOffscreenCardLimit: Int
     private var previews: [EditorLinkPreview] = []
     private var cardViews: [String: NSHostingView<EditorLinkPreviewCard>] = [:]
+    private var attachedCardIDs: Set<String> = []
+    private var cardAccessOrder: [String] = []
     private var measuredXCardHeights: [String: CGFloat] = [:]
     private var hoveredPreviewIDs: Set<String> = []
-    private var cardAccessOrder: [String: UInt64] = [:]
-    private var accessCounter: UInt64 = 0
     private var scrollWheelMonitor: ScrollWheelMonitorToken?
     private var openURLHandler: ((URL) -> Void)?
+
+    var visibleCardCount: Int {
+        attachedCardIDs.count
+    }
+
+    var retainedCardCount: Int {
+        cardViews.count
+    }
+
+    init(
+        embedCache: EditorEmbedCache = .shared,
+        retainedOffscreenCardLimit: Int = 6
+    ) {
+        self.embedCache = embedCache
+        self.retainedOffscreenCardLimit = max(0, retainedOffscreenCardLimit)
+    }
 
     deinit {
         if let scrollWheelMonitor {
@@ -424,22 +689,26 @@ final class EditorLinkPreviewController {
         }
     }
 
+    @discardableResult
     func refresh(
         in textView: NSTextView,
         openURL: @escaping (URL) -> Void
-    ) {
+    ) -> Int {
         let viewportAnchor = EditorViewportAnchor.capture(in: textView)
         installScrollWheelForwarding(in: textView)
         clearSourcePresentation(in: textView)
         previews = EditorLinkPreviewDetector.previews(in: textView.string)
         openURLHandler = openURL
         let activeIDs = Set(previews.map(\.id))
+        pruneInactiveCards(activeIDs: activeIDs)
         measuredXCardHeights = measuredXCardHeights.filter { activeIDs.contains($0.key) }
+        restoreCachedXHeights()
         hoveredPreviewIDs.formIntersection(activeIDs)
-        applyReservedSpacing(in: textView)
+        let spacingUpdateCount = applyReservedSpacing(in: textView)
         updateSourcePresentation(in: textView)
-        viewportAnchor?.restore(in: textView)
+        viewportAnchor?.restoreAfterPendingLayout(in: textView)
         layoutCards(in: textView)
+        return spacingUpdateCount
     }
 
     func selectionDidChange(in textView: NSTextView) {
@@ -452,23 +721,37 @@ final class EditorLinkPreviewController {
             return
         }
 
-        layoutManager.ensureLayout(for: textContainer)
         let containerOrigin = textView.textContainerOrigin
         let availableWidth = max(0, textContainer.containerSize.width)
-        let preloadRect = textView.visibleRect.insetBy(
-            dx: 0,
-            dy: -Self.verticalPreloadMargin
+        let visibleRect = textView.visibleRect
+        let maximumCardFootprint =
+            Self.maximumXCardHeight + Self.cardTopSpacing + 8
+        let candidateRect = NSRect(
+            x: 0,
+            y: max(0, visibleRect.minY - containerOrigin.y - maximumCardFootprint),
+            width: availableWidth,
+            height: visibleRect.height + maximumCardFootprint
         )
-        let visiblePreviews = previews.filter { preview in
-            frame(
+        layoutManager.ensureLayout(forBoundingRect: candidateRect, in: textContainer)
+        let candidateGlyphRange = layoutManager.glyphRange(
+            forBoundingRect: candidateRect,
+            in: textContainer
+        )
+        let candidateCharacterRange = layoutManager.characterRange(
+            forGlyphRange: candidateGlyphRange,
+            actualGlyphRange: nil
+        )
+        let visiblePreviews = Array(previews.lazy.filter { preview in
+            NSIntersectionRange(preview.paragraphRange, candidateCharacterRange).length > 0
+        }.filter { preview in
+            self.frame(
                 for: preview,
                 layoutManager: layoutManager,
                 containerOrigin: containerOrigin,
                 availableWidth: availableWidth
-            )?.intersects(preloadRect) == true
-        }
+            )?.intersects(visibleRect) == true
+        })
 
-        cardViews.values.forEach { $0.isHidden = true }
         synchronizeCards(for: visiblePreviews, in: textView)
 
         for preview in visiblePreviews {
@@ -482,7 +765,6 @@ final class EditorLinkPreviewController {
                 continue
             }
             card.frame = cardFrame
-            card.isHidden = false
         }
     }
 
@@ -493,10 +775,10 @@ final class EditorLinkPreviewController {
         }
         cardViews.values.forEach { $0.removeFromSuperview() }
         cardViews.removeAll()
+        attachedCardIDs.removeAll()
+        cardAccessOrder.removeAll()
         measuredXCardHeights.removeAll()
         hoveredPreviewIDs.removeAll()
-        cardAccessOrder.removeAll()
-        accessCounter = 0
         openURLHandler = nil
         previews.removeAll()
     }
@@ -514,8 +796,9 @@ final class EditorLinkPreviewController {
             }
 
             let point = textView.convert(event.locationInWindow, from: nil)
-            let isOverEmbed = self.cardViews.values.contains { card in
-                !card.isHiddenOrHasHiddenAncestor && card.frame.contains(point)
+            let isOverEmbed = self.attachedCardIDs.contains { id in
+                guard let card = self.cardViews[id] else { return false }
+                return !card.isHiddenOrHasHiddenAncestor && card.frame.contains(point)
             }
             guard isOverEmbed else { return event }
 
@@ -525,14 +808,15 @@ final class EditorLinkPreviewController {
         scrollWheelMonitor = ScrollWheelMonitorToken(monitor)
     }
 
-    private func applyReservedSpacing(in textView: NSTextView) {
-        guard let storage = textView.textStorage, storage.length > 0 else { return }
+    @discardableResult
+    private func applyReservedSpacing(in textView: NSTextView) -> Int {
+        guard let storage = textView.textStorage, storage.length > 0 else { return 0 }
         let availableWidth = max(
             0,
             textView.textContainer?.containerSize.width ?? Self.youtubeCardWidth
         )
 
-        storage.beginEditing()
+        var updates: [(range: NSRange, style: NSMutableParagraphStyle)] = []
         for preview in previews {
             guard preview.paragraphRange.length > 0,
                   NSMaxRange(preview.paragraphRange) <= storage.length else {
@@ -543,12 +827,25 @@ final class EditorLinkPreviewController {
                 at: preview.paragraphRange.location,
                 effectiveRange: nil
             ) as? NSParagraphStyle
-            let style = (current?.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
-            style.paragraphSpacing =
+            let desiredSpacing =
                 height(for: preview, availableWidth: availableWidth) + Self.cardTopSpacing + 8
-            storage.addAttribute(.paragraphStyle, value: style, range: preview.paragraphRange)
+            guard abs((current?.paragraphSpacing ?? 0) - desiredSpacing) > 0.5 else {
+                continue
+            }
+
+            let style = (current?.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+            style.paragraphSpacing = desiredSpacing
+            updates.append((preview.paragraphRange, style))
+        }
+
+        guard !updates.isEmpty else { return 0 }
+
+        storage.beginEditing()
+        for update in updates {
+            storage.addAttribute(.paragraphStyle, value: update.style, range: update.range)
         }
         storage.endEditing()
+        return updates.count
     }
 
     private func synchronizeCards(
@@ -556,17 +853,14 @@ final class EditorLinkPreviewController {
         in textView: NSTextView
     ) {
         guard let openURL = openURLHandler else { return }
-        let activeIDs = Set(previews.map(\.id))
         let visibleIDs = Set(visiblePreviews.map(\.id))
-        let staleIDs = cardViews.keys.filter { !activeIDs.contains($0) }
-        for id in staleIDs {
-            cardViews.removeValue(forKey: id)?.removeFromSuperview()
-            cardAccessOrder.removeValue(forKey: id)
+        let offscreenIDs = attachedCardIDs.filter { !visibleIDs.contains($0) }
+        for id in offscreenIDs {
+            cardViews[id]?.removeFromSuperview()
+            attachedCardIDs.remove(id)
         }
 
         for preview in visiblePreviews {
-            accessCounter &+= 1
-            cardAccessOrder[preview.id] = accessCounter
             let card = EditorLinkPreviewCard(
                 preview: preview,
                 openURL: openURL,
@@ -585,24 +879,55 @@ final class EditorLinkPreviewController {
             )
             if let existing = cardViews[preview.id] {
                 existing.rootView = card
+                if existing.superview !== textView {
+                    textView.addSubview(existing)
+                }
             } else {
                 let hostingView = NSHostingView(rootView: card)
                 hostingView.wantsLayer = true
                 textView.addSubview(hostingView)
                 cardViews[preview.id] = hostingView
             }
+            attachedCardIDs.insert(preview.id)
+            markCardRecentlyUsed(preview.id)
         }
+        trimRetainedOffscreenCards()
+    }
 
-        let overflow = max(0, cardViews.count - Self.maximumRetainedCardCount)
-        if overflow > 0 {
-            let evictionIDs = cardViews.keys
-                .filter { !visibleIDs.contains($0) }
-                .sorted { cardAccessOrder[$0, default: 0] < cardAccessOrder[$1, default: 0] }
-                .prefix(overflow)
-            for id in evictionIDs {
-                cardViews.removeValue(forKey: id)?.removeFromSuperview()
-                cardAccessOrder.removeValue(forKey: id)
+    private func pruneInactiveCards(activeIDs: Set<String>) {
+        let inactiveIDs = cardViews.keys.filter { !activeIDs.contains($0) }
+        for id in inactiveIDs {
+            cardViews.removeValue(forKey: id)?.removeFromSuperview()
+            attachedCardIDs.remove(id)
+        }
+        cardAccessOrder.removeAll { !activeIDs.contains($0) }
+    }
+
+    private func markCardRecentlyUsed(_ id: String) {
+        cardAccessOrder.removeAll { $0 == id }
+        cardAccessOrder.append(id)
+    }
+
+    private func trimRetainedOffscreenCards() {
+        let detachedIDs = cardAccessOrder.filter { !attachedCardIDs.contains($0) }
+        let removalCount = max(0, detachedIDs.count - retainedOffscreenCardLimit)
+        for id in detachedIDs.prefix(removalCount) {
+            cardViews.removeValue(forKey: id)?.removeFromSuperview()
+            cardAccessOrder.removeAll { $0 == id }
+        }
+    }
+
+    private func restoreCachedXHeights() {
+        for preview in previews {
+            guard measuredXCardHeights[preview.id] == nil,
+                  case .xPost(_, let statusID) = preview.kind,
+                  let cachedHeight = embedCache.xHeight(for: statusID) else {
+                continue
             }
+            measuredXCardHeights[preview.id] = min(
+                Self.maximumXCardHeight,
+                max(Self.initialXCardHeight, cachedHeight)
+            )
         }
     }
 
@@ -728,8 +1053,11 @@ final class EditorLinkPreviewController {
 
         let viewportAnchor = EditorViewportAnchor.capture(in: textView)
         measuredXCardHeights[preview.id] = height
+        if case .xPost(_, let statusID) = preview.kind {
+            embedCache.saveXHeight(height, for: statusID)
+        }
         applyReservedSpacing(in: textView)
-        viewportAnchor?.restore(in: textView)
+        viewportAnchor?.restoreAfterPendingLayout(in: textView)
         layoutCards(in: textView)
     }
 }
@@ -783,7 +1111,7 @@ struct YouTubeEmbedView: NSViewRepresentable {
         Coordinator(openURL: openURL)
     }
 
-    func makeNSView(context: Context) -> WKWebView {
+    func makeNSView(context: Context) -> CachedEmbedWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
 
@@ -792,16 +1120,19 @@ struct YouTubeEmbedView: NSViewRepresentable {
         webView.allowsMagnification = false
         webView.setValue(false, forKey: "drawsBackground")
         webView.setAccessibilityLabel("YouTube video player")
-        loadVideo(in: webView, coordinator: context.coordinator)
-        return webView
+        let container = CachedEmbedWebView(webView: webView)
+        context.coordinator.container = container
+        loadVideo(in: container, coordinator: context.coordinator)
+        return container
     }
 
-    func updateNSView(_ webView: WKWebView, context: Context) {
+    func updateNSView(_ container: CachedEmbedWebView, context: Context) {
         context.coordinator.openURL = openURL
-        loadVideo(in: webView, coordinator: context.coordinator)
+        context.coordinator.container = container
+        loadVideo(in: container, coordinator: context.coordinator)
     }
 
-    private func loadVideo(in webView: WKWebView, coordinator: Coordinator) {
+    private func loadVideo(in container: CachedEmbedWebView, coordinator: Coordinator) {
         guard let embedURL = YouTubeEmbedURL.url(
             videoID: videoID,
             startSeconds: startSeconds
@@ -809,21 +1140,31 @@ struct YouTubeEmbedView: NSViewRepresentable {
             return
         }
         let signature = embedURL.absoluteString
+        let snapshotKey = "youtube-\(videoID)-\(startSeconds ?? 0)"
+        container.prepare(snapshotKey: snapshotKey)
+        coordinator.snapshotKey = snapshotKey
         guard coordinator.loadedSignature != signature else { return }
 
         coordinator.loadedSignature = signature
         var request = URLRequest(url: embedURL)
         request.setValue("https://markdown.local/", forHTTPHeaderField: "Referer")
-        webView.load(request)
+        container.webView.load(request)
     }
 
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate {
         var openURL: (URL) -> Void
         var loadedSignature: String?
+        var snapshotKey: String?
+        weak var container: CachedEmbedWebView?
 
         init(openURL: @escaping (URL) -> Void) {
             self.openURL = openURL
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
+            guard let snapshotKey else { return }
+            container?.finishLoading(snapshotKey: snapshotKey)
         }
 
         func webView(
@@ -882,7 +1223,7 @@ struct XPostEmbedView: NSViewRepresentable {
         Coordinator(openURL: openURL, heightChanged: heightChanged)
     }
 
-    func makeNSView(context: Context) -> WKWebView {
+    func makeNSView(context: Context) -> CachedEmbedWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.userContentController.add(context.coordinator, name: xEmbedHeightMessageName)
@@ -892,19 +1233,25 @@ struct XPostEmbedView: NSViewRepresentable {
         webView.allowsMagnification = false
         webView.setValue(false, forKey: "drawsBackground")
         webView.setAccessibilityLabel("Embedded X post by @\(username)")
-        loadPost(in: webView, coordinator: context.coordinator)
-        return webView
+        let container = CachedEmbedWebView(webView: webView)
+        context.coordinator.container = container
+        loadPost(in: container, coordinator: context.coordinator)
+        return container
     }
 
-    func updateNSView(_ webView: WKWebView, context: Context) {
+    func updateNSView(_ container: CachedEmbedWebView, context: Context) {
         context.coordinator.openURL = openURL
         context.coordinator.heightChanged = heightChanged
-        loadPost(in: webView, coordinator: context.coordinator)
+        context.coordinator.container = container
+        loadPost(in: container, coordinator: context.coordinator)
     }
 
-    private func loadPost(in webView: WKWebView, coordinator: Coordinator) {
+    private func loadPost(in container: CachedEmbedWebView, coordinator: Coordinator) {
         let theme = colorScheme == .dark ? "dark" : "light"
         let signature = "\(statusID):\(theme)"
+        let snapshotKey = "x-\(statusID)-\(theme)"
+        container.prepare(snapshotKey: snapshotKey)
+        coordinator.snapshotKey = snapshotKey
         guard coordinator.loadedSignature != signature else { return }
 
         coordinator.loadedSignature = signature
@@ -914,7 +1261,7 @@ struct XPostEmbedView: NSViewRepresentable {
             statusID: statusID,
             theme: theme
         )
-        webView.loadHTMLString(html, baseURL: URL(string: "https://platform.x.com"))
+        container.webView.loadHTMLString(html, baseURL: URL(string: "https://platform.x.com"))
     }
 
     @MainActor
@@ -922,6 +1269,8 @@ struct XPostEmbedView: NSViewRepresentable {
         var openURL: (URL) -> Void
         var heightChanged: (CGFloat) -> Void
         var loadedSignature: String?
+        var snapshotKey: String?
+        weak var container: CachedEmbedWebView?
 
         init(openURL: @escaping (URL) -> Void, heightChanged: @escaping (CGFloat) -> Void) {
             self.openURL = openURL
@@ -932,11 +1281,20 @@ struct XPostEmbedView: NSViewRepresentable {
             _ userContentController: WKUserContentController,
             didReceive message: WKScriptMessage
         ) {
-            guard message.name == xEmbedHeightMessageName,
-                  let height = message.body as? NSNumber else {
+            guard message.name == xEmbedHeightMessageName else {
                 return
             }
-            heightChanged(CGFloat(truncating: height))
+            if let payload = message.body as? [String: Any],
+               let height = payload["height"] as? NSNumber {
+                if payload["ready"] as? Bool == true {
+                    heightChanged(CGFloat(truncating: height))
+                }
+                if payload["ready"] as? Bool == true, let snapshotKey {
+                    container?.finishLoading(snapshotKey: snapshotKey)
+                }
+            } else if let height = message.body as? NSNumber {
+                heightChanged(CGFloat(truncating: height))
+            }
         }
 
         func webView(
@@ -996,7 +1354,12 @@ enum XPostEmbedHTML {
             function reportHeight() {
               const frame = document.querySelector('#tweet iframe');
               const height = frame ? frame.getBoundingClientRect().height : document.documentElement.scrollHeight;
-              if (height > 0) window.webkit.messageHandlers.\(xEmbedHeightMessageName).postMessage(Math.ceil(height));
+              if (height > 0) {
+                window.webkit.messageHandlers.\(xEmbedHeightMessageName).postMessage({
+                  height: Math.ceil(height),
+                  ready: Boolean(frame)
+                });
+              }
             }
             new ResizeObserver(reportHeight).observe(document.body);
             setTimeout(reportHeight, 250);
