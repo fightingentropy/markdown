@@ -463,7 +463,7 @@ private enum VaultRelativePath {
     }
 }
 
-private enum ExclusiveAtomicFileWriter {
+enum ExclusiveAtomicFileWriter {
     /// Writes a complete temporary file, flushes it, then atomically links it
     /// into place with RENAME_EXCL. Unlike a check-then-write sequence, this
     /// cannot replace a Daily Note created by another process in the interim.

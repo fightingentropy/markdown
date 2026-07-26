@@ -19,12 +19,14 @@ enum VaultLinkRefactor {
         moving oldRoot: URL,
         to newRoot: URL,
         sourceIsDirectory: Bool,
-        vaultURL: URL
+        vaultURL: URL,
+        assetURLs: Set<URL> = []
     ) -> [VaultLinkRefactorEdit] {
         let standardizedNotes = notes.map {
             VaultLinkNoteSnapshot(url: $0.url.standardizedFileURL, body: $0.body, aliases: $0.aliases)
         }
         let noteURLs = Set(standardizedNotes.map(\.url))
+        let resolvableURLs = noteURLs.union(assetURLs.map { $0.standardizedFileURL })
         var nameLookup: [String: Set<URL>] = [:]
         for note in standardizedNotes {
             let names = [note.url.deletingPathExtension().lastPathComponent] + note.aliases
@@ -44,7 +46,7 @@ enum VaultLinkRefactor {
                 in: note.body,
                 sourceURL: note.url,
                 destinationSourceURL: destinationURL,
-                noteURLs: noteURLs,
+                resolvableURLs: resolvableURLs,
                 nameLookup: nameLookup,
                 oldRoot: oldRoot,
                 newRoot: newRoot,
@@ -57,8 +59,7 @@ enum VaultLinkRefactor {
                 destinationSourceURL: destinationURL,
                 oldRoot: oldRoot,
                 newRoot: newRoot,
-                sourceIsDirectory: sourceIsDirectory,
-                vaultURL: vaultURL
+                sourceIsDirectory: sourceIsDirectory
             )
 
             guard fullyUpdated != note.body else { return nil }
@@ -120,11 +121,37 @@ enum VaultLinkRefactor {
         return new.appendingPathComponent(suffix).standardizedFileURL
     }
 
+    /// Conditional replacement under one file-coordination accessor. This
+    /// closes the read/write race for normal iCloud and document-provider
+    /// writers, and gives rollback the same version guard.
+    static func replaceIfCurrent(
+        at url: URL,
+        expected: String,
+        replacement: String
+    ) throws -> Bool {
+        let coordinator = NSFileCoordinator()
+        var coordinationError: NSError?
+        var accessorResult: Result<Bool, Error>?
+
+        coordinator.coordinate(writingItemAt: url, options: .forReplacing, error: &coordinationError) { coordinatedURL in
+            accessorResult = Result {
+                let onDisk = try String(contentsOf: coordinatedURL, encoding: .utf8)
+                guard onDisk == expected else { return false }
+                try Data(replacement.utf8).write(to: coordinatedURL, options: .atomic)
+                return true
+            }
+        }
+
+        if let coordinationError { throw coordinationError }
+        guard let accessorResult else { throw CocoaError(.fileWriteUnknown) }
+        return try accessorResult.get()
+    }
+
     private static func rewriteWikiLinks(
         in body: String,
         sourceURL: URL,
         destinationSourceURL: URL,
-        noteURLs: Set<URL>,
+        resolvableURLs: Set<URL>,
         nameLookup: [String: Set<URL>],
         oldRoot: URL,
         newRoot: URL,
@@ -132,16 +159,17 @@ enum VaultLinkRefactor {
         vaultURL: URL
     ) -> String {
         guard let regex = try? NSRegularExpression(pattern: #"!?\[\[([^\]|#]+)"#) else { return body }
+        let searchable = MarkdownNoteLinkExtractor.maskingCodeRegions(body)
         let nsBody = body as NSString
         var replacements: [(NSRange, String)] = []
 
-        for match in regex.matches(in: body, range: NSRange(location: 0, length: nsBody.length)) {
+        for match in regex.matches(in: searchable, range: NSRange(location: 0, length: (searchable as NSString).length)) {
             let range = match.range(at: 1)
             let target = nsBody.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
             guard let resolved = resolveWikiTarget(
                 target,
                 sourceURL: sourceURL,
-                noteURLs: noteURLs,
+                resolvableURLs: resolvableURLs,
                 nameLookup: nameLookup,
                 vaultURL: vaultURL
             ), let mapped = mappedURL(
@@ -169,14 +197,14 @@ enum VaultLinkRefactor {
         destinationSourceURL: URL,
         oldRoot: URL,
         newRoot: URL,
-        sourceIsDirectory: Bool,
-        vaultURL: URL
+        sourceIsDirectory: Bool
     ) -> String {
         guard let regex = try? NSRegularExpression(pattern: #"!?\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)"#) else { return body }
+        let searchable = MarkdownNoteLinkExtractor.maskingCodeRegions(body)
         let nsBody = body as NSString
         var replacements: [(NSRange, String)] = []
 
-        for match in regex.matches(in: body, range: NSRange(location: 0, length: nsBody.length)) {
+        for match in regex.matches(in: searchable, range: NSRange(location: 0, length: (searchable as NSString).length)) {
             let range = match.range(at: 1)
             let rawTarget = nsBody.substring(with: range)
             guard URL(string: rawTarget)?.scheme == nil else { continue }
@@ -200,7 +228,7 @@ enum VaultLinkRefactor {
     private static func resolveWikiTarget(
         _ target: String,
         sourceURL: URL,
-        noteURLs: Set<URL>,
+        resolvableURLs: Set<URL>,
         nameLookup: [String: Set<URL>],
         vaultURL: URL
     ) -> URL? {
@@ -218,7 +246,7 @@ enum VaultLinkRefactor {
             }
             return [candidate]
         }.map { $0.standardizedFileURL }
-        return candidates.first { noteURLs.contains($0) }
+        return candidates.first { resolvableURLs.contains($0) }
     }
 
     private static func vaultRelativePath(
@@ -254,31 +282,5 @@ enum VaultLinkRefactor {
             mutable.replaceCharacters(in: range, with: replacement)
         }
         return mutable as String
-    }
-
-    /// Conditional replacement under one file-coordination accessor. This
-    /// closes the read/write race for normal iCloud and document-provider
-    /// writers, and gives rollback the same version guard.
-    private static func replaceIfCurrent(
-        at url: URL,
-        expected: String,
-        replacement: String
-    ) throws -> Bool {
-        let coordinator = NSFileCoordinator()
-        var coordinationError: NSError?
-        var accessorResult: Result<Bool, Error>?
-
-        coordinator.coordinate(writingItemAt: url, options: .forReplacing, error: &coordinationError) { coordinatedURL in
-            accessorResult = Result {
-                let onDisk = try String(contentsOf: coordinatedURL, encoding: .utf8)
-                guard onDisk == expected else { return false }
-                try Data(replacement.utf8).write(to: coordinatedURL, options: .atomic)
-                return true
-            }
-        }
-
-        if let coordinationError { throw coordinationError }
-        guard let accessorResult else { throw CocoaError(.fileWriteUnknown) }
-        return try accessorResult.get()
     }
 }

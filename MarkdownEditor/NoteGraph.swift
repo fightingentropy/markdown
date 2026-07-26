@@ -265,6 +265,12 @@ enum MarkdownNoteLinkExtractor {
         return (destination, displayName)
     }
 
+    /// Masks fenced and inline code with spaces of equal length so link
+    /// scanners can skip examples without shifting character ranges.
+    static func maskingCodeRegions(_ markdown: String) -> String {
+        sanitizedMarkdown(markdown)
+    }
+
     private static func sanitizedMarkdown(_ markdown: String) -> String {
         let lines = markdown.split(
             separator: "\n",

@@ -116,6 +116,17 @@ final class PreviewPipelineTests: XCTestCase {
         XCTAssertEqual(asset?.fileURL, fixture.documentImageURL)
     }
 
+    func testAssetResolverRejectsPathsOutsideVault() throws {
+        let fixture = try makeFixture()
+        let outsideURL = fixture.rootURL.appendingPathComponent("secret.png")
+        try fixturePNGData().write(to: outsideURL)
+
+        let resolver = AssetResolver(context: fixture.context)
+        XCTAssertNil(resolver.resolve(reference: outsideURL.path))
+        XCTAssertNil(resolver.resolve(reference: outsideURL.absoluteString))
+        XCTAssertNil(resolver.resolve(reference: "../../secret.png"))
+    }
+
     func testAssetResolverResolvesFileURL() throws {
         let fixture = try makeFixture()
 

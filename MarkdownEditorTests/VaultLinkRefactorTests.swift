@@ -9,11 +9,12 @@ final class VaultLinkRefactorTests: XCTestCase {
         let old = vault.appendingPathComponent("Notes/Old.md")
         let new = vault.appendingPathComponent("Archive/New.md")
         let source = vault.appendingPathComponent("Index.md")
+        let photo = vault.appendingPathComponent("Notes/photo.png")
         let notes = [
             VaultLinkNoteSnapshot(url: old, body: "# Old", aliases: []),
             VaultLinkNoteSnapshot(
                 url: source,
-                body: "[[Old]] [[Notes/Old]] [note](Notes/Old.md) ![](Notes/photo.png)",
+                body: "[[Old]] [[Notes/Old]] [note](Notes/Old.md) ![](Notes/photo.png) ![[Notes/photo.png]]",
                 aliases: []
             ),
         ]
@@ -23,7 +24,8 @@ final class VaultLinkRefactorTests: XCTestCase {
             moving: vault.appendingPathComponent("Notes", isDirectory: true),
             to: vault.appendingPathComponent("Archive", isDirectory: true),
             sourceIsDirectory: true,
-            vaultURL: vault
+            vaultURL: vault,
+            assetURLs: [photo]
         )
         let updated = try XCTUnwrap(edits.first(where: { $0.originalURL == source })).updatedBody
 
@@ -31,6 +33,62 @@ final class VaultLinkRefactorTests: XCTestCase {
         XCTAssertTrue(updated.contains("[[Archive/Old]]"))
         XCTAssertTrue(updated.contains("[note](Archive/Old.md)"))
         XCTAssertTrue(updated.contains("![](Archive/photo.png)"))
+        XCTAssertTrue(updated.contains("![[Archive/photo.png]]"))
+    }
+
+    func testRenameSkipsLinksInsideCodeFencesAndInlineCode() throws {
+        let vault = URL(fileURLWithPath: "/Vault", isDirectory: true)
+        let old = vault.appendingPathComponent("Old.md")
+        let new = vault.appendingPathComponent("New.md")
+        let source = vault.appendingPathComponent("Index.md")
+        let body = """
+        See [[Old]].
+        `[[Old]]`
+        ```
+        [[Old]]
+        [Old](Old.md)
+        ```
+        """
+
+        let edits = VaultLinkRefactor.edits(
+            notes: [
+                VaultLinkNoteSnapshot(url: old, body: "# Old", aliases: []),
+                VaultLinkNoteSnapshot(url: source, body: body, aliases: []),
+            ],
+            moving: old,
+            to: new,
+            sourceIsDirectory: false,
+            vaultURL: vault
+        )
+        let updated = try XCTUnwrap(edits.first(where: { $0.originalURL == source })).updatedBody
+
+        XCTAssertTrue(updated.contains("See [[New]]."))
+        XCTAssertTrue(updated.contains("`[[Old]]`"))
+        XCTAssertTrue(updated.contains("[[Old]]\n[Old](Old.md)"))
+    }
+
+    func testReplaceIfCurrentRejectsChangedBodies() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+
+        let url = directory.appendingPathComponent("Note.md")
+        try Data("expected".utf8).write(to: url)
+
+        XCTAssertFalse(try VaultLinkRefactor.replaceIfCurrent(
+            at: url,
+            expected: "stale",
+            replacement: "replacement"
+        ))
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "expected")
+
+        XCTAssertTrue(try VaultLinkRefactor.replaceIfCurrent(
+            at: url,
+            expected: "expected",
+            replacement: "replacement"
+        ))
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "replacement")
     }
 
     func testSingleNoteRenameUpdatesBareWikiTarget() throws {

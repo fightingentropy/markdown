@@ -293,6 +293,7 @@ final class Workspace {
     private var pendingExternalChanges: [VaultFileChange] = []
     private var vaultFilePresenter: VaultFilePresenter?
     private var snapshotGeneration = 0
+    private var noteGraphGeneration = 0
     private var cachedMarkdownMetadataByPath: [String: CachedMarkdownMetadata] = [:]
     private var assetLookupByFilename: [String: [URL]] = [:]
     private var pendingEditorSelectionsByKey: [String: [Int]] = [:]
@@ -338,7 +339,7 @@ final class Workspace {
         selectedFileURL = nil
         replaceEditorBuffer(with: "", persistedContent: nil)
         recoveredDraftURL = nil
-        noteGraph = .empty
+        clearNoteGraph()
         cachedMarkdownMetadataByPath = [:]
         assetLookupByFilename = [:]
         refreshFilesInBackground(
@@ -374,7 +375,7 @@ final class Workspace {
         selectedFileURL = nil
         replaceEditorBuffer(with: "", persistedContent: nil)
         recoveredDraftURL = nil
-        noteGraph = .empty
+        clearNoteGraph()
         cachedMarkdownMetadataByPath = [:]
         assetLookupByFilename = [:]
         refreshFilesInBackground(
@@ -395,7 +396,7 @@ final class Workspace {
             sidebarNodes = []
             cachedMarkdownMetadataByPath = [:]
             assetLookupByFilename = [:]
-            noteGraph = .empty
+            clearNoteGraph()
             return
         }
 
@@ -533,17 +534,25 @@ final class Workspace {
     }
 
     /// Conflict resolution: overwrite the on-disk file with the editor buffer.
+    /// Uses the live buffer when the conflict file is still selected so edits
+    /// typed while the alert was open are not discarded with the recovery draft.
     func resolveSaveConflictKeepingMine() {
         guard let conflict = saveConflict else { return }
+        let contentToKeep: String
+        if let selectedFileURL, Self.urlsMatch(selectedFileURL, conflict.url) {
+            contentToKeep = text
+        } else {
+            contentToKeep = conflict.editorContent
+        }
         saveConflict = nil
         do {
-            try Self.coordinatedWrite(Data(conflict.editorContent.utf8), to: conflict.url)
+            try Self.coordinatedWrite(Data(contentToKeep.utf8), to: conflict.url)
             saveError = nil
             if let selectedFileURL, Self.urlsMatch(selectedFileURL, conflict.url) {
-                persistedText = conflict.editorContent
+                persistedText = contentToKeep
             }
             recoveryStore.removeDraft(for: conflict.url)
-            updateCachedMetadata(for: conflict.url, content: conflict.editorContent)
+            updateCachedMetadata(for: conflict.url, content: contentToKeep)
         } catch {
             let recoverySaved = persistRecoveryDraftNow()
             saveError = Self.saveErrorMessage(
@@ -638,23 +647,63 @@ final class Workspace {
 
     func createNewFile(in directoryURL: URL? = nil) {
         if let destinationDirectoryURL = destinationDirectoryURL(for: directoryURL) {
-            let fileURL = uniqueMarkdownFileURL(in: destinationDirectoryURL)
-            let name = fileURL.deletingPathExtension().lastPathComponent
-            let content = Data("# \(name)\n\n".utf8)
+            for _ in 0..<32 {
+                let fileURL = uniqueMarkdownFileURL(in: destinationDirectoryURL)
+                let name = fileURL.deletingPathExtension().lastPathComponent
+                let content = Data("# \(name)\n\n".utf8)
 
-            guard (try? content.write(to: fileURL, options: .atomic)) != nil else {
-                if directoryURL == nil {
-                    presentStandaloneFileSavePanel()
+                do {
+                    guard try ExclusiveAtomicFileWriter.writeIfAbsent(
+                        content,
+                        to: fileURL,
+                        fileManager: .default
+                    ) else {
+                        continue
+                    }
+                    refreshFiles()
+                    selectFile(fileURL)
+                    return
+                } catch {
+                    if directoryURL == nil {
+                        presentStandaloneFileSavePanel()
+                    }
+                    return
                 }
-                return
             }
 
-            refreshFiles()
-            selectFile(fileURL)
+            if directoryURL == nil {
+                presentStandaloneFileSavePanel()
+            }
             return
         }
 
         presentStandaloneFileSavePanel()
+    }
+
+    /// Conditionally replaces a note body under file coordination. When the
+    /// note is the selected editor buffer, updates the live buffer instead.
+    @discardableResult
+    func replaceNoteBody(
+        at url: URL,
+        expected: String,
+        replacement: String
+    ) -> Bool {
+        let standardized = url.resolvingSymlinksInPath().standardizedFileURL
+        if let selectedFileURL, Self.urlsMatch(selectedFileURL, standardized) {
+            guard text == expected else { return false }
+            text = replacement
+            return true
+        }
+
+        do {
+            return try VaultLinkRefactor.replaceIfCurrent(
+                at: standardized,
+                expected: expected,
+                replacement: replacement
+            )
+        } catch {
+            return false
+        }
     }
 
     func deleteItem(_ url: URL) {
@@ -947,12 +996,16 @@ final class Workspace {
             let aliases = ObsidianMetadataParser.parse(body).aliases
             return VaultLinkNoteSnapshot(url: standardizedURL, body: body, aliases: aliases)
         }
+        let assetURLs = Set(assetLookupByFilename.values.flatMap { $0 }.map {
+            $0.resolvingSymlinksInPath().standardizedFileURL
+        })
         return VaultLinkRefactor.edits(
             notes: notes,
             moving: oldRoot,
             to: newRoot,
             sourceIsDirectory: sourceIsDirectory,
-            vaultURL: vaultURL
+            vaultURL: vaultURL,
+            assetURLs: assetURLs
         )
     }
 
@@ -1096,24 +1149,48 @@ final class Workspace {
         return nil
     }
 
-    private func refreshNoteGraph() {
+    private func clearNoteGraph() {
         noteGraphRefreshTask?.cancel()
-        noteGraphRefreshTask = nil
-        noteGraph = NoteGraphBuilder.makeSnapshot(
-            files: files,
-            metadataByPath: cachedMarkdownMetadataByPath,
-            vaultURL: vaultURL,
-            selectedFileURL: selectedFileURL,
-            liveSelectedMarkdown: selectedFileIsMarkdown ? text : nil
-        )
+        noteGraphGeneration += 1
+        noteGraph = .empty
     }
 
-    private func scheduleNoteGraphRefresh() {
+    private func refreshNoteGraph() {
+        scheduleNoteGraphRefresh(debounceNanoseconds: 0)
+    }
+
+    private func scheduleNoteGraphRefresh(debounceNanoseconds: UInt64? = nil) {
+        let delay = debounceNanoseconds ?? Self.noteGraphDebounceNanoseconds
         noteGraphRefreshTask?.cancel()
-        noteGraphRefreshTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: Self.noteGraphDebounceNanoseconds)
+        noteGraphGeneration += 1
+        let generation = noteGraphGeneration
+        let files = files
+        let metadataByPath = cachedMarkdownMetadataByPath
+        let vaultURL = vaultURL
+        let selectedFileURL = selectedFileURL
+        let liveSelectedMarkdown = selectedFileIsMarkdown ? text : nil
+
+        noteGraphRefreshTask = Task { [weak self] in
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: delay)
+            }
             guard !Task.isCancelled else { return }
-            self?.refreshNoteGraph()
+
+            let snapshot = await Task.detached(priority: .utility) {
+                NoteGraphBuilder.makeSnapshot(
+                    files: files,
+                    metadataByPath: metadataByPath,
+                    vaultURL: vaultURL,
+                    selectedFileURL: selectedFileURL,
+                    liveSelectedMarkdown: liveSelectedMarkdown
+                )
+            }.value
+
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self, generation == self.noteGraphGeneration else { return }
+                self.noteGraph = snapshot
+            }
         }
     }
 
@@ -1489,7 +1566,7 @@ final class Workspace {
             recoveredDraftURL = nil
             cachedMarkdownMetadataByPath = [:]
             assetLookupByFilename = [:]
-            noteGraph = .empty
+            clearNoteGraph()
             return
         }
 

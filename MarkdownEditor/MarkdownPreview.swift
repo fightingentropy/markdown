@@ -14,12 +14,21 @@ enum PreviewURLPolicy {
     }
 
     static func internalVaultFile(_ url: URL, vaultURL: URL?) -> URL? {
+        guard let resolvedURL = fileInsideVault(url, vaultURL: vaultURL),
+              Workspace.isMarkdownFile(resolvedURL) || Workspace.isImageFile(resolvedURL) else {
+            return nil
+        }
+        return resolvedURL
+    }
+
+    /// Any regular file contained by the vault (or equal to the vault root).
+    static func fileInsideVault(_ url: URL, vaultURL: URL?) -> URL? {
         guard url.isFileURL, let vaultURL else { return nil }
         let resolvedVault = vaultURL.resolvingSymlinksInPath().standardizedFileURL
         let resolvedURL = url.resolvingSymlinksInPath().standardizedFileURL
-        guard resolvedURL.path.hasPrefix(resolvedVault.path + "/"),
-              FileManager.default.fileExists(atPath: resolvedURL.path),
-              Workspace.isMarkdownFile(resolvedURL) || Workspace.isImageFile(resolvedURL) else {
+        let isInside = resolvedURL.path == resolvedVault.path
+            || resolvedURL.path.hasPrefix(resolvedVault.path + "/")
+        guard isInside, FileManager.default.fileExists(atPath: resolvedURL.path) else {
             return nil
         }
         return resolvedURL

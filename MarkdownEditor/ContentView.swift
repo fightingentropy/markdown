@@ -607,7 +607,9 @@ private struct SaveStatusAlerts: ViewModifier {
                 "File Changed on Disk",
                 isPresented: Binding(
                     get: { workspace.saveConflict != nil },
-                    set: { if !$0 { workspace.saveConflict = nil } }
+                    // Dismiss without a choice must not clear the conflict; only
+                    // Keep / Reload resolve it.
+                    set: { _ in }
                 ),
                 presenting: workspace.saveConflict
             ) { _ in

@@ -244,17 +244,15 @@ struct NoteInspectorView: View {
             return
         }
 
-        guard let current = try? String(contentsOf: mention.sourceURL, encoding: .utf8),
-              current == mention.expectedBody else {
+        guard workspace.replaceNoteBody(
+            at: mention.sourceURL,
+            expected: mention.expectedBody,
+            replacement: replacement
+        ) else {
             NSSound.beep()
             return
         }
-        do {
-            try Data(replacement.utf8).write(to: mention.sourceURL, options: .atomic)
-            workspace.refreshFiles()
-        } catch {
-            NSSound.beep()
-        }
+        workspace.refreshFiles()
     }
 
     private func displayValue(_ value: ObsidianPropertyValue?) -> String {

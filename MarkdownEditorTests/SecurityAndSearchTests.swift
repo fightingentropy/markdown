@@ -141,6 +141,36 @@ final class SecurityAndSearchTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: fileURL, encoding: .utf8), "# Note\n\nmy local edits")
     }
 
+    func testKeepMyVersionUsesEditsTypedDuringConflictAlert() throws {
+        let fixture = try makeVault(files: [("Note", "# Note\n\noriginal")])
+        let fileURL = fixture.fileURLs[0]
+        let workspace = Workspace()
+        workspace.vaultURL = fixture.vaultURL
+        workspace.refreshFiles()
+        workspace.selectFile(fileURL)
+
+        workspace.text = "# Note\n\nmy local edits"
+        let externalContent = "# Note\n\nchanged on disk by another app"
+        try Data(externalContent.utf8).write(to: fileURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(60)],
+            ofItemAtPath: fileURL.path
+        )
+        workspace.saveCurrentFile()
+        XCTAssertNotNil(workspace.saveConflict)
+
+        // Further typing while the conflict alert is open must still be kept.
+        workspace.text = "# Note\n\nedits after conflict alert"
+        workspace.resolveSaveConflictKeepingMine()
+
+        XCTAssertNil(workspace.saveConflict)
+        XCTAssertEqual(
+            try String(contentsOf: fileURL, encoding: .utf8),
+            "# Note\n\nedits after conflict alert"
+        )
+        XCTAssertFalse(workspace.hasUnsavedChanges)
+    }
+
     func testReloadFromDiskAdoptsExternalContent() throws {
         let fixture = try makeVault(files: [("Note", "# Note\n\noriginal")])
         let fileURL = fixture.fileURLs[0]

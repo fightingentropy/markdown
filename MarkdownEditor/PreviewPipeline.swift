@@ -157,25 +157,24 @@ struct AssetResolver {
         }
 
         if let fileSchemeURL = fileURL(from: normalized) {
-            let standardized = fileSchemeURL.standardizedFileURL
-            return FileManager.default.fileExists(atPath: standardized.path) ? standardized : nil
+            return containedAssetURL(fileSchemeURL.standardizedFileURL)
         }
 
         if normalized.hasPrefix("/") {
-            let absoluteURL = URL(fileURLWithPath: normalized).standardizedFileURL
-            return FileManager.default.fileExists(atPath: absoluteURL.path) ? absoluteURL : nil
+            return containedAssetURL(URL(fileURLWithPath: normalized).standardizedFileURL)
         }
 
         let baseCandidates = [context.documentDirectoryURL, context.vaultURL]
         for baseURL in baseCandidates.compactMap({ $0 }) {
             let candidate = URL(fileURLWithPath: normalized, relativeTo: baseURL).standardizedFileURL
-            if FileManager.default.fileExists(atPath: candidate.path) {
-                return candidate
+            if let contained = containedAssetURL(candidate) {
+                return contained
             }
         }
 
         if let indexedMatches = context.assetLookupByFilename[normalized], !indexedMatches.isEmpty {
-            return indexedMatches.count == 1 ? indexedMatches[0] : indexedMatches.first
+            let match = indexedMatches.count == 1 ? indexedMatches[0] : indexedMatches.first
+            return match.flatMap(containedAssetURL)
         }
 
         guard !normalized.contains("/"), let vaultURL = context.vaultURL else {
@@ -192,7 +191,9 @@ struct AssetResolver {
 
         var matches: [URL] = []
         for case let fileURL as URL in enumerator where fileURL.lastPathComponent == normalized {
-            matches.append(fileURL.standardizedFileURL)
+            if let contained = containedAssetURL(fileURL.standardizedFileURL) {
+                matches.append(contained)
+            }
         }
 
         if matches.count == 1 {
@@ -200,6 +201,24 @@ struct AssetResolver {
         }
 
         return matches.first
+    }
+
+    private func containedAssetURL(_ url: URL) -> URL? {
+        if let vaultURL = context.vaultURL {
+            return PreviewURLPolicy.fileInsideVault(url, vaultURL: vaultURL)
+        }
+
+        guard let documentDirectoryURL = context.documentDirectoryURL else {
+            return nil
+        }
+        let resolvedDirectory = documentDirectoryURL.resolvingSymlinksInPath().standardizedFileURL
+        let resolvedURL = url.resolvingSymlinksInPath().standardizedFileURL
+        let isInside = resolvedURL.path == resolvedDirectory.path
+            || resolvedURL.path.hasPrefix(resolvedDirectory.path + "/")
+        guard isInside, FileManager.default.fileExists(atPath: resolvedURL.path) else {
+            return nil
+        }
+        return resolvedURL
     }
 
     private func fileURL(from reference: String) -> URL? {
