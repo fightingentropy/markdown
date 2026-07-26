@@ -715,8 +715,8 @@ enum SidebarExpansionPersistence {
 }
 
 func isMD(_ url: URL) -> Bool {
-    // Keep this in sync with `Workspace.isMarkdownFile`'s supported extensions.
-    // `.txt` is intentionally excluded: it is not opened end-to-end, so accepting
-    // it here would let a drop succeed visually but silently do nothing.
-    ["md", "markdown", "mdown", "txt"].contains(url.pathExtension.lowercased())
+    // Route through the workspace's single extension allowlist so drop targets
+    // can never accept a file type the rest of the app rejects (a `.txt` drop
+    // once succeeded visually but then silently did nothing).
+    Workspace.isMarkdownFile(url)
 }

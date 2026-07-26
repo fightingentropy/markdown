@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import XCTest
 
@@ -470,4 +471,159 @@ private func makeFixture() throws -> PreviewFixture {
 private func fixturePNGData() throws -> Data {
     let base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO0pNzsAAAAASUVORK5CYII="
     return try XCTUnwrap(Data(base64Encoded: base64))
+}
+
+/// Cross-checks that the four link/image consumers — the editor syntax
+/// highlighter and Cmd-click resolver (both backed by the NSString-based
+/// `EditorLinkScanner`), the note-graph extractor, and the preview rewriter
+/// (both backed by the Character-based `MarkdownNoteLinkExtractor`) — agree
+/// on what counts as a link or image for the representative syntax forms, so
+/// the two underlying tokenizers cannot silently diverge.
+@MainActor
+final class LinkParserParityTests: XCTestCase {
+    func testConsumersAgreeOnMarkdownLink() {
+        let text = "See [Docs](https://example.com/docs) for details"
+        let linkRange = (text as NSString).range(of: "[Docs](https://example.com/docs)")
+
+        assertLinkUnderline(in: text, range: linkRange)
+
+        // The detector resolves a click anywhere inside the link span, and
+        // nowhere outside it.
+        for index in linkRange.location..<NSMaxRange(linkRange) {
+            XCTAssertEqual(
+                EditorLinkDetector.url(near: index, in: text)?.absoluteString,
+                "https://example.com/docs",
+                "index \(index)"
+            )
+        }
+        XCTAssertNil(EditorLinkDetector.url(near: 0, in: text))
+        XCTAssertNil(EditorLinkDetector.url(near: NSMaxRange(linkRange) + 1, in: text))
+
+        // The graph extractor sees the same destination.
+        XCTAssertEqual(
+            MarkdownNoteLinkExtractor.references(in: text).map(\.destination),
+            ["https://example.com/docs"]
+        )
+    }
+
+    func testConsumersAgreeOnBareURL() {
+        let text = "Visit https://example.com/page today"
+        let linkRange = (text as NSString).range(of: "https://example.com/page")
+
+        assertLinkUnderline(in: text, range: linkRange)
+
+        for index in linkRange.location..<NSMaxRange(linkRange) {
+            XCTAssertEqual(
+                EditorLinkDetector.url(near: index, in: text)?.absoluteString,
+                "https://example.com/page",
+                "index \(index)"
+            )
+        }
+
+        // Bare URLs never reference a vault note, so the graph extractor
+        // intentionally produces no reference for them.
+        XCTAssertTrue(MarkdownNoteLinkExtractor.references(in: text).isEmpty)
+    }
+
+    func testConsumersAgreeOnObsidianNoteLink() {
+        let text = "See [[Project Plan]] and [[2024-report|Q4 Results]]"
+        let plainRange = (text as NSString).range(of: "[[Project Plan]]")
+        let aliasRange = (text as NSString).range(of: "[[2024-report|Q4 Results]]")
+
+        assertLinkUnderline(in: text, range: plainRange)
+        assertLinkUnderline(in: text, range: aliasRange)
+
+        XCTAssertEqual(
+            MarkdownNoteLinkExtractor.references(in: text).map(\.destination),
+            ["Project Plan", "2024-report"]
+        )
+
+        let aliasMatch = MarkdownNoteLinkExtractor.obsidianNoteLink(
+            in: Array(text),
+            from: aliasRange.location
+        )
+        XCTAssertEqual(aliasMatch?.displayName, "Q4 Results")
+        XCTAssertEqual(aliasMatch?.nextIndex, NSMaxRange(aliasRange))
+
+        // Wiki links are highlighted for navigation but intentionally do not
+        // resolve to an external URL on Cmd-click.
+        XCTAssertNil(EditorLinkDetector.url(near: plainRange.location + 3, in: text))
+    }
+
+    func testConsumersAgreeOnMarkdownImage() throws {
+        let text = "![Alt text](images/photo.png \"Caption\")"
+        let fullRange = NSRange(location: 0, length: (text as NSString).length)
+
+        assertLinkUnderline(in: text, range: fullRange)
+
+        let match = try XCTUnwrap(MarkdownNoteLinkExtractor.markdownImage(in: Array(text), from: 0))
+        XCTAssertEqual(match.original, text)
+        XCTAssertEqual(match.altText, "Alt text")
+        XCTAssertEqual(match.destination, "images/photo.png")
+        XCTAssertEqual(match.title, "Caption")
+        XCTAssertEqual(match.nextIndex, fullRange.length)
+
+        // The preview adapter observes the very same parse.
+        XCTAssertEqual(
+            PreviewMarkdownSyntax.parseStandaloneMarkdownImage(in: text)?.destination,
+            "images/photo.png"
+        )
+
+        // Images are highlighted but never resolve to an openable editor URL,
+        // and produce no graph edge.
+        XCTAssertNil(EditorLinkDetector.url(near: 3, in: text))
+        XCTAssertTrue(MarkdownNoteLinkExtractor.references(in: text).isEmpty)
+    }
+
+    func testConsumersAgreeOnObsidianEmbed() throws {
+        let text = "![[diagram.png|300]]"
+        let fullRange = NSRange(location: 0, length: (text as NSString).length)
+
+        assertLinkUnderline(in: text, range: fullRange)
+
+        let embed = try XCTUnwrap(MarkdownNoteLinkExtractor.obsidianEmbed(in: Array(text), from: 0))
+        XCTAssertEqual(embed.original, text)
+        XCTAssertEqual(embed.rawReference, "diagram.png|300")
+        XCTAssertEqual(embed.nextIndex, fullRange.length)
+
+        // One shared reference parse feeds the note-link view (alias as
+        // display text) and the embed view (alias as pixel width).
+        let descriptor = MarkdownNoteLinkExtractor.parseObsidianReference(embed.rawReference)
+        XCTAssertEqual(descriptor.destination, "diagram.png")
+        XCTAssertEqual(descriptor.alias, "300")
+        XCTAssertEqual(descriptor.width, 300)
+        XCTAssertEqual(descriptor.fileName, "diagram")
+
+        let previewReference = PreviewMarkdownSyntax.parseObsidianReference(embed.rawReference)
+        XCTAssertEqual(previewReference.target, "diagram.png")
+        XCTAssertEqual(previewReference.width, 300)
+        XCTAssertEqual(previewReference.displayName, "diagram")
+
+        let noteReference = MarkdownNoteLinkExtractor.parseObsidianNoteReference(embed.rawReference)
+        XCTAssertEqual(noteReference.destination, "diagram.png")
+        XCTAssertEqual(noteReference.displayName, "300")
+
+        XCTAssertTrue(MarkdownNoteLinkExtractor.references(in: text).isEmpty)
+    }
+
+    /// Asserts the highlighter marks every character of `range` as a link.
+    private func assertLinkUnderline(
+        in text: String,
+        range: NSRange,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let storage = NSTextStorage(string: text)
+        SyntaxHighlighter(preferences: AppPreferences()).highlight(storage)
+
+        for index in range.location..<NSMaxRange(range) {
+            XCTAssertEqual(
+                storage.attribute(.underlineStyle, at: index, effectiveRange: nil) as? Int,
+                NSUnderlineStyle.single.rawValue,
+                "expected link underline at index \(index)",
+                file: file,
+                line: line
+            )
+        }
+    }
 }

@@ -1,9 +1,14 @@
 import AppKit
 
 enum EditorLinkDetector {
-    private static let markdownLinkRegex = try! NSRegularExpression(pattern: #"\[([^\]]+)\]\(([^)\s]+)\)"#)
-    private static let bareLinkRegex = try! NSRegularExpression(pattern: #"https?://[^\s)>\"]+"#)
-
+    /// Resolves the URL at (or just after) `characterIndex` when the caret or
+    /// click lands on a markdown link or a bare http(s) URL.
+    ///
+    /// Link recognition is shared with the syntax highlighter through
+    /// `EditorLinkScanner`, so a span that is highlighted as a link is exactly
+    /// the span Cmd-click / Cmd-Return can open. Wiki-style `[[note]]` links
+    /// are highlighted for navigation but intentionally do not resolve to an
+    /// external URL here.
     static func url(near characterIndex: Int, in text: String) -> URL? {
         let nsText = text as NSString
         guard nsText.length > 0 else {
@@ -16,11 +21,11 @@ enum EditorLinkDetector {
         ].filter { $0 < nsText.length })
 
         for index in candidateIndices.sorted() {
-            if let url = markdownLinkURL(at: index, in: text, nsText: nsText) {
+            if let url = markdownLinkURL(at: index, in: nsText) {
                 return url
             }
 
-            if let url = bareLinkURL(at: index, in: text, nsText: nsText) {
+            if let url = bareLinkURL(at: index, in: nsText) {
                 return url
             }
         }
@@ -28,45 +33,267 @@ enum EditorLinkDetector {
         return nil
     }
 
-    private static func markdownLinkURL(at characterIndex: Int, in text: String, nsText: NSString) -> URL? {
-        // Restrict the regex to the line containing the click so the scan stays
-        // O(line) instead of O(document) on large notes. Markdown links cannot
-        // span a newline, so a single line is a sufficient search window.
-        let searchRange = nsText.lineRange(for: NSRange(location: characterIndex, length: 0))
-        for match in markdownLinkRegex.matches(in: text, range: searchRange) {
-            guard NSLocationInRange(characterIndex, match.range) else {
+    private static func markdownLinkURL(at characterIndex: Int, in nsText: NSString) -> URL? {
+        // Markdown links cannot span a newline, so scanning only the click's
+        // line keeps this O(line) instead of O(document) on large notes.
+        let lineRange = nsText.lineRange(for: NSRange(location: characterIndex, length: 0))
+        let limit = NSMaxRange(lineRange)
+        var location = lineRange.location
+
+        while location < limit {
+            let character = nsText.character(at: location)
+
+            if character == 33 {
+                // Skip images and embeds: they are highlighted but never
+                // resolve to an openable URL from the editor.
+                if let embedRange = EditorLinkScanner.obsidianImageRange(startingAt: location, in: nsText, limit: limit) {
+                    location = NSMaxRange(embedRange)
+                    continue
+                }
+
+                if let imageMatch = EditorLinkScanner.markdownLink(startingAt: location, in: nsText, limit: limit, isImage: true) {
+                    location = NSMaxRange(imageMatch.range)
+                    continue
+                }
+            } else if character == 91,
+                      let match = EditorLinkScanner.markdownLink(startingAt: location, in: nsText, limit: limit, isImage: false) {
+                guard NSLocationInRange(characterIndex, match.range) else {
+                    location = NSMaxRange(match.range)
+                    continue
+                }
+
+                let urlString = nsText.substring(with: match.destinationRange)
+                guard let url = URL(string: urlString), url.scheme != nil else {
+                    return nil
+                }
+
+                return url
+            }
+
+            location += 1
+        }
+
+        return nil
+    }
+
+    private static func bareLinkURL(at characterIndex: Int, in nsText: NSString) -> URL? {
+        // Bare links are terminated by whitespace, so they never cross a line
+        // boundary; scanning only the click's line keeps this bounded.
+        let lineRange = nsText.lineRange(for: NSRange(location: characterIndex, length: 0))
+        let limit = NSMaxRange(lineRange)
+        var location = lineRange.location
+
+        while location < limit {
+            guard nsText.character(at: location) == 104 else {
+                location += 1
                 continue
             }
 
-            if match.range.location > 0, nsText.character(at: match.range.location - 1) == 33 {
-                continue
+            if let linkRange = EditorLinkScanner.bareLinkRange(startingAt: location, in: nsText, limit: limit) {
+                guard NSLocationInRange(characterIndex, linkRange) else {
+                    location = NSMaxRange(linkRange)
+                    continue
+                }
+
+                return URL(string: nsText.substring(with: linkRange))
             }
 
-            let urlString = nsText.substring(with: match.range(at: 2))
-            guard let url = URL(string: urlString), url.scheme != nil else {
+            location += 1
+        }
+
+        return nil
+    }
+}
+
+/// NSString/UTF-16-based link and image scanners shared by the syntax
+/// highlighter (which colors link spans) and `EditorLinkDetector` (which
+/// resolves Cmd-click / Cmd-Return targets), giving the editor a single
+/// definition of "what is a link".
+///
+/// The note-graph extractor and preview rewriter instead use the
+/// Character-based `MarkdownNoteLinkExtractor` tokenizer; unit tests assert
+/// the two agree on representative link forms so the implementations cannot
+/// silently diverge.
+private enum EditorLinkScanner {
+    struct MarkdownLinkMatch {
+        /// Range of the whole `[text](destination)` construct.
+        let range: NSRange
+        /// Range of just the destination inside the parentheses.
+        let destinationRange: NSRange
+    }
+
+    static func markdownLink(
+        startingAt location: Int,
+        in text: NSString,
+        limit: Int,
+        isImage: Bool
+    ) -> MarkdownLinkMatch? {
+        let bracketLocation = isImage ? location + 1 : location
+        guard bracketLocation < limit, text.character(at: bracketLocation) == 91 else { return nil }
+
+        let textStart = bracketLocation + 1
+        guard textStart < limit else { return nil }
+
+        guard let closingBracket = index(of: 93, in: text, from: textStart, limit: limit) else {
+            return nil
+        }
+
+        if !isImage, closingBracket == textStart {
+            return nil
+        }
+
+        let openingParen = closingBracket + 1
+        guard openingParen < limit, text.character(at: openingParen) == 40 else { return nil }
+
+        let destinationStart = openingParen + 1
+        guard destinationStart < limit else { return nil }
+
+        var destinationEnd = destinationStart
+        while destinationEnd < limit {
+            let character = text.character(at: destinationEnd)
+            if character == 41 {
+                break
+            }
+            if isNewline(character) || (!isImage && isWhitespace(character)) {
+                return nil
+            }
+            destinationEnd += 1
+        }
+
+        guard destinationEnd < limit, destinationEnd > destinationStart else { return nil }
+        return MarkdownLinkMatch(
+            range: NSRange(location: location, length: destinationEnd + 1 - location),
+            destinationRange: NSRange(location: destinationStart, length: destinationEnd - destinationStart)
+        )
+    }
+
+    static func obsidianImageRange(
+        startingAt location: Int,
+        in text: NSString,
+        limit: Int
+    ) -> NSRange? {
+        guard location + 3 < limit else { return nil }
+        guard text.character(at: location) == 33,
+              text.character(at: location + 1) == 91,
+              text.character(at: location + 2) == 91 else {
+            return nil
+        }
+
+        var closing = location + 3
+        while closing + 1 < limit {
+            if text.character(at: closing) == 93, text.character(at: closing + 1) == 93 {
+                return NSRange(location: location, length: closing + 2 - location)
+            }
+            if isNewline(text.character(at: closing)) {
+                return nil
+            }
+            closing += 1
+        }
+
+        return nil
+    }
+
+    static func obsidianNoteRange(
+        startingAt location: Int,
+        in text: NSString,
+        limit: Int
+    ) -> NSRange? {
+        guard location + 3 < limit else { return nil }
+        guard text.character(at: location) == 91,
+              text.character(at: location + 1) == 91 else {
+            return nil
+        }
+
+        var closing = location + 2
+        while closing + 1 < limit {
+            if text.character(at: closing) == 93, text.character(at: closing + 1) == 93 {
+                return NSRange(location: location, length: closing + 2 - location)
+            }
+
+            if isNewline(text.character(at: closing)) {
                 return nil
             }
 
-            return url
+            closing += 1
         }
 
         return nil
     }
 
-    private static func bareLinkURL(at characterIndex: Int, in text: String, nsText: NSString) -> URL? {
-        // Bare links are terminated by whitespace, so they never cross a line
-        // boundary; scanning only the click's line keeps this bounded.
-        let searchRange = nsText.lineRange(for: NSRange(location: characterIndex, length: 0))
-        for match in bareLinkRegex.matches(in: text, range: searchRange) {
-            guard NSLocationInRange(characterIndex, match.range) else {
-                continue
-            }
+    static func bareLinkRange(
+        startingAt location: Int,
+        in text: NSString,
+        limit: Int
+    ) -> NSRange? {
+        guard location < limit, text.character(at: location) == 104 else { return nil }
 
-            let urlString = nsText.substring(with: match.range)
-            return URL(string: urlString)
+        let prefixLength: Int
+        if matchesHTTPPrefix(at: location, in: text, limit: limit) {
+            prefixLength = 7
+        } else if matchesHTTPSPrefix(at: location, in: text, limit: limit) {
+            prefixLength = 8
+        } else {
+            return nil
+        }
+
+        var end = location + prefixLength
+        while end < limit {
+            let character = text.character(at: end)
+            if isWhitespace(character) || isNewline(character) || character == 41 || character == 62 || character == 34 {
+                break
+            }
+            end += 1
+        }
+
+        guard end > location + prefixLength else { return nil }
+        return NSRange(location: location, length: end - location)
+    }
+
+    private static func matchesHTTPPrefix(at location: Int, in text: NSString, limit: Int) -> Bool {
+        guard location + 7 <= limit else { return false }
+        return text.character(at: location + 1) == 116 &&
+            text.character(at: location + 2) == 116 &&
+            text.character(at: location + 3) == 112 &&
+            text.character(at: location + 4) == 58 &&
+            text.character(at: location + 5) == 47 &&
+            text.character(at: location + 6) == 47
+    }
+
+    private static func matchesHTTPSPrefix(at location: Int, in text: NSString, limit: Int) -> Bool {
+        guard location + 8 <= limit else { return false }
+        return text.character(at: location + 1) == 116 &&
+            text.character(at: location + 2) == 116 &&
+            text.character(at: location + 3) == 112 &&
+            text.character(at: location + 4) == 115 &&
+            text.character(at: location + 5) == 58 &&
+            text.character(at: location + 6) == 47 &&
+            text.character(at: location + 7) == 47
+    }
+
+    private static func index(of character: unichar, in text: NSString, from start: Int, limit: Int) -> Int? {
+        guard start < limit else { return nil }
+
+        var location = start
+        while location < limit {
+            let current = text.character(at: location)
+            if current == character {
+                return location
+            }
+            if isNewline(current) {
+                return nil
+            }
+            location += 1
         }
 
         return nil
+    }
+
+    private static func isWhitespace(_ character: unichar) -> Bool {
+        character == 32 || character == 9
+    }
+
+    private static func isNewline(_ character: unichar) -> Bool {
+        character == 10 || character == 13
     }
 }
 
@@ -339,24 +566,24 @@ final class SyntaxHighlighter {
             let character = text.character(at: location)
 
             if character == 33 {
-                if let embedRange = obsidianImageRange(startingAt: location, in: text, limit: end) {
+                if let embedRange = EditorLinkScanner.obsidianImageRange(startingAt: location, in: text, limit: end) {
                     storage.addAttributes(styles.linkAttributes, range: embedRange)
                     location = NSMaxRange(embedRange)
                     continue
                 }
 
-                if let imageRange = markdownLinkRange(
+                if let imageMatch = EditorLinkScanner.markdownLink(
                     startingAt: location,
                     in: text,
                     limit: end,
                     isImage: true
                 ) {
-                    storage.addAttributes(styles.linkAttributes, range: imageRange)
-                    location = NSMaxRange(imageRange)
+                    storage.addAttributes(styles.linkAttributes, range: imageMatch.range)
+                    location = NSMaxRange(imageMatch.range)
                     continue
                 }
             } else if character == 91,
-                      let obsidianNoteRange = obsidianNoteRange(
+                      let obsidianNoteRange = EditorLinkScanner.obsidianNoteRange(
                         startingAt: location,
                         in: text,
                         limit: end
@@ -365,14 +592,14 @@ final class SyntaxHighlighter {
                 location = NSMaxRange(obsidianNoteRange)
                 continue
             } else if character == 91,
-                      let linkRange = markdownLinkRange(
+                      let linkMatch = EditorLinkScanner.markdownLink(
                         startingAt: location,
                         in: text,
                         limit: end,
                         isImage: false
                       ) {
-                storage.addAttributes(styles.linkAttributes, range: linkRange)
-                location = NSMaxRange(linkRange)
+                storage.addAttributes(styles.linkAttributes, range: linkMatch.range)
+                location = NSMaxRange(linkMatch.range)
                 continue
             }
 
@@ -395,7 +622,7 @@ final class SyntaxHighlighter {
                 continue
             }
 
-            if let linkRange = bareLinkRange(startingAt: location, in: text, limit: end) {
+            if let linkRange = EditorLinkScanner.bareLinkRange(startingAt: location, in: text, limit: end) {
                 storage.addAttributes(styles.linkAttributes, range: linkRange)
                 location = NSMaxRange(linkRange)
             } else {
@@ -632,169 +859,6 @@ final class SyntaxHighlighter {
         }
 
         return markerCount >= 3
-    }
-
-    private func markdownLinkRange(
-        startingAt location: Int,
-        in text: NSString,
-        limit: Int,
-        isImage: Bool
-    ) -> NSRange? {
-        let bracketLocation = isImage ? location + 1 : location
-        guard bracketLocation < limit, text.character(at: bracketLocation) == 91 else { return nil }
-
-        let textStart = bracketLocation + 1
-        guard textStart < limit else { return nil }
-
-        guard let closingBracket = index(of: 93, in: text, from: textStart, limit: limit) else {
-            return nil
-        }
-
-        if !isImage, closingBracket == textStart {
-            return nil
-        }
-
-        let openingParen = closingBracket + 1
-        guard openingParen < limit, text.character(at: openingParen) == 40 else { return nil }
-
-        let destinationStart = openingParen + 1
-        guard destinationStart < limit else { return nil }
-
-        var destinationEnd = destinationStart
-        while destinationEnd < limit {
-            let character = text.character(at: destinationEnd)
-            if character == 41 {
-                break
-            }
-            if isNewline(character) || (!isImage && isWhitespace(character)) {
-                return nil
-            }
-            destinationEnd += 1
-        }
-
-        guard destinationEnd < limit, destinationEnd > destinationStart else { return nil }
-        return NSRange(location: location, length: destinationEnd + 1 - location)
-    }
-
-    private func obsidianImageRange(
-        startingAt location: Int,
-        in text: NSString,
-        limit: Int
-    ) -> NSRange? {
-        guard location + 3 < limit else { return nil }
-        guard text.character(at: location) == 33,
-              text.character(at: location + 1) == 91,
-              text.character(at: location + 2) == 91 else {
-            return nil
-        }
-
-        var closing = location + 3
-        while closing + 1 < limit {
-            if text.character(at: closing) == 93, text.character(at: closing + 1) == 93 {
-                return NSRange(location: location, length: closing + 2 - location)
-            }
-            if isNewline(text.character(at: closing)) {
-                return nil
-            }
-            closing += 1
-        }
-
-        return nil
-    }
-
-    private func obsidianNoteRange(
-        startingAt location: Int,
-        in text: NSString,
-        limit: Int
-    ) -> NSRange? {
-        guard location + 3 < limit else { return nil }
-        guard text.character(at: location) == 91,
-              text.character(at: location + 1) == 91 else {
-            return nil
-        }
-
-        var closing = location + 2
-        while closing + 1 < limit {
-            if text.character(at: closing) == 93, text.character(at: closing + 1) == 93 {
-                return NSRange(location: location, length: closing + 2 - location)
-            }
-
-            if isNewline(text.character(at: closing)) {
-                return nil
-            }
-
-            closing += 1
-        }
-
-        return nil
-    }
-
-    private func bareLinkRange(
-        startingAt location: Int,
-        in text: NSString,
-        limit: Int
-    ) -> NSRange? {
-        guard location < limit, text.character(at: location) == 104 else { return nil }
-
-        let prefixLength: Int
-        if matchesHTTPPrefix(at: location, in: text, limit: limit) {
-            prefixLength = 7
-        } else if matchesHTTPSPrefix(at: location, in: text, limit: limit) {
-            prefixLength = 8
-        } else {
-            return nil
-        }
-
-        var end = location + prefixLength
-        while end < limit {
-            let character = text.character(at: end)
-            if isWhitespace(character) || isNewline(character) || character == 41 || character == 62 || character == 34 {
-                break
-            }
-            end += 1
-        }
-
-        guard end > location + prefixLength else { return nil }
-        return NSRange(location: location, length: end - location)
-    }
-
-    private func matchesHTTPPrefix(at location: Int, in text: NSString, limit: Int) -> Bool {
-        guard location + 7 <= limit else { return false }
-        return text.character(at: location + 1) == 116 &&
-            text.character(at: location + 2) == 116 &&
-            text.character(at: location + 3) == 112 &&
-            text.character(at: location + 4) == 58 &&
-            text.character(at: location + 5) == 47 &&
-            text.character(at: location + 6) == 47
-    }
-
-    private func matchesHTTPSPrefix(at location: Int, in text: NSString, limit: Int) -> Bool {
-        guard location + 8 <= limit else { return false }
-        return text.character(at: location + 1) == 116 &&
-            text.character(at: location + 2) == 116 &&
-            text.character(at: location + 3) == 112 &&
-            text.character(at: location + 4) == 115 &&
-            text.character(at: location + 5) == 58 &&
-            text.character(at: location + 6) == 47 &&
-            text.character(at: location + 7) == 47
-    }
-
-    private func index(of character: unichar, in text: NSString, from start: Int, limit: Int) -> Int? {
-        guard start < limit else { return nil }
-
-        var location = start
-        while location < limit {
-            let current = text.character(at: location)
-            if current == character {
-                return location
-            }
-            if isNewline(current) {
-                return nil
-            }
-            location += 1
-        }
-
-        return nil
     }
 
     private func skipLeadingWhitespace(in range: NSRange, text: NSString) -> Int {

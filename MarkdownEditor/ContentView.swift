@@ -778,6 +778,8 @@ private struct TitlebarAccessoryInstaller<Content: View>: NSViewRepresentable {
     @MainActor
     final class Coordinator {
         private let titlebarHeight: CGFloat = 44
+        private let verticalCenteringCorrection: CGFloat = 4
+        private let trailingEdgeInset: CGFloat = 8
 
         private let accessoryController = NSTitlebarAccessoryViewController()
         private let accessoryView = NSView()
@@ -801,8 +803,10 @@ private struct TitlebarAccessoryInstaller<Content: View>: NSViewRepresentable {
             accessoryController.layoutAttribute = layoutAttribute
 
             let fittingSize = hostingView.fittingSize
+            // The accessory controller is anchored to the window's right edge,
+            // so the extra width becomes trailing breathing room.
             let targetSize = NSSize(
-                width: ceil(max(0, fittingSize.width)),
+                width: ceil(max(0, fittingSize.width + trailingEdgeInset)),
                 height: titlebarHeight
             )
             let sizeChanged = abs(targetSize.width - installedSize.width) > 0.5
@@ -810,7 +814,13 @@ private struct TitlebarAccessoryInstaller<Content: View>: NSViewRepresentable {
 
             hostingView.frame = NSRect(
                 x: 0,
-                y: max(0, (targetSize.height - fittingSize.height) / 2),
+                // AppKit seats right-side titlebar accessories slightly below
+                // the visual center used by native toolbar items.
+                y: max(
+                    0,
+                    (targetSize.height - fittingSize.height) / 2
+                        + verticalCenteringCorrection
+                ),
                 width: targetSize.width,
                 height: fittingSize.height
             )

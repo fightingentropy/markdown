@@ -200,32 +200,27 @@ struct NoteGraphView: View {
         }
         .padding(24)
         .frame(maxWidth: 320)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .windowBackgroundColor).opacity(0.9))
+        }
         .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(.white.opacity(0.08))
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.09))
         }
     }
 
     private var graphBackdrop: some View {
         ZStack {
-            LinearGradient(
-                colors: [
-                    Color(nsColor: .textBackgroundColor),
-                    Color.accentColor.opacity(0.05)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-
+            Color(nsColor: .textBackgroundColor)
             RadialGradient(
                 colors: [
-                    Color.accentColor.opacity(0.08),
+                    Color.primary.opacity(0.025),
                     .clear
                 ],
                 center: .center,
-                startRadius: 20,
-                endRadius: 520
+                startRadius: 0,
+                endRadius: 640
             )
         }
         .ignoresSafeArea()
@@ -381,10 +376,11 @@ struct NoteGraphView: View {
             )
 
             if isSelected {
-                let shadowRect = rect.insetBy(dx: -6, dy: -6)
-                context.fill(
-                    Circle().path(in: shadowRect),
-                    with: .color(Color.accentColor.opacity(0.18))
+                let focusRing = rect.insetBy(dx: -5, dy: -5)
+                context.stroke(
+                    Circle().path(in: focusRing),
+                    with: .color(Color.primary.opacity(0.28)),
+                    style: StrokeStyle(lineWidth: 1.2)
                 )
             }
 
@@ -392,7 +388,7 @@ struct NoteGraphView: View {
             context.stroke(
                 Circle().path(in: rect),
                 with: .color(nodeStroke(for: node)),
-                style: StrokeStyle(lineWidth: isSelected ? 2.4 : 1)
+                style: StrokeStyle(lineWidth: isSelected ? 1.5 : 0.8)
             )
         }
     }
@@ -402,72 +398,73 @@ struct NoteGraphView: View {
         let size = nodeDiameter(for: node)
 
         return Text(node.title)
-            .font(isSelected ? .headline : .caption.weight(.medium))
-            .foregroundStyle(.primary)
+            .font(isSelected ? .callout.weight(.semibold) : .caption2.weight(.medium))
+            .foregroundStyle(isSelected ? Color.primary : Color.secondary)
             .lineLimit(1)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(.ultraThinMaterial, in: Capsule(style: .continuous))
-            .overlay {
-                Capsule(style: .continuous)
-                    .strokeBorder(.white.opacity(0.08))
-            }
-            .position(x: position.x, y: position.y + size * 0.86)
+            .shadow(color: Color(nsColor: .textBackgroundColor).opacity(0.95), radius: 3)
+            .position(x: position.x, y: position.y + size * 0.95 + 8)
             .allowsHitTesting(false)
     }
 
     private func selectedNodePanel(_ selectedNode: NoteGraphNode) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top, spacing: 12) {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
                 Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: 12, height: 12)
-                    .padding(.top, 5)
+                    .fill(Color.primary.opacity(0.82))
+                    .frame(width: 8, height: 8)
+                    .padding(.top, 6)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(selectedNode.title)
-                        .font(.title3.weight(.semibold))
+                        .font(.headline.weight(.semibold))
 
                     Text(selectedNode.relativePath)
-                        .font(.caption)
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
             }
 
-            HStack(spacing: 14) {
-                statPill(value: snapshot.nodes.count, title: "Notes")
-                statPill(value: snapshot.edges.count, title: "Links")
-                statPill(value: selectedNode.incomingCount, title: "Backlinks")
-                statPill(value: selectedNode.outgoingCount, title: "Out")
+            HStack(spacing: 12) {
+                statMetric(value: snapshot.nodes.count, title: "Notes")
+                graphMetricDivider
+                statMetric(value: snapshot.edges.count, title: "Links")
+                graphMetricDivider
+                statMetric(value: selectedNode.incomingCount, title: "Backlinks")
+                graphMetricDivider
+                statMetric(value: selectedNode.outgoingCount, title: "Out")
             }
         }
-        .padding(16)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(.white.opacity(0.08))
+        .padding(14)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .windowBackgroundColor).opacity(0.9))
         }
-        .frame(maxWidth: 460, alignment: .leading)
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.09))
+        }
+        .frame(maxWidth: 420, alignment: .leading)
     }
 
     private var controlsPanel: some View {
         VStack(alignment: .trailing, spacing: 10) {
-            HStack(spacing: 10) {
+            HStack(spacing: 4) {
                 graphControlButton(systemImage: "minus.magnifyingglass", help: "Zoom Out") {
                     adjustZoom(to: viewport.zoom * 0.88)
                 }
 
                 Text("\(Int(viewport.zoom * 100))%")
-                    .font(.caption.monospacedDigit())
+                    .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
-                    .frame(width: 52)
+                    .frame(width: 42)
 
                 graphControlButton(systemImage: "plus.magnifyingglass", help: "Zoom In") {
                     adjustZoom(to: viewport.zoom * 1.12)
                 }
 
                 Divider()
-                    .frame(height: 22)
+                    .frame(height: 18)
+                    .padding(.horizontal, 3)
 
                 graphControlButton(systemImage: "scope", help: "Center Graph") {
                     resetViewport()
@@ -480,7 +477,8 @@ struct NoteGraphView: View {
                 }
 
                 Divider()
-                    .frame(height: 22)
+                    .frame(height: 18)
+                    .padding(.horizontal, 3)
 
                 graphControlButton(
                     systemImage: filter.isEmpty
@@ -496,15 +494,19 @@ struct NoteGraphView: View {
                 if isComputingLayout {
                     ProgressView()
                         .controlSize(.small)
+                        .tint(.secondary)
                         .padding(.leading, 2)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color(nsColor: .windowBackgroundColor).opacity(0.9))
+            }
             .overlay {
-                Capsule(style: .continuous)
-                    .strokeBorder(.white.opacity(0.08))
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.09))
             }
 
             if isFilterBarPresented {
@@ -560,10 +562,13 @@ struct NoteGraphView: View {
         }
         .padding(14)
         .frame(width: 240, alignment: .leading)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .windowBackgroundColor).opacity(0.9))
+        }
         .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(.white.opacity(0.08))
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.09))
         }
     }
 
@@ -578,8 +583,12 @@ struct NoteGraphView: View {
                 } label: {
                     HStack(spacing: 10) {
                         Circle()
-                            .fill(snapshot.connectedNodeIDs.contains(node.id) ? Color.accentColor : Color.secondary.opacity(0.5))
-                            .frame(width: 8, height: 8)
+                            .fill(
+                                snapshot.connectedNodeIDs.contains(node.id)
+                                    ? Color.primary.opacity(0.68)
+                                    : Color.secondary.opacity(0.45)
+                            )
+                            .frame(width: 6, height: 6)
 
                         VStack(alignment: .leading, spacing: 2) {
                             Text(node.title)
@@ -601,26 +610,32 @@ struct NoteGraphView: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(16)
-        .frame(width: 300, alignment: .leading)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .padding(14)
+        .frame(width: 280, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .windowBackgroundColor).opacity(0.9))
+        }
         .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(.white.opacity(0.08))
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.09))
         }
     }
 
-    private func statPill(value: Int, title: String) -> some View {
+    private func statMetric(value: Int, title: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("\(value)")
-                .font(.headline.monospacedDigit())
+                .font(.subheadline.weight(.semibold).monospacedDigit())
             Text(title)
-                .font(.caption)
+                .font(.caption2)
                 .foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .frame(minWidth: 48, alignment: .leading)
+    }
+
+    private var graphMetricDivider: some View {
+        Divider()
+            .frame(height: 24)
     }
 
     private func graphControlButton(
@@ -630,60 +645,62 @@ struct NoteGraphView: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .frame(width: 28, height: 28)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 26, height: 26)
         }
         .buttonStyle(.plain)
         .help(help)
     }
 
     private func nodeDiameter(for node: NoteGraphNode) -> CGFloat {
-        let clampedDegree = CGFloat(min(max(node.degree, 1), 12))
-        let base = snapshot.selectedNodeID == node.id ? 15 : 9
-        return CGFloat(base) + clampedDegree * 1.15
+        let clampedDegree = CGFloat(min(max(node.degree, 0), 12))
+        let selectionBoost: CGFloat = snapshot.selectedNodeID == node.id ? 4 : 0
+        return 7 + sqrt(clampedDegree) * 2 + selectionBoost
     }
 
     private func nodeFill(for node: NoteGraphNode) -> Color {
         if snapshot.selectedNodeID == node.id {
-            return .accentColor
+            return Color.primary.opacity(0.92)
         }
 
         if hoveredNodeID == node.id {
-            return .accentColor.opacity(0.82)
+            return Color.primary.opacity(0.78)
         }
 
         if snapshot.connectedNodeIDs.contains(node.id) {
-            return .accentColor.opacity(0.48)
+            return Color.primary.opacity(0.52)
         }
 
-        return Color.primary.opacity(0.26)
+        return Color.primary.opacity(0.23)
     }
 
     private func nodeStroke(for node: NoteGraphNode) -> Color {
         if snapshot.selectedNodeID == node.id || hoveredNodeID == node.id {
-            return .white.opacity(0.95)
+            return Color(nsColor: .textBackgroundColor).opacity(0.88)
         }
 
-        return Color.white.opacity(0.22)
+        return Color.primary.opacity(0.2)
     }
 
     private func edgeColor(for edge: NoteGraphEdge) -> Color {
         if edge.source == snapshot.selectedNodeID || edge.target == snapshot.selectedNodeID {
-            return .accentColor.opacity(0.5)
+            return Color.primary.opacity(0.28)
         }
 
         if edge.source == hoveredNodeID || edge.target == hoveredNodeID {
-            return .accentColor.opacity(0.34)
+            return Color.primary.opacity(0.22)
         }
 
-        return Color.primary.opacity(0.11)
+        return Color.primary.opacity(0.075)
     }
 
     private func edgeWidth(for edge: NoteGraphEdge) -> CGFloat {
         if edge.source == snapshot.selectedNodeID || edge.target == snapshot.selectedNodeID {
-            return 1.7
+            return 1.2
         }
 
-        return 1.05
+        return 0.65
     }
 
     private func transformed(_ point: CGPoint, in size: CGSize) -> CGPoint {
@@ -728,24 +745,44 @@ struct NoteGraphView: View {
 
         isComputingLayout = true
         let seed = relayoutSeed
+        let shouldAnimateSimulation = !reduceMotion
         layoutTask = Task {
-            let computedLayout = await Task.detached(priority: .userInitiated) {
-                NoteGraphLayoutEngine.generate(for: snapshot, relayoutSeed: seed)
+            let frames = await Task.detached(priority: .userInitiated) {
+                NoteGraphLayoutEngine.animationFrames(for: snapshot, relayoutSeed: seed)
             }.value
 
             guard !Task.isCancelled else { return }
-            await MainActor.run {
-                withAnimation(layoutAnimation) {
-                    layout = computedLayout
+
+            if shouldAnimateSimulation, let firstFrame = frames.first {
+                await MainActor.run {
+                    layout = firstFrame
                 }
+
+                for frame in frames.dropFirst() {
+                    do {
+                        try await Task.sleep(for: .milliseconds(24))
+                    } catch {
+                        return
+                    }
+                    guard !Task.isCancelled else { return }
+                    await MainActor.run {
+                        layout = frame
+                    }
+                }
+            } else if let finalFrame = frames.last {
+                await MainActor.run {
+                    layout = finalFrame
+                }
+            }
+
+            await MainActor.run {
                 laidOutTopology = key
                 isComputingLayout = false
             }
         }
     }
 
-    /// Spring used when settling a freshly computed layout, or `nil` (instant)
-    /// when the user has opted into Reduce Motion.
+    /// Spring used for lightweight re-centering when the topology is unchanged.
     private var layoutAnimation: Animation? {
         reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.82)
     }

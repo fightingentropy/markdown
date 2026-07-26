@@ -86,6 +86,70 @@ final class NoteGraphTests: XCTestCase {
         XCTAssertEqual(activeNode.outgoingCount, 0)
     }
 
+    func testGraphLayoutAnimationFramesShowDeterministicSettlingMotion() throws {
+        let nodeURLs = ["A.md", "B.md", "C.md"].map {
+            URL(fileURLWithPath: "/tmp/\($0)").standardizedFileURL
+        }
+        let nodes = [
+            NoteGraphNode(
+                id: nodeURLs[0],
+                url: nodeURLs[0],
+                title: "A",
+                relativePath: "A.md",
+                incomingCount: 0,
+                outgoingCount: 1
+            ),
+            NoteGraphNode(
+                id: nodeURLs[1],
+                url: nodeURLs[1],
+                title: "B",
+                relativePath: "B.md",
+                incomingCount: 1,
+                outgoingCount: 1
+            ),
+            NoteGraphNode(
+                id: nodeURLs[2],
+                url: nodeURLs[2],
+                title: "C",
+                relativePath: "C.md",
+                incomingCount: 1,
+                outgoingCount: 0
+            )
+        ]
+        let snapshot = NoteGraphSnapshot(
+            nodes: nodes,
+            edges: [
+                NoteGraphEdge(source: nodeURLs[0], target: nodeURLs[1]),
+                NoteGraphEdge(source: nodeURLs[1], target: nodeURLs[2])
+            ],
+            selectedNodeID: nodeURLs[0],
+            connectedNodeIDs: [nodeURLs[1]]
+        )
+
+        let frames = NoteGraphLayoutEngine.animationFrames(for: snapshot, relayoutSeed: 3)
+        let repeatedFrames = NoteGraphLayoutEngine.animationFrames(for: snapshot, relayoutSeed: 3)
+        let finalLayout = NoteGraphLayoutEngine.generate(for: snapshot, relayoutSeed: 3)
+
+        XCTAssertGreaterThan(frames.count, 2)
+        XCTAssertEqual(frames, repeatedFrames)
+        XCTAssertEqual(frames.last, finalLayout)
+        XCTAssertEqual(Set(frames[0].positions.keys), Set(nodeURLs))
+
+        let selectedPosition = try XCTUnwrap(frames[0].positions[nodeURLs[0]])
+        XCTAssertEqual(selectedPosition.x, 0, accuracy: 0.0001)
+        XCTAssertEqual(selectedPosition.y, 0, accuracy: 0.0001)
+
+        let firstMovingPosition = try XCTUnwrap(frames.first?.positions[nodeURLs[2]])
+        let lastMovingPosition = try XCTUnwrap(frames.last?.positions[nodeURLs[2]])
+        XCTAssertGreaterThan(
+            hypot(
+                lastMovingPosition.x - firstMovingPosition.x,
+                lastMovingPosition.y - firstMovingPosition.y
+            ),
+            0.01
+        )
+    }
+
     func testPreviewPreprocessorRewritesObsidianNoteLinksToFileURLs() throws {
         let vaultURL = try makeVault()
         let sourceURL = vaultURL.appendingPathComponent("Source.md")

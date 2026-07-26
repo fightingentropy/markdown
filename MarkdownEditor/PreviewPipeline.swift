@@ -639,53 +639,39 @@ enum MarkdownPreprocessor {
         resolver: AssetResolver,
         requiresHTMLFallback: inout Bool
     ) -> (rendered: String, nextIndex: Int)? {
-        guard index + 3 < characters.count,
-              characters[index] == "!",
-              characters[index + 1] == "[",
-              characters[index + 2] == "[" else {
+        guard let match = MarkdownNoteLinkExtractor.obsidianEmbed(in: characters, from: index) else {
             return nil
         }
 
-        var cursor = index + 3
-        while cursor + 1 < characters.count {
-            if characters[cursor] == "]", characters[cursor + 1] == "]" {
-                let rawReference = String(characters[(index + 3)..<cursor])
-                let original = String(characters[index..<(cursor + 2)])
-                let descriptor = PreviewMarkdownSyntax.parseObsidianReference(rawReference)
+        let descriptor = PreviewMarkdownSyntax.parseObsidianReference(match.rawReference)
 
-                guard let asset = resolver.resolve(reference: descriptor.target) else {
-                    return (original, cursor + 2)
-                }
-
-                if asset.isImage {
-                    let title = descriptor.width.map { PreviewMarkdownSyntax.widthTitleMarker(for: $0) }
-                    if descriptor.width != nil {
-                        requiresHTMLFallback = true
-                    }
-
-                    return (
-                        PreviewMarkdownSyntax.imageMarkdown(
-                            altText: descriptor.displayName,
-                            destination: asset.fileURL,
-                            title: title
-                        ),
-                        cursor + 2
-                    )
-                }
-
-                return (
-                    PreviewMarkdownSyntax.linkMarkdown(
-                        label: descriptor.displayName,
-                        destination: asset.fileURL
-                    ),
-                    cursor + 2
-                )
-            }
-
-            cursor += 1
+        guard let asset = resolver.resolve(reference: descriptor.target) else {
+            return (match.original, match.nextIndex)
         }
 
-        return nil
+        if asset.isImage {
+            let title = descriptor.width.map { PreviewMarkdownSyntax.widthTitleMarker(for: $0) }
+            if descriptor.width != nil {
+                requiresHTMLFallback = true
+            }
+
+            return (
+                PreviewMarkdownSyntax.imageMarkdown(
+                    altText: descriptor.displayName,
+                    destination: asset.fileURL,
+                    title: title
+                ),
+                match.nextIndex
+            )
+        }
+
+        return (
+            PreviewMarkdownSyntax.linkMarkdown(
+                label: descriptor.displayName,
+                destination: asset.fileURL
+            ),
+            match.nextIndex
+        )
     }
 
     private static func rewriteObsidianNoteLink(
@@ -717,7 +703,7 @@ enum MarkdownPreprocessor {
         from index: Int,
         resolver: AssetResolver
     ) -> (rendered: String, nextIndex: Int)? {
-        guard let parsed = PreviewMarkdownSyntax.parseMarkdownImage(in: characters, from: index) else {
+        guard let parsed = MarkdownNoteLinkExtractor.markdownImage(in: characters, from: index) else {
             return nil
         }
 
@@ -1376,19 +1362,15 @@ struct PreviewImageAttachment: Attachment {
     }
 }
 
+/// Markdown/Obsidian rendering helpers for the preview. All *recognition* of
+/// link/image syntax lives in the shared `MarkdownNoteLinkExtractor`
+/// tokenizer; this enum only keeps the preview-specific emission helpers and
+/// thin adapters over the shared parses.
 enum PreviewMarkdownSyntax {
     struct ObsidianReference {
         let target: String
         let displayName: String
         let width: Int?
-    }
-
-    struct ParsedMarkdownImage {
-        let original: String
-        let altText: String
-        let destination: String
-        let title: String?
-        let nextIndex: Int
     }
 
     static func standaloneObsidianImageReference(in line: String) -> ObsidianReference? {
@@ -1402,122 +1384,24 @@ enum PreviewMarkdownSyntax {
     }
 
     static func parseObsidianReference(_ rawReference: String) -> ObsidianReference {
-        let trimmed = rawReference.trimmingCharacters(in: .whitespacesAndNewlines)
-        let parts = trimmed.split(separator: "|", maxSplits: 1).map(String.init)
-        let targetWithFragment = parts.first ?? trimmed
-        let target = targetWithFragment.split(separator: "#", maxSplits: 1).first.map(String.init) ?? targetWithFragment
-        let width = parts.count > 1 ? Int(parts[1].trimmingCharacters(in: .whitespacesAndNewlines)) : nil
-        let fileName = URL(fileURLWithPath: target).deletingPathExtension().lastPathComponent
-        let displayName = fileName.isEmpty ? target : fileName
+        let descriptor = MarkdownNoteLinkExtractor.parseObsidianReference(rawReference)
+        let displayName = descriptor.fileName.isEmpty ? descriptor.destination : descriptor.fileName
 
         return ObsidianReference(
-            target: target,
+            target: descriptor.destination,
             displayName: displayName,
-            width: width
+            width: descriptor.width
         )
     }
 
-    static func parseStandaloneMarkdownImage(in line: String) -> ParsedMarkdownImage? {
+    static func parseStandaloneMarkdownImage(in line: String) -> MarkdownNoteLinkExtractor.MarkdownImageMatch? {
         let characters = Array(line)
-        guard let parsed = parseMarkdownImage(in: characters, from: 0), parsed.nextIndex == characters.count else {
+        guard let parsed = MarkdownNoteLinkExtractor.markdownImage(in: characters, from: 0),
+              parsed.nextIndex == characters.count else {
             return nil
         }
 
         return parsed
-    }
-
-    static func parseMarkdownImage(in characters: [Character], from startIndex: Int) -> ParsedMarkdownImage? {
-        guard startIndex + 3 < characters.count,
-              characters[startIndex] == "!",
-              characters[startIndex + 1] == "[" else {
-            return nil
-        }
-
-        var cursor = startIndex + 2
-        while cursor < characters.count {
-            if characters[cursor] == "]" {
-                break
-            }
-
-            cursor += 1
-        }
-
-        guard cursor < characters.count,
-              cursor + 1 < characters.count,
-              characters[cursor] == "]",
-              characters[cursor + 1] == "(" else {
-            return nil
-        }
-
-        let altText = String(characters[(startIndex + 2)..<cursor])
-        cursor += 2
-        cursor = skipWhitespace(in: characters, from: cursor)
-
-        let destination: String
-        if cursor < characters.count, characters[cursor] == "<" {
-            cursor += 1
-            let destinationStart = cursor
-            while cursor < characters.count, characters[cursor] != ">" {
-                cursor += 1
-            }
-
-            guard cursor < characters.count else {
-                return nil
-            }
-
-            destination = String(characters[destinationStart..<cursor])
-            cursor += 1
-        } else {
-            let destinationStart = cursor
-            while cursor < characters.count,
-                  characters[cursor] != ")",
-                  !characters[cursor].isWhitespace {
-                cursor += 1
-            }
-
-            destination = String(characters[destinationStart..<cursor])
-        }
-
-        guard !destination.isEmpty else {
-            return nil
-        }
-
-        cursor = skipWhitespace(in: characters, from: cursor)
-
-        var title: String?
-        if cursor < characters.count, characters[cursor] != ")" {
-            let quote = characters[cursor]
-            guard quote == "\"" || quote == "'" else {
-                return nil
-            }
-
-            cursor += 1
-            let titleStart = cursor
-            while cursor < characters.count, characters[cursor] != quote {
-                cursor += 1
-            }
-
-            guard cursor < characters.count else {
-                return nil
-            }
-
-            title = String(characters[titleStart..<cursor])
-            cursor += 1
-            cursor = skipWhitespace(in: characters, from: cursor)
-        }
-
-        guard cursor < characters.count, characters[cursor] == ")" else {
-            return nil
-        }
-
-        let nextIndex = cursor + 1
-        return ParsedMarkdownImage(
-            original: String(characters[startIndex..<nextIndex]),
-            altText: altText,
-            destination: destination,
-            title: title,
-            nextIndex: nextIndex
-        )
     }
 
     static func imageMarkdown(altText: String, destination: URL, title: String? = nil) -> String {
@@ -1537,15 +1421,6 @@ enum PreviewMarkdownSyntax {
 
     static func widthTitleMarker(for width: Int) -> String {
         "codex-obsidian-width-\(width)"
-    }
-
-    private static func skipWhitespace(in characters: [Character], from startIndex: Int) -> Int {
-        var cursor = startIndex
-        while cursor < characters.count, characters[cursor].isWhitespace {
-            cursor += 1
-        }
-
-        return cursor
     }
 
     private static func escapeMarkdownLabel(_ string: String) -> String {

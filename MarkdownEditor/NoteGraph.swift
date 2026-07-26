@@ -85,6 +85,15 @@ struct NoteGraphLayout: Sendable, Equatable {
     static let empty = NoteGraphLayout(positions: [:])
 }
 
+/// The single, shared tokenizer for wiki-style and markdown link/image syntax.
+///
+/// Consumed by the note-graph builder (`references(in:)`), the preview
+/// rewriter (embeds, note links, and images), and — via
+/// `EditorLinkScanner` parity tests — the editor highlighter and Cmd-click
+/// detector, so every feature agrees on what counts as a link. The editor's
+/// per-keystroke path uses the NSString-based `EditorLinkScanner` twin instead
+/// (Character arrays would be too costly there); unit tests assert the two
+/// tokenizers accept the same syntax.
 enum MarkdownNoteLinkExtractor {
     struct ObsidianNoteLinkMatch {
         let destination: String
@@ -95,6 +104,31 @@ enum MarkdownNoteLinkExtractor {
     struct MarkdownLinkMatch {
         let destination: String
         let nextIndex: Int
+    }
+
+    struct MarkdownImageMatch {
+        let original: String
+        let altText: String
+        let destination: String
+        let title: String?
+        let nextIndex: Int
+    }
+
+    struct ObsidianEmbedMatch {
+        let rawReference: String
+        let original: String
+        let nextIndex: Int
+    }
+
+    /// Parsed form of the body of a `[[...]]`/`![[...]]` reference: the note or
+    /// asset destination, the optional `|alias` segment, and derived forms
+    /// (embed width, filename fallback) used by the various consumers.
+    struct ObsidianReferenceDescriptor {
+        let destination: String
+        let alias: String?
+        let width: Int?
+        /// Filename-derived fallback label (path and extension stripped).
+        let fileName: String
     }
 
     private struct FenceDescriptor {
@@ -247,7 +281,142 @@ enum MarkdownNoteLinkExtractor {
         return MarkdownLinkMatch(destination: destination, nextIndex: cursor + 1)
     }
 
-    static func parseObsidianNoteReference(_ rawReference: String) -> (destination: String, displayName: String) {
+    /// Parses `![alt](destination "title")` starting at the leading `!`.
+    ///
+    /// Shared with the preview rewriter so image syntax is recognized
+    /// identically everywhere. Unlike `markdownLink`, the alt-text and title
+    /// scans tolerate newlines (matching what the preview has historically
+    /// accepted).
+    static func markdownImage(
+        in characters: [Character],
+        from index: Int
+    ) -> MarkdownImageMatch? {
+        guard index + 3 < characters.count,
+              characters[index] == "!",
+              characters[index + 1] == "[" else {
+            return nil
+        }
+
+        var cursor = index + 2
+        while cursor < characters.count {
+            if characters[cursor] == "]" {
+                break
+            }
+
+            cursor += 1
+        }
+
+        guard cursor < characters.count,
+              cursor + 1 < characters.count,
+              characters[cursor] == "]",
+              characters[cursor + 1] == "(" else {
+            return nil
+        }
+
+        let altText = String(characters[(index + 2)..<cursor])
+        cursor += 2
+        cursor = skipWhitespace(in: characters, from: cursor)
+
+        let destination: String
+        if cursor < characters.count, characters[cursor] == "<" {
+            cursor += 1
+            let destinationStart = cursor
+            while cursor < characters.count, characters[cursor] != ">" {
+                cursor += 1
+            }
+
+            guard cursor < characters.count else {
+                return nil
+            }
+
+            destination = String(characters[destinationStart..<cursor])
+            cursor += 1
+        } else {
+            let destinationStart = cursor
+            while cursor < characters.count,
+                  characters[cursor] != ")",
+                  !characters[cursor].isWhitespace {
+                cursor += 1
+            }
+
+            destination = String(characters[destinationStart..<cursor])
+        }
+
+        guard !destination.isEmpty else {
+            return nil
+        }
+
+        cursor = skipWhitespace(in: characters, from: cursor)
+
+        var title: String?
+        if cursor < characters.count, characters[cursor] != ")" {
+            let quote = characters[cursor]
+            guard quote == "\"" || quote == "'" else {
+                return nil
+            }
+
+            cursor += 1
+            let titleStart = cursor
+            while cursor < characters.count, characters[cursor] != quote {
+                cursor += 1
+            }
+
+            guard cursor < characters.count else {
+                return nil
+            }
+
+            title = String(characters[titleStart..<cursor])
+            cursor += 1
+            cursor = skipWhitespace(in: characters, from: cursor)
+        }
+
+        guard cursor < characters.count, characters[cursor] == ")" else {
+            return nil
+        }
+
+        let nextIndex = cursor + 1
+        return MarkdownImageMatch(
+            original: String(characters[index..<nextIndex]),
+            altText: altText,
+            destination: destination,
+            title: title,
+            nextIndex: nextIndex
+        )
+    }
+
+    /// Parses an `![[...]]` Obsidian embed starting at the leading `!`,
+    /// returning the raw inner reference for `parseObsidianReference(_:)`.
+    static func obsidianEmbed(
+        in characters: [Character],
+        from index: Int
+    ) -> ObsidianEmbedMatch? {
+        guard index + 3 < characters.count,
+              characters[index] == "!",
+              characters[index + 1] == "[",
+              characters[index + 2] == "[" else {
+            return nil
+        }
+
+        var cursor = index + 3
+        while cursor + 1 < characters.count {
+            if characters[cursor] == "]", characters[cursor + 1] == "]" {
+                return ObsidianEmbedMatch(
+                    rawReference: String(characters[(index + 3)..<cursor]),
+                    original: String(characters[index..<(cursor + 2)]),
+                    nextIndex: cursor + 2
+                )
+            }
+
+            cursor += 1
+        }
+
+        return nil
+    }
+
+    /// The one parser for the body of a `[[...]]`/`![[...]]` reference. Both
+    /// note-link consumers (alias as display text) and embed consumers (alias
+    /// as pixel width) derive their views from this shared descriptor.
+    static func parseObsidianReference(_ rawReference: String) -> ObsidianReferenceDescriptor {
         let trimmed = rawReference.trimmingCharacters(in: .whitespacesAndNewlines)
         let pieces = trimmed.split(separator: "|", maxSplits: 1).map(String.init)
         let destinationWithFragment = pieces.first ?? trimmed
@@ -256,13 +425,26 @@ enum MarkdownNoteLinkExtractor {
             .first
             .map(String.init)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let alias = pieces.count > 1
+        let rawAlias = pieces.count > 1
             ? pieces[1].trimmingCharacters(in: .whitespacesAndNewlines)
             : nil
-        let fallback = ((destination as NSString).deletingPathExtension as NSString).lastPathComponent
-        let displayName = alias?.isEmpty == false ? alias! : (fallback.isEmpty ? destination : fallback)
+        let alias = rawAlias.flatMap { $0.isEmpty ? nil : $0 }
+        let fileName = ((destination as NSString).deletingPathExtension as NSString).lastPathComponent
 
-        return (destination, displayName)
+        return ObsidianReferenceDescriptor(
+            destination: destination,
+            alias: alias,
+            width: alias.flatMap { Int($0) },
+            fileName: fileName
+        )
+    }
+
+    static func parseObsidianNoteReference(_ rawReference: String) -> (destination: String, displayName: String) {
+        let descriptor = parseObsidianReference(rawReference)
+        let displayName = descriptor.alias
+            ?? (descriptor.fileName.isEmpty ? descriptor.destination : descriptor.fileName)
+
+        return (descriptor.destination, displayName)
     }
 
     /// Masks fenced and inline code with spaces of equal length so link
@@ -768,20 +950,45 @@ enum NoteGraphBuilder {
 
 enum NoteGraphLayoutEngine {
     static func generate(for snapshot: NoteGraphSnapshot, relayoutSeed: Int) -> NoteGraphLayout {
+        generatedLayouts(
+            for: snapshot,
+            relayoutSeed: relayoutSeed,
+            capturesMotion: false
+        ).last ?? .empty
+    }
+
+    /// Samples the force simulation as it settles so the graph can render the
+    /// same live, physical motion as a browser force-directed graph.
+    static func animationFrames(
+        for snapshot: NoteGraphSnapshot,
+        relayoutSeed: Int
+    ) -> [NoteGraphLayout] {
+        generatedLayouts(
+            for: snapshot,
+            relayoutSeed: relayoutSeed,
+            capturesMotion: true
+        )
+    }
+
+    private static func generatedLayouts(
+        for snapshot: NoteGraphSnapshot,
+        relayoutSeed: Int,
+        capturesMotion: Bool
+    ) -> [NoteGraphLayout] {
         guard !snapshot.nodes.isEmpty else {
-            return .empty
+            return [.empty]
         }
 
         if snapshot.nodes.count == 1, let node = snapshot.nodes.first {
-            return NoteGraphLayout(positions: [node.id: .zero])
+            return [NoteGraphLayout(positions: [node.id: .zero])]
         }
 
         if snapshot.edges.isEmpty {
-            return scatterLayout(
+            return [scatterLayout(
                 for: snapshot.nodes,
                 pinnedNodeID: snapshot.selectedNodeID,
                 relayoutSeed: relayoutSeed
-            )
+            )]
         }
 
         let nodes = snapshot.nodes
@@ -809,8 +1016,10 @@ enum NoteGraphLayoutEngine {
         let idealEdgeLength = max(0.34, 1.22 / sqrt(CGFloat(max(nodes.count, 1))))
         let maxRadius: CGFloat = 2.4
         let selectedComponentIndex = pinnedNodeID.flatMap { componentByNode[$0] }
+        let frameStride = 5
+        var sampledPositions: [[CGPoint]] = capturesMotion ? [positions] : []
 
-        for _ in 0..<220 {
+        for iteration in 0..<220 {
             var displacement = Array(repeating: CGVector.zero, count: nodes.count)
 
             for firstIndex in nodes.indices {
@@ -886,11 +1095,27 @@ enum NoteGraphLayoutEngine {
             }
 
             temperature *= 0.989
+
+            if capturesMotion,
+               (iteration + 1).isMultiple(of: frameStride) || iteration == 219 {
+                sampledPositions.append(positions)
+            }
         }
 
-        let normalizedPositions = normalized(positions, pinnedNodeID: pinnedNodeID, nodes: nodes)
-        let mappedPositions = Dictionary(uniqueKeysWithValues: zip(nodes.map(\.id), normalizedPositions))
-        return NoteGraphLayout(positions: mappedPositions)
+        if !capturesMotion {
+            sampledPositions = [positions]
+        }
+
+        return sampledPositions.map { sampledPosition in
+            let normalizedPositions = normalized(
+                sampledPosition,
+                pinnedNodeID: pinnedNodeID,
+                nodes: nodes
+            )
+            return NoteGraphLayout(
+                positions: Dictionary(uniqueKeysWithValues: zip(nodes.map(\.id), normalizedPositions))
+            )
+        }
     }
 
     /// Cheaply re-centers an existing layout on a (possibly new) pinned node
