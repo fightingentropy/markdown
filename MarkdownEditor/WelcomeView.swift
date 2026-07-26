@@ -31,28 +31,17 @@ struct WelcomeView: View {
                         .foregroundStyle(.secondary)
 
                     ForEach(recentVaults.records.prefix(5)) { record in
-                        Button {
-                            if workspace.openVault(record.url) {
-                                recentVaults.recordOpened(record.url, displayName: record.displayName)
-                            }
-                        } label: {
-                            HStack {
-                                Image(systemName: "folder")
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(record.displayName)
-                                    Text(record.url.path)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
+                        RecentVaultRow(
+                            record: record,
+                            onOpen: {
+                                if workspace.openVault(record.url) {
+                                    recentVaults.recordOpened(record.url, displayName: record.displayName)
                                 }
-                                Spacer()
+                            },
+                            onRemove: {
+                                recentVaults.remove(record)
                             }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 9)
-                        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
+                        )
                     }
                 }
                 .frame(width: 460)
@@ -76,6 +65,64 @@ struct WelcomeView: View {
         }
         .onAppear {
             recentVaults.pruneUnavailable()
+        }
+    }
+}
+
+private struct RecentVaultRow: View {
+    let record: RecentVaultRecord
+    let onOpen: () -> Void
+    let onRemove: () -> Void
+
+    @State private var isHovering = false
+    @State private var isRemoveHovering = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button(action: onOpen) {
+                HStack {
+                    Image(systemName: "folder")
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(record.displayName)
+                        Text(record.url.path)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isHovering {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(isRemoveHovering ? .primary : .secondary)
+                        .frame(width: 18, height: 18)
+                        .background {
+                            if isRemoveHovering {
+                                Circle().fill(Color.primary.opacity(0.12))
+                            }
+                        }
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .onHover { isRemoveHovering = $0 }
+                .help("Remove from Recent Vaults")
+                .accessibilityLabel("Remove \(record.displayName) from Recent Vaults")
+                .transition(.opacity)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
+        .onHover { isHovering = $0 }
+        .animation(.easeInOut(duration: 0.12), value: isHovering)
+        .animation(.easeInOut(duration: 0.12), value: isRemoveHovering)
+        .contextMenu {
+            Button("Remove from Recent Vaults", action: onRemove)
         }
     }
 }
