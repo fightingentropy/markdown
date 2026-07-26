@@ -39,8 +39,17 @@ struct ContentView: View {
         .navigationSplitViewStyle(.balanced)
         .navigationTitle("")
         .toolbar {
-            ToolbarItem(placement: .navigation) {
-                titlebarTabs
+            if #available(macOS 26.0, *) {
+                ToolbarItem(placement: .navigation) {
+                    titlebarTabs
+                }
+                // Keep the tab bar floating directly on the titlebar; without
+                // this macOS 26 draws a glass tile behind the custom view.
+                .sharedBackgroundVisibility(.hidden)
+            } else {
+                ToolbarItem(placement: .navigation) {
+                    titlebarTabs
+                }
             }
         }
         .frame(minWidth: 700, minHeight: 500)
@@ -250,51 +259,47 @@ struct ContentView: View {
     }
 
     private var noteViewToolbar: some View {
-        HStack(spacing: 8) {
-            Picker("View", selection: $viewMode) {
-                ForEach(OpenViewMode.allCases) { mode in
-                    Label(mode.title, systemImage: mode.systemImage)
-                        .labelStyle(.iconOnly)
-                        .tag(mode)
+        HStack(spacing: 2) {
+            ForEach(OpenViewMode.allCases) { mode in
+                TitlebarIconButton(
+                    systemImage: mode.systemImage,
+                    isSelected: viewMode == mode,
+                    help: mode.title
+                ) {
+                    viewMode = mode
                 }
             }
-            .pickerStyle(.segmented)
-            .controlSize(.regular)
-            .labelsHidden()
-            .font(.system(size: 14, weight: .medium))
-            .frame(width: 164)
-            .help("Editor, Preview, Graph, and Bases")
-            .accessibilityLabel("Note View")
 
-            Button {
+            TitlebarSeparator()
+
+            TitlebarIconButton(
+                systemImage: "rectangle.split.2x1",
+                isActive: workspaceSession.splitPreview,
+                help: workspaceSession.splitPreview ? "Hide Split Preview" : "Show Split Preview"
+            ) {
                 workspaceSession.splitPreview.toggle()
-            } label: {
-                Image(systemName: "rectangle.split.2x1")
-                    .font(.system(size: 14, weight: .medium))
-                    .frame(width: 20, height: 20)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.regular)
-            .help(workspaceSession.splitPreview ? "Hide Split Preview" : "Show Split Preview")
             .disabled(!workspace.selectedFileIsMarkdown || viewMode != .editor)
-            .tint(workspaceSession.splitPreview ? .accentColor : nil)
 
-            Button {
+            TitlebarIconButton(
+                systemImage: "sidebar.trailing",
+                isActive: isInspectorPresented,
+                help: isInspectorPresented ? "Hide Note Inspector" : "Show Note Inspector"
+            ) {
                 isInspectorPresented.toggle()
-            } label: {
-                Image(systemName: "sidebar.trailing")
-                    .font(.system(size: 14, weight: .medium))
-                    .frame(width: 20, height: 20)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.regular)
-            .help(isInspectorPresented ? "Hide Note Inspector" : "Show Note Inspector")
-            .tint(isInspectorPresented ? .accentColor : nil)
+
+            TitlebarSeparator()
 
             moreNoteActionsMenu
         }
-        .fixedSize()
+        .padding(.horizontal, 4)
         .padding(.vertical, 3)
+        .background {
+            Capsule(style: .continuous)
+                .fill(Color.primary.opacity(0.055))
+        }
+        .fixedSize()
     }
 
     private var moreNoteActionsMenu: some View {
@@ -350,12 +355,10 @@ struct ContentView: View {
                 Label("Vault Health", systemImage: "checkmark.shield")
             }
         } label: {
-            Image(systemName: "ellipsis.circle")
-                .font(.system(size: 16, weight: .medium))
-                .frame(width: 24, height: 24)
+            TitlebarMenuLabel()
         }
         .menuStyle(.borderlessButton)
-        .controlSize(.regular)
+        .menuIndicator(.hidden)
         .fixedSize()
         .help("More Note Actions")
         .accessibilityLabel("More Note Actions")
@@ -629,6 +632,81 @@ private struct SaveStatusAlerts: ViewModifier {
             } message: {
                 Text(workspace.saveError ?? "")
             }
+    }
+}
+
+// MARK: - Titlebar Controls
+
+/// A borderless icon button for the titlebar. Selected segments get a soft
+/// accent highlight (matching the selected tab); active toggles only tint the
+/// glyph. No boxed bezels.
+private struct TitlebarIconButton: View {
+    let systemImage: String
+    var isSelected = false
+    var isActive = false
+    var help: String = ""
+    let action: () -> Void
+
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(iconColor)
+                .frame(width: 26, height: 22)
+                .background {
+                    if isSelected {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.accentColor.opacity(isHovering ? 0.26 : 0.18))
+                    } else if isHovering, isEnabled {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.primary.opacity(0.07))
+                    }
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .animation(.easeInOut(duration: 0.1), value: isHovering)
+        .help(help)
+        .accessibilityLabel(help)
+    }
+
+    private var iconColor: Color {
+        guard isEnabled else { return .secondary.opacity(0.5) }
+        if isSelected || isActive { return .accentColor }
+        return isHovering ? .primary : .secondary
+    }
+}
+
+private struct TitlebarSeparator: View {
+    var body: some View {
+        Divider()
+            .frame(height: 14)
+            .padding(.horizontal, 3)
+            .opacity(0.6)
+    }
+}
+
+private struct TitlebarMenuLabel: View {
+    @State private var isHovering = false
+
+    var body: some View {
+        Image(systemName: "ellipsis")
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(isHovering ? Color.primary : Color.secondary)
+            .frame(width: 22, height: 22)
+            .background {
+                if isHovering {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.primary.opacity(0.07))
+                }
+            }
+            .contentShape(Rectangle())
+            .onHover { isHovering = $0 }
+            .animation(.easeInOut(duration: 0.1), value: isHovering)
     }
 }
 

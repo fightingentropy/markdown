@@ -8,9 +8,14 @@ struct NoteTabBar: View {
     var body: some View {
         if !session.tabs.isEmpty {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
+                HStack(spacing: 2) {
                     ForEach(session.tabs, id: \.self) { url in
-                        tab(for: url)
+                        NoteTab(
+                            workspace: workspace,
+                            session: session,
+                            url: url,
+                            isCompact: isCompact
+                        )
                     }
                 }
                 .padding(.horizontal, isCompact ? 4 : 8)
@@ -18,56 +23,96 @@ struct NoteTabBar: View {
             }
         }
     }
+}
 
-    private func tab(for url: URL) -> some View {
-        let isSelected = workspace.selectedFileURL?.standardizedFileURL == url.standardizedFileURL
-        let isPinned = session.isPinned(url)
+private struct NoteTab: View {
+    let workspace: Workspace
+    let session: WorkspaceSession
+    let url: URL
+    var isCompact = false
 
-        return HStack(spacing: 6) {
+    @State private var isHovering = false
+    @State private var isCloseHovering = false
+
+    private var isSelected: Bool {
+        workspace.selectedFileURL?.standardizedFileURL == url.standardizedFileURL
+    }
+
+    private var isPinned: Bool {
+        session.isPinned(url)
+    }
+
+    private var title: String {
+        workspace.tabTitle(for: url)
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if isPinned {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+            }
+
             Button {
                 workspace.selectFile(url)
             } label: {
-                HStack(spacing: 6) {
-                    if isPinned {
-                        Image(systemName: "pin.fill")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    Text(workspace.tabTitle(for: url))
-                        .lineLimit(1)
-                }
+                Text(title)
+                    .font(.system(size: isCompact ? 12 : 13))
+                    .lineLimit(1)
             }
             .buttonStyle(.plain)
 
             Button {
-                closeTab(url)
+                closeTab()
             } label: {
                 Image(systemName: "xmark")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(isCloseHovering ? .primary : .secondary)
+                    .frame(width: 14, height: 14)
+                    .background {
+                        if isCloseHovering {
+                            Circle().fill(Color.primary.opacity(0.12))
+                        }
+                    }
+                    .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Close \(workspace.tabTitle(for: url))")
+            .onHover { isCloseHovering = $0 }
+            .opacity(isHovering || isSelected ? 1 : 0.35)
+            .accessibilityLabel("Close \(title)")
         }
-        .padding(.horizontal, isCompact ? 8 : 10)
+        .padding(.leading, isCompact ? 10 : 12)
+        .padding(.trailing, isCompact ? 7 : 8)
         .padding(.vertical, isCompact ? 4 : 6)
-        .background(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.055))
-        )
+        .background {
+            Capsule(style: .continuous)
+                .fill(backgroundColor)
+        }
+        .contentShape(Capsule(style: .continuous))
+        .onHover { isHovering = $0 }
+        .animation(.easeInOut(duration: 0.12), value: isHovering)
+        .animation(.easeInOut(duration: 0.12), value: isCloseHovering)
         .contextMenu {
             Button(isPinned ? "Unpin" : "Pin") {
                 session.togglePinned(url)
             }
             Button("Close") {
-                closeTab(url)
+                closeTab()
             }
         }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 
-    private func closeTab(_ url: URL) {
+    private var backgroundColor: Color {
+        if isSelected {
+            return Color.accentColor.opacity(isHovering ? 0.24 : 0.18)
+        }
+        return Color.primary.opacity(isHovering ? 0.08 : 0)
+    }
+
+    private func closeTab() {
         NoteTabCoordinator.close(url, workspace: workspace, session: session)
     }
 }
