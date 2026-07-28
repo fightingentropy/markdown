@@ -223,6 +223,48 @@ final class EditorLinkPreviewTests: XCTestCase {
     }
 
     @MainActor
+    func testFinalLinkPreviewExtendsDocumentScrollRangeWithoutTrailingNewline() throws {
+        let scrollView = NSTextView.scrollableTextView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 640, height: 320)
+        let textView = try XCTUnwrap(scrollView.documentView as? NSTextView)
+        textView.isVerticallyResizable = true
+        textView.minSize = NSSize(width: 0, height: 320)
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainerInset = NSSize(width: 40, height: 28)
+        textView.textContainer?.containerSize = NSSize(
+            width: 560,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        let link = "https://x.com/user/status/12345"
+        textView.string = (0..<40).map { "Plain line \($0)" }.joined(separator: "\n")
+            + "\n\(link)"
+
+        let controller = EditorLinkPreviewController()
+        XCTAssertEqual(controller.refresh(in: textView, openURL: { _ in }), 1)
+
+        let linkRange = (textView.string as NSString).range(of: link)
+        let layoutManager = try XCTUnwrap(textView.layoutManager)
+        let glyphRange = layoutManager.glyphRange(
+            forCharacterRange: linkRange,
+            actualCharacterRange: nil
+        )
+        let linkLine = layoutManager.lineFragmentUsedRect(
+            forGlyphAt: glyphRange.location,
+            effectiveRange: nil
+        )
+        let expectedCardBottom =
+            textView.textContainerOrigin.y + linkLine.maxY + 2 + 220
+
+        XCTAssertGreaterThanOrEqual(
+            textView.frame.height,
+            expectedCardBottom + 8
+        )
+    }
+
+    @MainActor
     func testEmbedCachePersistsXHeightAndSnapshotAcrossInstances() throws {
         let suiteName = "EditorLinkPreviewTests.\(UUID().uuidString)"
         let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

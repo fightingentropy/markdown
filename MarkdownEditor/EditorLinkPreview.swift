@@ -653,6 +653,7 @@ final class EditorLinkPreviewController {
     private static let initialXCardHeight: CGFloat = 220
     private static let maximumXCardHeight: CGFloat = 720
     private static let cardTopSpacing: CGFloat = 2
+    private static let cardBottomSpacing: CGFloat = 8
     private static let youtubeCardWidth: CGFloat = 640
     private static let xCardWidth: CGFloat = 550
 
@@ -723,9 +724,15 @@ final class EditorLinkPreviewController {
 
         let containerOrigin = textView.textContainerOrigin
         let availableWidth = max(0, textContainer.containerSize.width)
+        updateDocumentMinimumHeight(
+            in: textView,
+            layoutManager: layoutManager,
+            containerOrigin: containerOrigin,
+            availableWidth: availableWidth
+        )
         let visibleRect = textView.visibleRect
         let maximumCardFootprint =
-            Self.maximumXCardHeight + Self.cardTopSpacing + 8
+            Self.maximumXCardHeight + Self.cardTopSpacing + Self.cardBottomSpacing
         let candidateRect = NSRect(
             x: 0,
             y: max(0, visibleRect.minY - containerOrigin.y - maximumCardFootprint),
@@ -828,7 +835,9 @@ final class EditorLinkPreviewController {
                 effectiveRange: nil
             ) as? NSParagraphStyle
             let desiredSpacing =
-                height(for: preview, availableWidth: availableWidth) + Self.cardTopSpacing + 8
+                height(for: preview, availableWidth: availableWidth)
+                    + Self.cardTopSpacing
+                    + Self.cardBottomSpacing
             guard abs((current?.paragraphSpacing ?? 0) - desiredSpacing) > 0.5 else {
                 continue
             }
@@ -846,6 +855,47 @@ final class EditorLinkPreviewController {
         }
         storage.endEditing()
         return updates.count
+    }
+
+    /// AppKit omits `paragraphSpacing` after the document's final paragraph.
+    /// Link cards normally live inside that spacing, so a card attached to the
+    /// last line can extend beyond the NSTextView's document frame and become
+    /// impossible to reach by scrolling. Keep the document view tall enough to
+    /// contain that terminal overlay explicitly.
+    private func updateDocumentMinimumHeight(
+        in textView: NSTextView,
+        layoutManager: NSLayoutManager,
+        containerOrigin: CGPoint,
+        availableWidth: CGFloat
+    ) {
+        guard let scrollView = textView.enclosingScrollView else { return }
+
+        var requiredHeight = scrollView.contentSize.height
+        let textLength = textView.textStorage?.length ?? 0
+        if let terminalPreview = previews.last(where: {
+            NSMaxRange($0.paragraphRange) >= textLength
+        }) {
+            layoutManager.ensureLayout(
+                forCharacterRange: terminalPreview.sourceRange
+            )
+            if let terminalCardFrame = frame(
+                for: terminalPreview,
+                layoutManager: layoutManager,
+                containerOrigin: containerOrigin,
+                availableWidth: availableWidth
+            ) {
+                requiredHeight = max(
+                    requiredHeight,
+                    terminalCardFrame.maxY + Self.cardBottomSpacing
+                )
+            }
+        }
+
+        requiredHeight = ceil(requiredHeight)
+        guard abs(textView.minSize.height - requiredHeight) > 0.5 else { return }
+
+        textView.minSize.height = requiredHeight
+        textView.sizeToFit()
     }
 
     private func synchronizeCards(
