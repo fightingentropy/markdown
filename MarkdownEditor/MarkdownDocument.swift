@@ -201,7 +201,9 @@ struct NoteSearchEntry: Sendable, Identifiable {
     let title: String
     let relativePath: String?
     let body: String
+    let foldedTitle: String
     let foldedTitleHaystack: String
+    var searchMetadata: ObsidianSearchMetadata? = nil
 }
 
 /// Result of a search pass. `Sendable` so the filtering can run off the main
@@ -1221,6 +1223,7 @@ final class Workspace {
                 title: title,
                 relativePath: relativePath(for: file),
                 body: noteBody(for: file.url) ?? "",
+                foldedTitle: Self.foldedForSearch(title),
                 foldedTitleHaystack: Self.foldedForSearch(haystack)
             )
         }
@@ -1242,13 +1245,33 @@ final class Workspace {
         }
 
         let foldedQuery = foldedForSearch(trimmedQuery)
-        var titleMatches: [NoteSearchResult] = []
+        var titleMatches: [(rank: Int, sourceIndex: Int, result: NoteSearchResult)] = []
         var bodyMatches: [NoteSearchResult] = []
 
-        for entry in entries {
+        for (sourceIndex, entry) in entries.enumerated() {
             if entry.foldedTitleHaystack.contains(foldedQuery) {
+                let rank: Int
+                if entry.foldedTitle == foldedQuery {
+                    rank = 0
+                } else if entry.foldedTitle.hasPrefix(foldedQuery) {
+                    rank = 1
+                } else if entry.foldedTitle.contains(foldedQuery) {
+                    rank = 2
+                } else {
+                    rank = 3
+                }
                 titleMatches.append(
-                    NoteSearchResult(id: entry.id, url: entry.url, title: entry.title, subtitle: entry.relativePath, isBodyMatch: false)
+                    (
+                        rank: rank,
+                        sourceIndex: sourceIndex,
+                        result: NoteSearchResult(
+                            id: entry.id,
+                            url: entry.url,
+                            title: entry.title,
+                            subtitle: entry.relativePath,
+                            isBodyMatch: false
+                        )
+                    )
                 )
             } else if let snippet = searchSnippet(in: entry.body, query: trimmedQuery) {
                 bodyMatches.append(
@@ -1257,7 +1280,13 @@ final class Workspace {
             }
         }
 
-        return titleMatches + bodyMatches
+        let rankedTitleMatches = titleMatches
+            .sorted {
+                if $0.rank != $1.rank { return $0.rank < $1.rank }
+                return $0.sourceIndex < $1.sourceIndex
+            }
+            .map(\.result)
+        return rankedTitleMatches + bodyMatches
     }
 
     /// Returns a single-line, match-centered snippet, or `nil` if `query` is not

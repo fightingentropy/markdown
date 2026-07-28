@@ -4,6 +4,11 @@ enum PaletteResult: Equatable {
     case file(URL)
 }
 
+private struct PaletteSearchOutput: Sendable {
+    var entries: [NoteSearchEntry]
+    let results: [NoteSearchResult]
+}
+
 struct CommandPaletteView: View {
     let workspace: Workspace
     let onDismiss: () -> Void
@@ -114,18 +119,28 @@ struct CommandPaletteView: View {
                 }
             }
             .frame(width: 640)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .background(
+                Color(nsColor: .windowBackgroundColor),
+                in: RoundedRectangle(cornerRadius: 24, style: .continuous)
+            )
             .overlay {
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .strokeBorder(.white.opacity(0.08))
+                    .strokeBorder(.primary.opacity(0.1))
             }
             .shadow(color: .black.opacity(0.2), radius: 24, y: 16)
             .padding(24)
         }
         .onAppear {
-            isSearchFieldFocused = true
             entries = workspace.makeSearchEntries()
             results = Workspace.search(entries, query: "")
+        }
+        .task {
+            // The palette is an overlay, so its `onAppear` can run before the
+            // text field is attached to the window. Defer the focus request by
+            // one main-actor turn so it replaces the editor as first responder.
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            isSearchFieldFocused = true
         }
         .onExitCommand {
             dismiss()
@@ -148,28 +163,50 @@ struct CommandPaletteView: View {
             return .handled
         }
         .task(id: query) {
-            // Empty queries resolve immediately so the full list shows without
-            // flicker; otherwise debounce ~120ms so a burst of keystrokes
-            // collapses into one filter pass.
-            if !query.isEmpty {
-                do {
-                    try await Task.sleep(nanoseconds: 120_000_000)
-                } catch {
-                    return
-                }
-            }
-
             let snapshot = entries
             let currentQuery = query
-            // Filter off the main actor so large vaults don't stall typing.
-            let filtered = await Task.detached(priority: .userInitiated) {
-                ObsidianAdvancedSearchEvaluator.search(snapshot, query: currentQuery)
-            }.value
+            let worker = Task.detached(priority: .userInitiated) {
+                Self.search(entries: snapshot, query: currentQuery)
+            }
+            let output = await withTaskCancellationHandler {
+                await worker.value
+            } onCancel: {
+                worker.cancel()
+            }
 
-            guard !Task.isCancelled else { return }
-            results = filtered
+            guard !Task.isCancelled, let output else { return }
+            entries = output.entries
+            results = output.results
             selectedIndex = 0
         }
+    }
+
+    private nonisolated static func search(
+        entries: [NoteSearchEntry],
+        query: String
+    ) -> PaletteSearchOutput? {
+        var indexedEntries = entries
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Plain text takes the lightweight ranked path. Actual operators cache
+        // their metadata once in this palette snapshot so subsequent advanced
+        // queries do not reparse every note.
+        if !trimmedQuery.isEmpty,
+           ObsidianAdvancedSearchParser.plainTextQuery(in: trimmedQuery) == nil {
+            for index in indexedEntries.indices {
+                guard !Task.isCancelled else { return nil }
+                if indexedEntries[index].searchMetadata == nil {
+                    indexedEntries[index].searchMetadata = ObsidianMetadataParser.searchMetadata(
+                        in: indexedEntries[index].body
+                    )
+                }
+            }
+        }
+
+        guard !Task.isCancelled else { return nil }
+        let results = ObsidianAdvancedSearchEvaluator.search(indexedEntries, query: query)
+        guard !Task.isCancelled else { return nil }
+        return PaletteSearchOutput(entries: indexedEntries, results: results)
     }
 
     @ViewBuilder

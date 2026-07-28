@@ -54,6 +54,25 @@ enum ObsidianAdvancedSearchParser {
         return ObsidianAdvancedSearchQuery(groups: populated)
     }
 
+    /// Returns a normalized phrase when the query contains only ordinary text.
+    /// Operators, exclusions, and OR groups return `nil` so the caller can use
+    /// the advanced evaluator instead.
+    static func plainTextQuery(in source: String) -> String? {
+        let query = parse(source)
+        guard query.groups.count <= 1 else { return nil }
+        guard let group = query.groups.first else {
+            return source.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        var values: [String] = []
+        for term in group.terms {
+            guard !term.isExcluded else { return nil }
+            guard case .text(let value, _) = term.predicate else { return nil }
+            values.append(value)
+        }
+        return values.joined(separator: " ")
+    }
+
     private struct Token {
         let text: String
         let containsQuotedContent: Bool

@@ -62,6 +62,14 @@ struct ObsidianDocumentMetadata: Equatable, Sendable {
     }
 }
 
+/// The subset of note metadata needed by command-palette filters. Keeping this
+/// separate from `ObsidianDocumentMetadata` avoids rebuilding a note's outline
+/// when a search only needs tags and frontmatter properties.
+struct ObsidianSearchMetadata: Equatable, Sendable {
+    let tags: [String]
+    let properties: [String: ObsidianPropertyValue]
+}
+
 enum ObsidianMetadataParser {
     static func parse(_ markdown: String) -> ObsidianDocumentMetadata {
         let lines = sourceLines(in: markdown)
@@ -84,6 +92,21 @@ enum ObsidianMetadataParser {
             inlineTags: extractInlineTags(from: bodyLines),
             properties: properties,
             outline: buildOutline(from: bodyLines)
+        )
+    }
+
+    static func searchMetadata(in markdown: String) -> ObsidianSearchMetadata {
+        let lines = sourceLines(in: markdown)
+        let frontmatterParse = parseFrontmatter(in: markdown, lines: lines)
+        let properties = frontmatterParse.frontmatter?.properties ?? [:]
+        let frontmatterTags = stringList(forKeys: ["tags", "tag"], in: properties)
+            .compactMap(normalizedTag(_:))
+        let contentStartLine = frontmatterParse.closingLineIndex.map { $0 + 1 } ?? 0
+        let bodyLines = contentStartLine < lines.count ? Array(lines[contentStartLine...]) : []
+
+        return ObsidianSearchMetadata(
+            tags: uniquedCaseInsensitive(frontmatterTags + extractInlineTags(from: bodyLines)),
+            properties: properties
         )
     }
 

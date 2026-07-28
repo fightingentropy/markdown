@@ -4,18 +4,24 @@ enum ObsidianAdvancedSearchEvaluator {
     static func search(_ entries: [NoteSearchEntry], query source: String) -> [NoteSearchResult] {
         let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return Workspace.search(entries, query: "") }
+        if let plainText = ObsidianAdvancedSearchParser.plainTextQuery(in: trimmed) {
+            return Workspace.search(entries, query: plainText)
+        }
 
         let query = ObsidianAdvancedSearchParser.parse(trimmed)
         guard !query.isEmpty else { return Workspace.search(entries, query: trimmed) }
 
-        return entries.compactMap { entry in
-            let metadata = ObsidianMetadataParser.parse(entry.body)
+        var results: [NoteSearchResult] = []
+        for entry in entries {
+            guard !Task.isCancelled else { return [] }
+            let metadata = entry.searchMetadata
+                ?? ObsidianMetadataParser.searchMetadata(in: entry.body)
             guard query.groups.contains(where: { group in
                 group.terms.allSatisfy { term in
                     let matches = matches(term.predicate, entry: entry, metadata: metadata)
                     return term.isExcluded ? !matches : matches
                 }
-            }) else { return nil }
+            }) else { continue }
 
             let snippetTerm = query.groups
                 .flatMap(\.terms)
@@ -24,20 +30,23 @@ enum ObsidianAdvancedSearchEvaluator {
                 guard case .text(let value, _) = term.predicate else { return nil }
                 return Workspace.searchSnippet(in: entry.body, query: value)
             }
-            return NoteSearchResult(
-                id: entry.id,
-                url: entry.url,
-                title: entry.title,
-                subtitle: snippet ?? entry.relativePath,
-                isBodyMatch: snippet != nil
+            results.append(
+                NoteSearchResult(
+                    id: entry.id,
+                    url: entry.url,
+                    title: entry.title,
+                    subtitle: snippet ?? entry.relativePath,
+                    isBodyMatch: snippet != nil
+                )
             )
         }
+        return results
     }
 
     private static func matches(
         _ predicate: ObsidianSearchPredicate,
         entry: NoteSearchEntry,
-        metadata: ObsidianDocumentMetadata
+        metadata: ObsidianSearchMetadata
     ) -> Bool {
         switch predicate {
         case .text(let value, _):
