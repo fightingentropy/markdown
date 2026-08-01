@@ -56,7 +56,7 @@ final class NoteGraphTests: XCTestCase {
                     modificationDate: Date(),
                     noteTitle: Workspace.extractTitle(from: content),
                     noteLinks: MarkdownNoteLinkExtractor.references(in: content),
-                    noteBody: content
+                    noteBodyStorage: SearchableNoteBody(content)
                 )
             )
         })
