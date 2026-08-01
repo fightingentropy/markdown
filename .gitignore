@@ -4,7 +4,14 @@ __pycache__/
 .derived/
 .release-assets/
 .release-build*/
-MarkdownEditor.xcodeproj/
+MarkdownEditor.xcodeproj/*
+!MarkdownEditor.xcodeproj/project.xcworkspace/
+MarkdownEditor.xcodeproj/project.xcworkspace/*
+!MarkdownEditor.xcodeproj/project.xcworkspace/xcshareddata/
+MarkdownEditor.xcodeproj/project.xcworkspace/xcshareddata/*
+!MarkdownEditor.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+MarkdownEditor.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/*
+!MarkdownEditor.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 
 # Sparkle release artifacts are hosted via GitHub Releases, not kept in git
 /releases/*.zip

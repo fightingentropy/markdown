@@ -26,19 +26,36 @@ enum ObsidianAdvancedSearchEvaluator {
             let snippetTerm = query.groups
                 .flatMap(\.terms)
                 .first(where: { !$0.isExcluded && isTextPredicate($0.predicate) })
-            let snippet = snippetTerm.flatMap { term -> String? in
+            let snippetQuery = snippetTerm.flatMap { term -> String? in
                 guard case .text(let value, _) = term.predicate else { return nil }
-                return Workspace.searchSnippet(in: entry.body, query: value)
+                return value
             }
-            results.append(
-                NoteSearchResult(
-                    id: entry.id,
-                    url: entry.url,
-                    title: entry.title,
-                    subtitle: snippet ?? entry.relativePath,
-                    isBodyMatch: snippet != nil
+            if let snippetQuery,
+               entry.bodyStorage.foldedText.contains(Workspace.foldedForSearch(snippetQuery)) {
+                results.append(
+                    NoteSearchResult(
+                        id: entry.id,
+                        url: entry.url,
+                        title: entry.title,
+                        fallbackSubtitle: entry.relativePath,
+                        snippetSource: NoteSearchSnippetSource(
+                            bodyStorage: entry.bodyStorage,
+                            query: snippetQuery
+                        ),
+                        isBodyMatch: true
+                    )
                 )
-            )
+            } else {
+                results.append(
+                    NoteSearchResult(
+                        id: entry.id,
+                        url: entry.url,
+                        title: entry.title,
+                        subtitle: entry.relativePath,
+                        isBodyMatch: false
+                    )
+                )
+            }
         }
         return results
     }

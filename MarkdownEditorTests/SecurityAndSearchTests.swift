@@ -86,7 +86,13 @@ final class SecurityAndSearchTests: XCTestCase {
     }
 
     func testSearchIsCaseAndDiacriticInsensitive() throws {
-        let fixture = try makeVault(files: [("Cafe", "# Café\n\nEspresso résumé")])
+        let decomposedCafe = "Cafe\u{301}"
+        let fixture = try makeVault(files: [
+            ("Cafe", "# \(decomposedCafe)\n\nEspresso résumé"),
+            ("Istanbul", "# İstanbul\n\nBosphorus"),
+            ("Igdir", "# IĞDIR\n\nTurkish casing"),
+            ("Angstrom", "# A\u{30A}ngström\n\nCanonical normalization")
+        ])
         let workspace = Workspace()
         workspace.vaultURL = fixture.vaultURL
         workspace.refreshFiles()
@@ -94,6 +100,28 @@ final class SecurityAndSearchTests: XCTestCase {
 
         XCTAssertEqual(Workspace.search(entries, query: "cafe").count, 1)
         XCTAssertEqual(Workspace.search(entries, query: "RESUME").count, 1)
+        XCTAssertEqual(Workspace.search(entries, query: "istanbul").count, 1)
+        XCTAssertEqual(Workspace.search(entries, query: "ığdır").map(\.title), ["IĞDIR"])
+        XCTAssertEqual(Workspace.search(entries, query: "angstrom").map(\.title), ["Ångström"])
+    }
+
+    func testInvalidOrExpiredBookmarkIsRemovedInsteadOfRetriedForever() {
+        let defaults = UserDefaults.standard
+        let key = "vaultBookmark"
+        let previousValue = defaults.data(forKey: key)
+        defer {
+            if let previousValue {
+                defaults.set(previousValue, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+
+        defaults.set(Data("expired-security-scope".utf8), forKey: key)
+        let workspace = Workspace()
+
+        XCTAssertNil(workspace.vaultURL)
+        XCTAssertNil(defaults.data(forKey: key))
     }
 
     func testSearchSnippetCentersOnMatch() throws {
@@ -106,6 +134,21 @@ final class SecurityAndSearchTests: XCTestCase {
         XCTAssertTrue(snippet.hasPrefix("\u{2026}"))
         XCTAssertTrue(snippet.hasSuffix("\u{2026}"))
         XCTAssertLessThanOrEqual(snippet.count, 142)
+    }
+
+    func testBodyResultMaterializesAndCachesSnippetOnlyOnDemand() throws {
+        let fixture = try makeVault(files: [("Lazy", "# Lazy\n\nbody-only-needle")])
+        let workspace = Workspace()
+        workspace.vaultURL = fixture.vaultURL
+        workspace.refreshFiles()
+
+        let result = try XCTUnwrap(Workspace.search(workspace.makeSearchEntries(), query: "needle").first)
+        let source = try XCTUnwrap(result.snippetSource)
+        XCTAssertFalse(source.isMaterialized)
+
+        XCTAssertEqual(result.subtitle, "body-only-needle")
+        XCTAssertTrue(source.isMaterialized)
+        XCTAssertEqual(result.subtitle, "body-only-needle")
     }
 
     // MARK: - External-change conflict (H1) and write-error surfacing (H2)

@@ -22,6 +22,7 @@ struct CommandPaletteView: View {
     // rather than on every view render / table row.
     @State private var results: [NoteSearchResult] = []
     @State private var selectedIndex = 0
+    @State private var searchGeneration: UInt64 = 0
     @State private var savedSearches = SavedAdvancedSearchStore()
     @State private var isSaveSearchPresented = false
     @State private var savedSearchName = ""
@@ -145,6 +146,16 @@ struct CommandPaletteView: View {
         .onExitCommand {
             dismiss()
         }
+        .onChange(of: query) { _, _ in
+            searchGeneration &+= 1
+        }
+        .onChange(of: workspace.searchIndexRevision) { _, _ in
+            // A file presenter, rename, save, import, or delete may update the
+            // maintained index while the overlay is open. Refresh the cheap
+            // record snapshot and invalidate any in-flight older generation.
+            entries = workspace.makeSearchEntries()
+            searchGeneration &+= 1
+        }
         .alert("Save Search", isPresented: $isSaveSearchPresented) {
             TextField("Name", text: $savedSearchName)
             Button("Cancel", role: .cancel) {}
@@ -162,9 +173,16 @@ struct CommandPaletteView: View {
             moveSelection(by: 1)
             return .handled
         }
-        .task(id: query) {
+        .task(id: searchGeneration) {
+            let generation = searchGeneration
             let snapshot = entries
             let currentQuery = query
+            do {
+                try await Task.sleep(for: .milliseconds(70))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, generation == searchGeneration else { return }
             let worker = Task.detached(priority: .userInitiated) {
                 Self.search(entries: snapshot, query: currentQuery)
             }
@@ -174,7 +192,10 @@ struct CommandPaletteView: View {
                 worker.cancel()
             }
 
-            guard !Task.isCancelled, let output else { return }
+            guard !Task.isCancelled,
+                  generation == searchGeneration,
+                  currentQuery == query,
+                  let output else { return }
             entries = output.entries
             results = output.results
             selectedIndex = 0

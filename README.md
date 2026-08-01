@@ -95,12 +95,13 @@ It is designed as an Obsidian-compatible home for a plain-text vault, with safe 
 - Command palette for searching notes by title, body, file name, or relative path
 - Obsidian-style filters for text, file, path, tag, property, and task state
 - Quoted phrases, `OR` groups, exclusions, result snippets, and saved searches
+- Incrementally maintained full-text index with cancellation-safe background filtering and lazy snippets
 
 ### Updates
 
 - Built-in Sparkle updater for shipped builds
 - `Check for Updates…` menu item in the app
-- App reads the update feed from the root [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml)
+- App reads the update feed from the root [appcast.xml](appcast.xml)
 - Sparkle archives are intended to be hosted in GitHub Releases, not committed into the repo
 - Local installs intentionally disable Sparkle so `/Applications/Markdown.app` does not drift from the published feed
 
@@ -127,12 +128,12 @@ It is designed as an Obsidian-compatible home for a plain-text vault, with safe 
 
 ## Project Structure
 
-- [MarkdownEditor](/Users/erlinhoxha/Developer/Markdown/MarkdownEditor): app source code
-- [MarkdownEditorTests](/Users/erlinhoxha/Developer/Markdown/MarkdownEditorTests): unit tests
-- [project.yml](/Users/erlinhoxha/Developer/Markdown/project.yml): XcodeGen project definition
-- [scripts](/Users/erlinhoxha/Developer/Markdown/scripts): helper scripts, including release tooling
-- [releases](/Users/erlinhoxha/Developer/Markdown/releases): tracked release notes
-- [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml): Sparkle feed used by the app
+- [MarkdownEditor](MarkdownEditor): app source code
+- [MarkdownEditorTests](MarkdownEditorTests): unit tests
+- [project.yml](project.yml): XcodeGen project definition
+- [scripts](scripts): helper scripts, including release tooling
+- [releases](releases): tracked release notes
+- [appcast.xml](appcast.xml): Sparkle feed used by the app
 
 ## Run Locally
 
@@ -174,6 +175,28 @@ Release build:
 ```bash
 xcodebuild -project MarkdownEditor.xcodeproj -scheme MarkdownEditor -configuration Release build
 ```
+
+### Mandatory Check
+
+Run the same documentation, dependency-resolution, build, and test gate used by
+pull requests:
+
+```bash
+bash scripts/check.sh
+```
+
+The mandatory test suite includes deterministic 10,000- and 50,000-note search
+smoke thresholds. To collect a 12-sample p50/p95 distribution separately, run:
+
+```bash
+scripts/benchmark_search.sh --full
+```
+
+Each benchmark reports p50 and p95 query time, process peak RSS and peak delta,
+and cancellation latency before enforcing the maintained thresholds.
+
+`DownGFM` is pinned to an exact revision in `project.yml`, and the resolved
+package graph is committed so a moving branch cannot silently change a build.
 
 ### 3. Launch The Built App
 
@@ -227,7 +250,7 @@ Local installs created by `./scripts/install_local_app.sh` intentionally omit th
 
 ## Sparkle Update Flow
 
-For users, updates come from the root [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml).
+For users, updates come from the root [appcast.xml](appcast.xml).
 
 For developers, the important rule is:
 
@@ -243,7 +266,7 @@ If you want to publish a new app update, do this:
 
 ### 1. Bump The Version
 
-Edit [project.yml](/Users/erlinhoxha/Developer/Markdown/project.yml):
+Edit [project.yml](project.yml):
 
 - update `MARKETING_VERSION`
 - update `CURRENT_PROJECT_VERSION`
@@ -275,7 +298,7 @@ That command will:
 - create a local archive cache in `.release-assets/`
 - upload `Markdown-<version>.zip` and any new delta files to the matching GitHub Release
 - generate a local appcast from that archive cache
-- sync the root [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml) that Sparkle actually reads
+- sync the root [appcast.xml](appcast.xml) that Sparkle actually reads
 
 If your notes file is somewhere else, run:
 
@@ -289,7 +312,7 @@ If you only want to build locally and inspect the generated appcast without publ
 SPARKLE_PRIVATE_KEY=... ./scripts/cut_release.sh --skip-github-release
 ```
 
-That local-only mode leaves the root [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml) unchanged.
+That local-only mode leaves the root [appcast.xml](appcast.xml) unchanged.
 
 ### 4. Commit And Push
 
@@ -306,7 +329,7 @@ Once `main` contains the new release notes and updated appcast, Sparkle can offe
 After a release, you should expect:
 
 - `releases/Markdown-<version>.md`
-- root [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml)
+- root [appcast.xml](appcast.xml)
 - local `.release-assets/Markdown-<version>.zip`
 - GitHub Release assets for that version
 
@@ -324,7 +347,7 @@ If the archive URLs or notes URLs are hosted somewhere else:
 
 ## Notes On Keys And Signing
 
-- Local builds intentionally leave Sparkle feed settings blank in [project.yml](/Users/erlinhoxha/Developer/Markdown/project.yml)
+- Local builds intentionally leave Sparkle feed settings blank in [project.yml](project.yml)
 - `./scripts/cut_release.sh` injects `SPARKLE_FEED_URL` and derives `SPARKLE_PUBLIC_ED_KEY` from `SPARKLE_PRIVATE_KEY` at release time
 - If you need a non-default feed URL, set `SPARKLE_FEED_URL` when invoking the release script
 - Do not commit private keys to the repo
@@ -335,5 +358,5 @@ If the archive URLs or notes URLs are hosted somewhere else:
 
 Release builds should inject:
 
-- [appcast.xml](/Users/erlinhoxha/Developer/Markdown/appcast.xml)
+- [appcast.xml](appcast.xml)
 - feed URL: `https://raw.githubusercontent.com/fightingentropy/markdown/main/appcast.xml`

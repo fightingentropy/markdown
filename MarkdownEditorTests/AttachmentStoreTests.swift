@@ -87,6 +87,39 @@ final class AttachmentStoreTests: XCTestCase {
         )
     }
 
+    func testRejectsNestedAttachmentFolderSymlinkOutsideVault() throws {
+        let fixture = try makeFixture(appJSON: #"{"attachmentFolderPath":"safe/media"}"#)
+        let outsideURL = fixture.vaultURL.deletingLastPathComponent()
+            .appendingPathComponent("NestedAttachmentOutside-\(UUID().uuidString)", isDirectory: true)
+        let safeURL = fixture.vaultURL.appendingPathComponent("safe", isDirectory: true)
+        try FileManager.default.createDirectory(at: outsideURL, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: safeURL, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: safeURL.appendingPathComponent("media", isDirectory: true),
+            withDestinationURL: outsideURL
+        )
+        defer {
+            try? FileManager.default.removeItem(at: fixture.vaultURL)
+            try? FileManager.default.removeItem(at: outsideURL)
+        }
+
+        XCTAssertThrowsError(
+            try AttachmentStore.importImageData(
+                Data([1, 2, 3]),
+                suggestedFilename: "escape.png",
+                documentURL: fixture.documentURL,
+                vaultURL: fixture.vaultURL
+            )
+        ) { error in
+            guard case AttachmentStoreError.unsafeAttachmentFolder = error else {
+                return XCTFail("Expected unsafeAttachmentFolder, got \(error)")
+            }
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: outsideURL.appendingPathComponent("escape.png").path)
+        )
+    }
+
     func testExclusiveImageInstallNeverReplacesExistingFile() throws {
         let fixture = try makeFixture(appJSON: nil)
         defer { try? FileManager.default.removeItem(at: fixture.vaultURL) }

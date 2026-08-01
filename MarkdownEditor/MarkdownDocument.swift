@@ -176,7 +176,9 @@ struct CachedMarkdownMetadata: Sendable {
     let modificationDate: Date
     let noteTitle: String?
     let noteLinks: [NoteLinkReference]
-    let noteBody: String
+    let noteBodyStorage: SearchableNoteBody
+
+    var noteBody: String { noteBodyStorage.text }
 }
 
 /// Describes an unreconciled external modification: the file on disk changed
@@ -189,31 +191,6 @@ struct SaveConflict: Identifiable, Equatable {
     let fileName: String
     let onDiskContent: String
     let editorContent: String
-}
-
-/// A self-contained, `Sendable` snapshot of one note used for full-text
-/// command-palette search. Folded (case- and diacritic-insensitive) haystacks
-/// are precomputed once so per-keystroke filtering is a cheap substring test
-/// instead of a locale-aware scan over every file body on every render.
-struct NoteSearchEntry: Sendable, Identifiable {
-    let id: URL
-    let url: URL
-    let title: String
-    let relativePath: String?
-    let body: String
-    let foldedTitle: String
-    let foldedTitleHaystack: String
-    var searchMetadata: ObsidianSearchMetadata? = nil
-}
-
-/// Result of a search pass. `Sendable` so the filtering can run off the main
-/// actor and the result handed back to the view.
-struct NoteSearchResult: Sendable, Identifiable {
-    let id: URL
-    let url: URL
-    let title: String
-    let subtitle: String?
-    let isBodyMatch: Bool
 }
 
 @Observable
@@ -241,6 +218,7 @@ final class Workspace {
     }
     var isCommandPalettePresented = false
     var isLoadingSnapshot = false
+    private(set) var searchIndexRevision: UInt64 = 0
 
     /// Set when a save fails (disk full, permissions, unmounted volume, …) so
     /// the UI can surface it instead of silently dropping the user's edits. The
@@ -297,6 +275,7 @@ final class Workspace {
     private var snapshotGeneration = 0
     private var noteGraphGeneration = 0
     private var cachedMarkdownMetadataByPath: [String: CachedMarkdownMetadata] = [:]
+    private var noteSearchIndex = NoteSearchIndex()
     private var assetLookupByFilename: [String: [URL]] = [:]
     private var pendingEditorSelectionsByKey: [String: [Int]] = [:]
     private var editorSelectionPersistTasksByKey: [String: Task<Void, Never>] = [:]
@@ -344,6 +323,7 @@ final class Workspace {
         clearNoteGraph()
         cachedMarkdownMetadataByPath = [:]
         assetLookupByFilename = [:]
+        resetSearchIndex()
         refreshFilesInBackground(
             preferredSelectionURL: restoreSelectedFileURL(),
             selectFirstFileIfNeeded: true
@@ -358,19 +338,27 @@ final class Workspace {
             options: .withSecurityScope,
             relativeTo: nil,
             bookmarkDataIsStale: &isStale
-        ) else { return }
+        ) else {
+            // Do not leave an expired/corrupt bookmark poisoning every launch.
+            UserDefaults.standard.removeObject(forKey: Self.bookmarkKey)
+            return
+        }
+
+        if isStale {
+            guard let fresh = try? url.bookmarkData(
+                options: .withSecurityScope,
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            ) else {
+                UserDefaults.standard.removeObject(forKey: Self.bookmarkKey)
+                return
+            }
+            UserDefaults.standard.set(fresh, forKey: Self.bookmarkKey)
+        }
 
         beginAccessingVault(url)
         vaultURL = url
         restoreSortOrder()
-
-        if isStale, let fresh = try? url.bookmarkData(
-            options: .withSecurityScope,
-            includingResourceValuesForKeys: nil,
-            relativeTo: nil
-        ) {
-            UserDefaults.standard.set(fresh, forKey: Self.bookmarkKey)
-        }
 
         files = []
         sidebarNodes = []
@@ -380,6 +368,7 @@ final class Workspace {
         clearNoteGraph()
         cachedMarkdownMetadataByPath = [:]
         assetLookupByFilename = [:]
+        resetSearchIndex()
         refreshFilesInBackground(
             preferredSelectionURL: restoreSelectedFileURL(),
             selectFirstFileIfNeeded: true
@@ -398,6 +387,7 @@ final class Workspace {
             sidebarNodes = []
             cachedMarkdownMetadataByPath = [:]
             assetLookupByFilename = [:]
+            resetSearchIndex()
             clearNoteGraph()
             return
         }
@@ -411,6 +401,7 @@ final class Workspace {
         assetLookupByFilename = snapshot.assetLookupByFilename
         files = snapshot.files
         sidebarNodes = snapshot.nodes
+        reconcileSearchIndex()
 
         if let selectedFileURL {
             if let matchingURL = matchingSidebarURL(for: selectedFileURL) {
@@ -1210,27 +1201,67 @@ final class Workspace {
         return cachedMarkdownMetadataByPath[key]?.noteBody
     }
 
-    /// Builds a `Sendable` search index for the current vault. Called once when
-    /// the command palette opens; the resulting array can be filtered repeatedly
-    /// (and off the main actor) without touching `Workspace` state again.
+    /// Returns a cheap snapshot of the maintained index. Complete note bodies
+    /// remain shared, so opening the palette does not retain a duplicate vault.
     func makeSearchEntries() -> [NoteSearchEntry] {
-        files.map { file in
+        var entries = noteSearchIndex.entries
+        guard let selectedFileURL, selectedFileIsMarkdown,
+              let index = entries.firstIndex(where: { Self.urlsMatch($0.url, selectedFileURL) }),
+              entries[index].body != text else {
+            return entries
+        }
+
+        let existing = entries[index]
+        entries[index] = NoteSearchEntry(
+            id: existing.id,
+            url: existing.url,
+            title: existing.title,
+            relativePath: existing.relativePath,
+            bodyStorage: SearchableNoteBody(text),
+            foldedTitle: existing.foldedTitle,
+            foldedTitleHaystack: existing.foldedTitleHaystack,
+            searchMetadata: nil
+        )
+        return entries
+    }
+
+    private func reconcileSearchIndex() {
+        let candidates = files.map { file in
             let title = title(for: file)
             let haystack = "\(title)\n\(file.displayName)\n\(file.name)"
+            let metadataKey = Self.metadataCacheKey(for: file.url)
+            let bodyStorage = cachedMarkdownMetadataByPath[metadataKey]?.noteBodyStorage
+                ?? SearchableNoteBody("")
             return NoteSearchEntry(
                 id: file.id,
                 url: file.url,
                 title: title,
                 relativePath: relativePath(for: file),
-                body: noteBody(for: file.url) ?? "",
+                bodyStorage: bodyStorage,
                 foldedTitle: Self.foldedForSearch(title),
                 foldedTitleHaystack: Self.foldedForSearch(haystack)
             )
         }
+        if noteSearchIndex.reconcile(candidates) {
+            searchIndexRevision &+= 1
+        }
+    }
+
+    private func resetSearchIndex() {
+        if noteSearchIndex.removeAll() {
+            searchIndexRevision &+= 1
+        }
     }
 
     nonisolated static func foldedForSearch(_ string: String) -> String {
-        string.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+        string
+            .precomposedStringWithCanonicalMapping
+            .replacingOccurrences(of: "ı", with: "i")
+            .replacingOccurrences(of: "İ", with: "I")
+            .folding(
+                options: [.caseInsensitive, .diacriticInsensitive],
+                locale: Locale(identifier: "en_US_POSIX")
+            )
     }
 
     /// Pure, `nonisolated` full-text filter so it can run inside a detached task
@@ -1249,6 +1280,9 @@ final class Workspace {
         var bodyMatches: [NoteSearchResult] = []
 
         for (sourceIndex, entry) in entries.enumerated() {
+            if sourceIndex.isMultiple(of: 32), Task.isCancelled {
+                return []
+            }
             if entry.foldedTitleHaystack.contains(foldedQuery) {
                 let rank: Int
                 if entry.foldedTitle == foldedQuery {
@@ -1273,9 +1307,19 @@ final class Workspace {
                         )
                     )
                 )
-            } else if let snippet = searchSnippet(in: entry.body, query: trimmedQuery) {
+            } else if entry.bodyStorage.foldedText.contains(foldedQuery) {
                 bodyMatches.append(
-                    NoteSearchResult(id: entry.id, url: entry.url, title: entry.title, subtitle: snippet, isBodyMatch: true)
+                    NoteSearchResult(
+                        id: entry.id,
+                        url: entry.url,
+                        title: entry.title,
+                        fallbackSubtitle: entry.relativePath,
+                        snippetSource: NoteSearchSnippetSource(
+                            bodyStorage: entry.bodyStorage,
+                            query: trimmedQuery
+                        ),
+                        isBodyMatch: true
+                    )
                 )
             }
         }
@@ -1293,12 +1337,19 @@ final class Workspace {
     /// present in `body`. Offsets are computed within the trimmed line so the
     /// window stays aligned with the visible text.
     nonisolated static func searchSnippet(in body: String, query: String) -> String? {
-        guard !body.isEmpty, !query.isEmpty,
-              body.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil else {
+        guard !body.isEmpty, !query.isEmpty else {
             return nil
         }
 
-        guard let matchRange = body.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) else {
+        let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+        let matchRange = body.range(of: query, options: options)
+            ?? body.range(
+                of: query,
+                options: options,
+                range: body.startIndex..<body.endIndex,
+                locale: Locale(identifier: "tr_TR")
+            )
+        guard let matchRange else {
             return nil
         }
 
@@ -1311,10 +1362,14 @@ final class Workspace {
 
         // Re-locate the match inside the trimmed line so the window offsets are
         // consistent with the string we actually slice.
-        guard let trimmedMatch = trimmedLine.range(
-            of: query,
-            options: [.caseInsensitive, .diacriticInsensitive]
-        ) else {
+        let trimmedMatch = trimmedLine.range(of: query, options: options)
+            ?? trimmedLine.range(
+                of: query,
+                options: options,
+                range: trimmedLine.startIndex..<trimmedLine.endIndex,
+                locale: Locale(identifier: "tr_TR")
+            )
+        guard let trimmedMatch else {
             return String(trimmedLine.prefix(maxLength)) + "\u{2026}"
         }
 
@@ -1563,7 +1618,7 @@ final class Workspace {
             modificationDate: date,
             noteTitle: noteTitle,
             noteLinks: noteLinks,
-            noteBody: content
+            noteBodyStorage: SearchableNoteBody(content)
         )
 
         guard let index = files.firstIndex(where: { Self.urlsMatch($0.url, standardizedURL) }) else { return }
@@ -1576,6 +1631,7 @@ final class Workspace {
             noteTitle: noteTitle
         )
         resortFiles()
+        reconcileSearchIndex()
         refreshNoteGraph()
     }
 
@@ -1595,6 +1651,7 @@ final class Workspace {
             recoveredDraftURL = nil
             cachedMarkdownMetadataByPath = [:]
             assetLookupByFilename = [:]
+            resetSearchIndex()
             clearNoteGraph()
             return
         }
@@ -1621,6 +1678,7 @@ final class Workspace {
             self.assetLookupByFilename = snapshot.assetLookupByFilename
             self.files = snapshot.files
             self.sidebarNodes = snapshot.nodes
+            self.reconcileSearchIndex()
 
             if let preferredSelectionURL,
                let matchingURL = self.matchingSidebarURL(for: preferredSelectionURL) {
@@ -1708,7 +1766,7 @@ final class Workspace {
                     modificationDate: file.file.modificationDate,
                     noteTitle: file.file.noteTitle,
                     noteLinks: file.noteLinks,
-                    noteBody: file.noteBody
+                    noteBodyStorage: file.noteBodyStorage
                 )
                 addAssetLookupEntry(for: standardizedURL, to: &assetLookupByFilename)
             } else if Self.isImageFile(standardizedURL) {
@@ -1739,25 +1797,25 @@ final class Workspace {
         at url: URL,
         modificationDate: Date,
         cachedMetadata: CachedMarkdownMetadata?
-    ) -> (file: FileItem, noteLinks: [NoteLinkReference], noteBody: String) {
+    ) -> (file: FileItem, noteLinks: [NoteLinkReference], noteBodyStorage: SearchableNoteBody) {
         let noteTitle: String?
         let noteLinks: [NoteLinkReference]
-        let noteBody: String
+        let noteBodyStorage: SearchableNoteBody
         if let cachedMetadata, cachedMetadata.modificationDate == modificationDate {
             noteTitle = cachedMetadata.noteTitle
             noteLinks = cachedMetadata.noteLinks
-            noteBody = cachedMetadata.noteBody
+            noteBodyStorage = cachedMetadata.noteBodyStorage
         } else if let content = readFileContents(url) {
             // Filename fallback is presentation metadata only. Opening/indexing
             // a note must never inject an H1 or otherwise rewrite its bytes.
             noteTitle = Self.extractTitle(from: content)
                 ?? url.deletingPathExtension().lastPathComponent
             noteLinks = MarkdownNoteLinkExtractor.references(in: content)
-            noteBody = content
+            noteBodyStorage = SearchableNoteBody(content)
         } else {
             noteTitle = nil
             noteLinks = []
-            noteBody = ""
+            noteBodyStorage = SearchableNoteBody("")
         }
 
         let file = FileItem(
@@ -1768,7 +1826,7 @@ final class Workspace {
             noteTitle: noteTitle
         )
 
-        return (file, noteLinks, noteBody)
+        return (file, noteLinks, noteBodyStorage)
     }
 
     private nonisolated static func sortFileItems(_ files: [FileItem], sortOrder: SortOrder) -> [FileItem] {
@@ -1976,7 +2034,7 @@ final class Workspace {
                 modificationDate: modificationDate,
                 noteTitle: noteTitle,
                 noteLinks: noteLinks,
-                noteBody: markdownContent ?? ""
+                noteBodyStorage: SearchableNoteBody(markdownContent ?? "")
             )
 
             let fileItem = FileItem(
@@ -1993,6 +2051,7 @@ final class Workspace {
                 files.append(fileItem)
             }
             resortFiles()
+            reconcileSearchIndex()
         }
         updateAssetLookup(for: standardizedURL)
 
@@ -2351,6 +2410,7 @@ final class Workspace {
     /// checking the selected file for every batch prevents a later, unrelated
     /// iCloud notification from hiding an earlier note update.
     func handleExternalChanges(_ changes: [VaultFileChange]) {
+        invalidateCachedMetadata(for: changes)
         remapSelectionForExternalMoves(in: changes)
 
         if let selectedFileURL,
@@ -2384,6 +2444,34 @@ final class Workspace {
             preferredSelectionURL: nil,
             selectFirstFileIfNeeded: false
         )
+    }
+
+    /// File-presenter events are stronger evidence than timestamps. iCloud can
+    /// preserve coarse modification metadata while replacing content, so evict
+    /// only affected records (or all records for a vault-root event) before the
+    /// background snapshot reconciles the maintained index.
+    private func invalidateCachedMetadata(for changes: [VaultFileChange]) {
+        guard let vaultURL else { return }
+        let vaultPath = vaultURL.standardizedFileURL.path
+        var affectedPaths: [String] = []
+
+        for change in changes {
+            for url in change.affectedURLs {
+                let path = url.standardizedFileURL.path
+                if path == vaultPath {
+                    cachedMarkdownMetadataByPath.removeAll(keepingCapacity: true)
+                    return
+                }
+                affectedPaths.append(path)
+            }
+        }
+
+        guard !affectedPaths.isEmpty else { return }
+        cachedMarkdownMetadataByPath = cachedMarkdownMetadataByPath.filter { key, _ in
+            !affectedPaths.contains { path in
+                key == path || key.hasPrefix(path + "/")
+            }
+        }
     }
 
     private func remapSelectionForExternalMoves(in changes: [VaultFileChange]) {
