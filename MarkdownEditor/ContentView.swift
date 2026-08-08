@@ -154,6 +154,62 @@ struct ContentView: View {
 
     private var sidebar: some View {
         VStack(spacing: 0) {
+            Button {
+                workspace.isCommandPalettePresented = true
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12, weight: .medium))
+
+                    Text("Search")
+                        .font(.system(size: 13))
+
+                    Spacer()
+
+                    Text("⌘ K")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                }
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .frame(height: 30)
+                .background {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Color.primary.opacity(0.06))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Search Notes")
+            .accessibilityLabel("Search Notes")
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+            .padding(.bottom, 8)
+
+            HStack {
+                Text("Everything")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Button {
+                    workspace.createNewFile()
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("New Note")
+                .accessibilityLabel("New Note")
+            }
+            .padding(.leading, 14)
+            .padding(.trailing, 10)
+            .padding(.bottom, 4)
+
             Group {
                 if workspace.sidebarNodes.isEmpty {
                     ContentUnavailableView(
@@ -177,6 +233,7 @@ struct ContentView: View {
                     }
                     .listStyle(.sidebar)
                     .contentMargins(.top, 0, for: .scrollContent)
+                    .contentMargins(.horizontal, 6, for: .scrollContent)
                 }
             }
             .background {
@@ -198,7 +255,17 @@ struct ContentView: View {
 
             Divider()
 
-            HStack {
+            HStack(spacing: 9) {
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                Text(workspace.vaultURL?.lastPathComponent ?? "Vault")
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+
+                Spacer(minLength: 8)
+
                 Menu {
                     Button { workspace.sortOrder = .byDate } label: {
                         Label("Date Modified", systemImage: workspace.sortOrder == .byDate ? "checkmark" : "")
@@ -226,12 +293,11 @@ struct ContentView: View {
                 .accessibilityLabel("Collapse All Folders")
                 .disabled(expandedFolderURLs.isEmpty)
 
-                Spacer()
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.vertical, 10)
         }
-        .frame(minWidth: 180)
+        .navigationSplitViewColumnWidth(min: 210, ideal: 232, max: 340)
         .overlay {
             if isSidebarRootDropTargeted {
                 RoundedRectangle(cornerRadius: 10)
@@ -419,18 +485,22 @@ struct ContentView: View {
     }
 
     private var editorView: some View {
-        SourceEditorView(
-            text: $workspace.text,
-            documentURL: workspace.selectedFileURL,
-            vaultURL: workspace.vaultURL,
-            noteLinkCompletions: workspace.files.map { workspace.title(for: $0) },
-            controller: controller,
-            preferences: preferences,
-            savedSelection: workspace.editorSelection(for: workspace.selectedFileURL),
-            onSelectionChange: { documentURL, selection in
-                workspace.persistEditorSelection(selection, for: documentURL)
-            }
-        )
+        VStack(spacing: 0) {
+            SourceEditorView(
+                text: $workspace.text,
+                documentURL: workspace.selectedFileURL,
+                vaultURL: workspace.vaultURL,
+                noteLinkCompletions: workspace.files.map { workspace.title(for: $0) },
+                controller: controller,
+                preferences: preferences,
+                savedSelection: workspace.editorSelection(for: workspace.selectedFileURL),
+                onSelectionChange: { documentURL, selection in
+                    workspace.persistEditorSelection(selection, for: documentURL)
+                }
+            )
+
+            EditorStatusBar(text: workspace.text)
+        }
     }
 
     private var graphView: some View {
@@ -659,7 +729,7 @@ private struct TitlebarIconButton: View {
                 .background {
                     if isSelected {
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Color.accentColor.opacity(isHovering ? 0.26 : 0.18))
+                            .fill(Color.primary.opacity(isHovering ? 0.13 : 0.09))
                     } else if isHovering, isEnabled {
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .fill(Color.primary.opacity(0.07))
@@ -676,8 +746,32 @@ private struct TitlebarIconButton: View {
 
     private var iconColor: Color {
         guard isEnabled else { return .secondary.opacity(0.5) }
-        if isSelected || isActive { return .accentColor }
+        if isSelected || isActive { return .primary }
         return isHovering ? .primary : .secondary
+    }
+}
+
+private struct EditorStatusBar: View {
+    let text: String
+
+    private var wordCount: Int {
+        text.split(whereSeparator: { $0.isWhitespace }).count
+    }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Spacer()
+            Text("\(wordCount) words")
+            Text("·")
+            Text("\(text.count) characters")
+        }
+        .font(.system(size: 10.5))
+        .foregroundStyle(.tertiary)
+        .padding(.horizontal, 14)
+        .frame(height: 24)
+        .background(Color(nsColor: .textBackgroundColor))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(wordCount) words, \(text.count) characters")
     }
 }
 

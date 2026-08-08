@@ -300,14 +300,14 @@ private enum EditorLinkScanner {
 @MainActor
 final class SyntaxHighlighter {
     private struct StyleSignature: Equatable {
-        let fontChoice: MonospacedFontChoice
+        let fontChoice: EditorFontChoice
         let fontSize: Double
         let lineSpacing: Double
     }
 
     private struct Styles {
         let defaultAttributes: [NSAttributedString.Key: Any]
-        let headingAttributes: [NSAttributedString.Key: Any]
+        let headingAttributes: [[NSAttributedString.Key: Any]]
         let boldAttributes: [NSAttributedString.Key: Any]
         let inlineCodeAttributes: [NSAttributedString.Key: Any]
         let codeBlockAttributes: [NSAttributedString.Key: Any]
@@ -448,8 +448,12 @@ final class SyntaxHighlighter {
         lineRange: NSRange,
         styles: Styles
     ) {
-        if isHeadingLine(lineRange, in: text) {
-            textStorage.addAttributes(styles.headingAttributes, range: lineRange)
+        if let level = headingLevel(for: lineRange, in: text) {
+            textStorage.addAttributes(styles.headingAttributes[level - 1], range: lineRange)
+            textStorage.addAttributes(
+                styles.metaAttributes,
+                range: NSRange(location: lineRange.location, length: level + 1)
+            )
         }
 
         if isBlockquoteLine(lineRange, in: text) {
@@ -504,6 +508,14 @@ final class SyntaxHighlighter {
 
             if let matchedRange {
                 storage.addAttributes(styles.boldAttributes, range: matchedRange)
+                storage.addAttributes(
+                    styles.metaAttributes,
+                    range: NSRange(location: matchedRange.location, length: 2)
+                )
+                storage.addAttributes(
+                    styles.metaAttributes,
+                    range: NSRange(location: NSMaxRange(matchedRange) - 2, length: 2)
+                )
                 location = NSMaxRange(matchedRange)
             } else {
                 location += 2
@@ -651,7 +663,7 @@ final class SyntaxHighlighter {
 
         let styles = Styles(
             defaultAttributes: Theme.defaultAttributes(using: preferences),
-            headingAttributes: [.font: editorBoldFont, .foregroundColor: Theme.headingColor],
+            headingAttributes: (1...6).map { Theme.headingAttributes(level: $0, using: preferences) },
             boldAttributes: [.font: editorBoldFont],
             inlineCodeAttributes: [.font: codeFont, .foregroundColor: Theme.codeColor, .backgroundColor: Theme.codeBackground],
             codeBlockAttributes: [.font: codeFont, .foregroundColor: Theme.codeColor, .backgroundColor: Theme.codeBackground],
@@ -787,9 +799,9 @@ final class SyntaxHighlighter {
             text.character(at: trimmedStart + 2) == 96
     }
 
-    private func isHeadingLine(_ range: NSRange, in text: NSString) -> Bool {
-        guard range.length >= 2 else { return false }
-        guard text.character(at: range.location) == 35 else { return false }
+    private func headingLevel(for range: NSRange, in text: NSString) -> Int? {
+        guard range.length >= 2 else { return nil }
+        guard text.character(at: range.location) == 35 else { return nil }
 
         var location = range.location
         var hashCount = 0
@@ -800,8 +812,8 @@ final class SyntaxHighlighter {
             location += 1
         }
 
-        guard hashCount > 0, location < end else { return false }
-        return isWhitespace(text.character(at: location))
+        guard hashCount > 0, location < end else { return nil }
+        return isWhitespace(text.character(at: location)) ? hashCount : nil
     }
 
     private func isBlockquoteLine(_ range: NSRange, in text: NSString) -> Bool {

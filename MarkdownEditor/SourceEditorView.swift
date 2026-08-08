@@ -286,7 +286,7 @@ struct SourceEditorView: NSViewRepresentable {
     let savedSelection: NSRange?
     let onSelectionChange: (URL?, NSRange) -> Void
 
-    private let minimumHorizontalInset: CGFloat = 72
+    private let minimumHorizontalInset: CGFloat = 64
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -396,14 +396,14 @@ struct SourceEditorView: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate, SourceTextViewDelegate {
         private struct AppearanceSignature: Equatable {
-            let fontChoice: MonospacedFontChoice
+            let fontChoice: EditorFontChoice
             let fontSize: Double
             let lineSpacing: Double
             let readableWidth: Double
         }
 
         struct LayoutSignature: Equatable {
-            let fontChoice: MonospacedFontChoice
+            let fontChoice: EditorFontChoice
             let fontSize: Double
             let lineSpacing: Double
             let horizontalInset: CGFloat
@@ -512,7 +512,7 @@ struct SourceEditorView: NSViewRepresentable {
                 textView.defaultParagraphStyle = Theme.defaultParagraphStyle(using: parent.preferences)
             }
 
-            textView.textContainerInset = NSSize(width: signature.horizontalInset, height: 28)
+            textView.textContainerInset = NSSize(width: signature.horizontalInset, height: 48)
             textView.textContainer?.containerSize = NSSize(
                 width: signature.columnWidth,
                 height: CGFloat.greatestFiniteMagnitude

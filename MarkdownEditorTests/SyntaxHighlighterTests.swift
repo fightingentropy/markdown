@@ -9,7 +9,9 @@ final class SyntaxHighlighterTests: XCTestCase {
         let storage = makeStorage("# Title with **bold**")
 
         let headingIndex = index(of: "Title", in: storage)
+        let headingMarkerIndex = index(of: "#", in: storage)
         let boldIndex = index(of: "bold", in: storage)
+        let boldMarkerIndex = index(of: "**", in: storage)
 
         XCTAssertEqual(
             storage.attribute(.foregroundColor, at: headingIndex, effectiveRange: nil) as? NSColor,
@@ -20,6 +22,14 @@ final class SyntaxHighlighterTests: XCTestCase {
                 .fontDescriptor
                 .symbolicTraits
                 .contains(.bold) == true
+        )
+        XCTAssertEqual(
+            storage.attribute(.foregroundColor, at: headingMarkerIndex, effectiveRange: nil) as? NSColor,
+            Theme.metaColor
+        )
+        XCTAssertEqual(
+            storage.attribute(.foregroundColor, at: boldMarkerIndex, effectiveRange: nil) as? NSColor,
+            Theme.metaColor
         )
     }
 

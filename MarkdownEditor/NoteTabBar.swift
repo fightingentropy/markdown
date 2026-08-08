@@ -17,6 +17,19 @@ struct NoteTabBar: View {
                             isCompact: isCompact
                         )
                     }
+
+                    Button {
+                        workspace.createNewFile()
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: isCompact ? 22 : 24, height: isCompact ? 22 : 26)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("New Note")
+                    .accessibilityLabel("New Note")
                 }
                 .padding(.horizontal, isCompact ? 4 : 8)
                 .padding(.vertical, isCompact ? 2 : 6)
@@ -86,10 +99,10 @@ private struct NoteTab: View {
         .padding(.trailing, isCompact ? 7 : 8)
         .padding(.vertical, isCompact ? 4 : 6)
         .background {
-            Capsule(style: .continuous)
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .fill(backgroundColor)
         }
-        .contentShape(Capsule(style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         .onHover { isHovering = $0 }
         .animation(.easeInOut(duration: 0.12), value: isHovering)
         .animation(.easeInOut(duration: 0.12), value: isCloseHovering)
@@ -107,7 +120,7 @@ private struct NoteTab: View {
 
     private var backgroundColor: Color {
         if isSelected {
-            return Color.accentColor.opacity(isHovering ? 0.24 : 0.18)
+            return Color.primary.opacity(isHovering ? 0.13 : 0.09)
         }
         return Color.primary.opacity(isHovering ? 0.08 : 0)
     }

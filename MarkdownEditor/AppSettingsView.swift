@@ -230,7 +230,7 @@ struct AppSettingsView: View {
             ) {
                 VStack(alignment: .leading, spacing: 18) {
                     Picker("Font family", selection: $preferences.editorFontChoice) {
-                        ForEach(MonospacedFontChoice.allCases) { font in
+                        ForEach(EditorFontChoice.allCases) { font in
                             Text(font.title).tag(font)
                         }
                     }
@@ -270,7 +270,7 @@ struct AppSettingsView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Label("Readable width keeps long notes from stretching too far across the window.", systemImage: "arrow.left.and.right.square")
                     Label("Line spacing changes how dense the editor feels during heavy writing sessions.", systemImage: "line.3.horizontal")
-                    Label("Monospaced fonts keep markdown syntax alignment predictable.", systemImage: "textformat.alt")
+                    Label("System Sans creates a calmer reading surface; monospaced choices remain available for source-heavy notes.", systemImage: "textformat.alt")
                 }
                 .foregroundStyle(.secondary)
             }

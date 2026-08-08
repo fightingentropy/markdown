@@ -333,7 +333,7 @@ struct SidebarAssetRow: View {
             }
             Button("Cancel", role: .cancel) {}
         }
-        .listRowBackground(isSelected ? Color.accentColor.opacity(0.14) : Color.clear)
+        .listRowBackground(isSelected ? Color.primary.opacity(0.095) : Color.clear)
     }
 }
 
@@ -415,7 +415,7 @@ struct SidebarFileRow: View {
             }
             Button("Cancel", role: .cancel) {}
         }
-        .listRowBackground(isSelected ? Color.accentColor.opacity(0.14) : Color.clear)
+        .listRowBackground(isSelected ? Color.primary.opacity(0.095) : Color.clear)
     }
 }
 

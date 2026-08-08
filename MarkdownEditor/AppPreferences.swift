@@ -94,6 +94,52 @@ enum MonospacedFontChoice: String, CaseIterable, Identifiable {
     }
 }
 
+enum EditorFontChoice: String, CaseIterable, Identifiable {
+    case system
+    case sfMono = "SF Mono"
+    case menlo = "Menlo"
+    case monaco = "Monaco"
+    case courierNew = "Courier New"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .system:
+            "System Sans"
+        case .sfMono:
+            "SF Mono"
+        case .menlo:
+            "Menlo"
+        case .monaco:
+            "Monaco"
+        case .courierNew:
+            "Courier New"
+        }
+    }
+
+    func nsFont(size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
+        switch self {
+        case .system:
+            return NSFont.systemFont(ofSize: size, weight: weight)
+        default:
+            let baseFont = NSFont(name: rawValue, size: size)
+                ?? NSFont.monospacedSystemFont(ofSize: size, weight: weight)
+            guard weight >= .semibold else { return baseFont }
+            return NSFontManager.shared.convert(baseFont, toHaveTrait: .boldFontMask)
+        }
+    }
+
+    func codeFont(size: CGFloat) -> NSFont {
+        switch self {
+        case .system:
+            NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+        default:
+            nsFont(size: size)
+        }
+    }
+}
+
 enum PreviewFontChoice: String, CaseIterable, Identifiable {
     case system
     case georgia = "Georgia"
@@ -146,7 +192,7 @@ enum PreviewFontChoice: String, CaseIterable, Identifiable {
 @Observable
 @MainActor
 final class AppPreferences {
-    var editorFontChoice: MonospacedFontChoice {
+    var editorFontChoice: EditorFontChoice {
         didSet { userDefaults.set(editorFontChoice.rawValue, forKey: Self.editorFontChoiceKey) }
     }
 
@@ -269,10 +315,10 @@ final class AppPreferences {
 
     init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
-        self.editorFontChoice = MonospacedFontChoice(rawValue: userDefaults.string(forKey: Self.editorFontChoiceKey) ?? "") ?? .system
-        self.editorFontSize = Self.editorFontSizeRange.clamping(userDefaults.object(forKey: Self.editorFontSizeKey) as? Double ?? 14)
-        self.editorLineSpacing = Self.editorLineSpacingRange.clamping(userDefaults.object(forKey: Self.editorLineSpacingKey) as? Double ?? 4)
-        self.editorReadableWidth = Self.editorReadableWidthRange.clamping(userDefaults.object(forKey: Self.editorReadableWidthKey) as? Double ?? 920)
+        self.editorFontChoice = EditorFontChoice(rawValue: userDefaults.string(forKey: Self.editorFontChoiceKey) ?? "") ?? .system
+        self.editorFontSize = Self.editorFontSizeRange.clamping(userDefaults.object(forKey: Self.editorFontSizeKey) as? Double ?? 16)
+        self.editorLineSpacing = Self.editorLineSpacingRange.clamping(userDefaults.object(forKey: Self.editorLineSpacingKey) as? Double ?? 7)
+        self.editorReadableWidth = Self.editorReadableWidthRange.clamping(userDefaults.object(forKey: Self.editorReadableWidthKey) as? Double ?? 820)
         self.previewFontChoice = PreviewFontChoice(rawValue: userDefaults.string(forKey: Self.previewFontChoiceKey) ?? "") ?? .system
         self.previewCodeFontChoice = MonospacedFontChoice(rawValue: userDefaults.string(forKey: Self.previewCodeFontChoiceKey) ?? "") ?? .system
         self.previewFontSize = Self.previewFontSizeRange.clamping(userDefaults.object(forKey: Self.previewFontSizeKey) as? Double ?? 15)
