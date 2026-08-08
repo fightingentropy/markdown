@@ -24,7 +24,7 @@ struct NoteTabBar: View {
                         Image(systemName: "plus")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.secondary)
-                            .frame(width: isCompact ? 22 : 24, height: isCompact ? 22 : 26)
+                            .frame(width: isCompact ? 24 : 26, height: isCompact ? 30 : 32)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -71,7 +71,7 @@ private struct NoteTab: View {
                 workspace.selectFile(url)
             } label: {
                 Text(title)
-                    .font(.system(size: isCompact ? 12 : 13))
+                    .font(.system(size: isCompact ? 12 : 13, weight: isSelected ? .medium : .regular))
                     .lineLimit(1)
             }
             .buttonStyle(.plain)
@@ -92,17 +92,17 @@ private struct NoteTab: View {
             }
             .buttonStyle(.plain)
             .onHover { isCloseHovering = $0 }
-            .opacity(isHovering || isSelected ? 1 : 0.35)
+            .opacity(isHovering || isSelected ? 0.85 : 0)
             .accessibilityLabel("Close \(title)")
         }
         .padding(.leading, isCompact ? 10 : 12)
         .padding(.trailing, isCompact ? 7 : 8)
-        .padding(.vertical, isCompact ? 4 : 6)
+        .frame(height: isCompact ? 30 : 34)
         .background {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(backgroundColor)
         }
-        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .onHover { isHovering = $0 }
         .animation(.easeInOut(duration: 0.12), value: isHovering)
         .animation(.easeInOut(duration: 0.12), value: isCloseHovering)

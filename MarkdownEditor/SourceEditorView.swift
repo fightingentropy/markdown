@@ -286,7 +286,7 @@ struct SourceEditorView: NSViewRepresentable {
     let savedSelection: NSRange?
     let onSelectionChange: (URL?, NSRange) -> Void
 
-    private let minimumHorizontalInset: CGFloat = 64
+    private let minimumHorizontalInset: CGFloat = 72
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -295,6 +295,9 @@ struct SourceEditorView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSTextView.scrollableTextView()
         guard let baseTextView = scrollView.documentView as? NSTextView else { return scrollView }
+
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = Theme.editorBackgroundColor
 
         let textView: SourceTextView
         if let existing = baseTextView as? SourceTextView {
@@ -329,6 +332,9 @@ struct SourceEditorView: NSViewRepresentable {
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let textView = nsView.documentView as? SourceTextView else { return }
 
+        nsView.drawsBackground = true
+        nsView.backgroundColor = Theme.editorBackgroundColor
+
         context.coordinator.parent = self
         context.coordinator.observeSizeChanges(of: nsView)
         configure(textView, coordinator: context.coordinator)
@@ -349,7 +355,7 @@ struct SourceEditorView: NSViewRepresentable {
     private func configure(_ textView: SourceTextView, coordinator: Coordinator) {
         textView.isRichText = false
         textView.insertionPointColor = .controlAccentColor
-        textView.backgroundColor = .textBackgroundColor
+        textView.backgroundColor = Theme.editorBackgroundColor
         textView.drawsBackground = true
         textView.allowsUndo = true
         textView.usesFindBar = true
@@ -383,12 +389,14 @@ struct SourceEditorView: NSViewRepresentable {
         let availableWidth = max(scrollView.contentSize.width, readableWidth)
         let columnWidth = min(readableWidth, max(0, availableWidth - (minimumHorizontalInset * 2)))
         let horizontalInset = max(minimumHorizontalInset, (availableWidth - columnWidth) / 2)
+        let verticalInset = min(112, max(72, scrollView.contentSize.height * 0.12))
 
         return Coordinator.LayoutSignature(
             fontChoice: preferences.editorFontChoice,
             fontSize: preferences.editorFontSize,
             lineSpacing: preferences.editorLineSpacing,
             horizontalInset: horizontalInset,
+            verticalInset: verticalInset,
             columnWidth: columnWidth
         )
     }
@@ -407,6 +415,7 @@ struct SourceEditorView: NSViewRepresentable {
             let fontSize: Double
             let lineSpacing: Double
             let horizontalInset: CGFloat
+            let verticalInset: CGFloat
             let columnWidth: CGFloat
 
             /// The portion of the signature that drives typingAttributes /
@@ -512,7 +521,10 @@ struct SourceEditorView: NSViewRepresentable {
                 textView.defaultParagraphStyle = Theme.defaultParagraphStyle(using: parent.preferences)
             }
 
-            textView.textContainerInset = NSSize(width: signature.horizontalInset, height: 48)
+            textView.textContainerInset = NSSize(
+                width: signature.horizontalInset,
+                height: signature.verticalInset
+            )
             textView.textContainer?.containerSize = NSSize(
                 width: signature.columnWidth,
                 height: CGFloat.greatestFiniteMagnitude

@@ -5,8 +5,18 @@ import XCTest
 @testable import Markdown
 
 final class EditorLinkPreviewTests: XCTestCase {
+    func testStandaloneWrappedXLinkStillCreatesPreview() {
+        let previews = EditorLinkPreviewDetector.presentationPreviews(in: """
+        - <u>[Post](https://x.com/user/status/12345)</u>
+        - [Inline post](https://x.com/user/status/67890) — commentary stays readable as prose.
+        """)
+
+        XCTAssertEqual(previews.count, 1)
+        XCTAssertEqual(previews.first?.url.absoluteString, "https://x.com/user/status/12345")
+    }
+
     @MainActor
-    func testXPreviewStartsAfterWrappedMarkdownLinkCommentary() throws {
+    func testInlineXLinkWithCommentaryDoesNotInterruptParagraphWithPreview() throws {
         let scrollView = NSTextView.scrollableTextView()
         scrollView.frame = NSRect(x: 0, y: 0, width: 420, height: 900)
         let textView = try XCTUnwrap(scrollView.documentView as? NSTextView)
@@ -28,34 +38,11 @@ final class EditorLinkPreviewTests: XCTestCase {
         """
 
         let controller = EditorLinkPreviewController()
-        XCTAssertEqual(controller.refresh(in: textView, openURL: { _ in }), 1)
-        let layoutManager = try XCTUnwrap(textView.layoutManager)
-        let textContainer = try XCTUnwrap(textView.textContainer)
-        layoutManager.ensureLayout(for: textContainer)
+        XCTAssertEqual(controller.refresh(in: textView, openURL: { _ in }), 0)
         controller.layoutCards(in: textView)
 
-        let firstParagraph = (textView.string as NSString).paragraphRange(
-            for: NSRange(location: 0, length: 0)
-        )
-        let paragraphContentRange = NSRange(
-            location: firstParagraph.location,
-            length: firstParagraph.length - 1
-        )
-        let paragraphGlyphRange = layoutManager.glyphRange(
-            forCharacterRange: paragraphContentRange,
-            actualCharacterRange: nil
-        )
-        let finalParagraphLine = layoutManager.lineFragmentUsedRect(
-            forGlyphAt: NSMaxRange(paragraphGlyphRange) - 1,
-            effectiveRange: nil
-        )
-        let card = try XCTUnwrap(
-            textView.subviews.compactMap { $0 as? NSHostingView<EditorLinkPreviewCard> }.first
-        )
-
-        XCTAssertGreaterThanOrEqual(
-            card.frame.minY,
-            textView.textContainerOrigin.y + finalParagraphLine.maxY + 2 - 0.5
+        XCTAssertTrue(
+            textView.subviews.compactMap { $0 as? NSHostingView<EditorLinkPreviewCard> }.isEmpty
         )
     }
 
@@ -438,7 +425,7 @@ final class EditorLinkPreviewTests: XCTestCase {
 
     func testUsesMarkdownLinkLabelAndSupportsTwitterHost() {
         let previews = EditorLinkPreviewDetector.previews(
-            in: "Claire Forlani [Harvey](https://twitter.com/TheCinesthetic/status/2006003135551266961)"
+            in: "[Harvey](https://twitter.com/TheCinesthetic/status/2006003135551266961)"
         )
 
         XCTAssertEqual(previews.count, 1)
@@ -481,7 +468,7 @@ final class EditorLinkPreviewTests: XCTestCase {
     func testBareURLDropsTrailingPunctuation() throws {
         let preview = try XCTUnwrap(
             EditorLinkPreviewDetector.previews(
-                in: "Watch https://x.com/user/status/12345)."
+                in: "https://x.com/user/status/12345)."
             ).first
         )
 

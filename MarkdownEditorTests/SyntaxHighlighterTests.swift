@@ -37,11 +37,20 @@ final class SyntaxHighlighterTests: XCTestCase {
         let storage = makeStorage("[link](https://example.com)\nhttps://example.com")
 
         let markdownLinkIndex = index(of: "link", in: storage)
+        let markdownDestinationIndex = index(of: "https://example.com", in: storage)
         let bareLinkIndex = index(of: "https://example.com", in: storage, occurrence: 2)
 
         XCTAssertEqual(
             storage.attribute(.underlineStyle, at: markdownLinkIndex, effectiveRange: nil) as? Int,
             NSUnderlineStyle.single.rawValue
+        )
+        XCTAssertEqual(
+            storage.attribute(.foregroundColor, at: markdownDestinationIndex, effectiveRange: nil) as? NSColor,
+            Theme.metaColor
+        )
+        XCTAssertEqual(
+            storage.attribute(.underlineStyle, at: markdownDestinationIndex, effectiveRange: nil) as? Int,
+            0
         )
         XCTAssertEqual(
             storage.attribute(.underlineStyle, at: bareLinkIndex, effectiveRange: nil) as? Int,

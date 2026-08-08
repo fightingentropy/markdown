@@ -316,9 +316,9 @@ final class AppPreferences {
     init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
         self.editorFontChoice = EditorFontChoice(rawValue: userDefaults.string(forKey: Self.editorFontChoiceKey) ?? "") ?? .system
-        self.editorFontSize = Self.editorFontSizeRange.clamping(userDefaults.object(forKey: Self.editorFontSizeKey) as? Double ?? 16)
-        self.editorLineSpacing = Self.editorLineSpacingRange.clamping(userDefaults.object(forKey: Self.editorLineSpacingKey) as? Double ?? 7)
-        self.editorReadableWidth = Self.editorReadableWidthRange.clamping(userDefaults.object(forKey: Self.editorReadableWidthKey) as? Double ?? 820)
+        self.editorFontSize = Self.editorFontSizeRange.clamping(userDefaults.object(forKey: Self.editorFontSizeKey) as? Double ?? 17)
+        self.editorLineSpacing = Self.editorLineSpacingRange.clamping(userDefaults.object(forKey: Self.editorLineSpacingKey) as? Double ?? 6)
+        self.editorReadableWidth = Self.editorReadableWidthRange.clamping(userDefaults.object(forKey: Self.editorReadableWidthKey) as? Double ?? 800)
         self.previewFontChoice = PreviewFontChoice(rawValue: userDefaults.string(forKey: Self.previewFontChoiceKey) ?? "") ?? .system
         self.previewCodeFontChoice = MonospacedFontChoice(rawValue: userDefaults.string(forKey: Self.previewCodeFontChoiceKey) ?? "") ?? .system
         self.previewFontSize = Self.previewFontSizeRange.clamping(userDefaults.object(forKey: Self.previewFontSizeKey) as? Double ?? 15)

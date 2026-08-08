@@ -2,6 +2,20 @@ import AppKit
 
 @MainActor
 enum Theme {
+    static let editorBackgroundColor = NSColor(name: NSColor.Name("MarkdownEditorBackground")) { appearance in
+        if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+            return NSColor(srgbRed: 0.055, green: 0.055, blue: 0.058, alpha: 1)
+        }
+        return NSColor(srgbRed: 0.985, green: 0.982, blue: 0.975, alpha: 1)
+    }
+
+    static let sidebarBackgroundColor = NSColor(name: NSColor.Name("MarkdownSidebarBackground")) { appearance in
+        if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+            return NSColor(srgbRed: 0.072, green: 0.072, blue: 0.076, alpha: 1)
+        }
+        return NSColor(srgbRed: 0.95, green: 0.945, blue: 0.935, alpha: 1)
+    }
+
     static let headingColor = NSColor.labelColor
     static let codeColor = NSColor.systemOrange
     static let codeBackground = NSColor.quaternaryLabelColor
@@ -20,9 +34,9 @@ enum Theme {
     static func headingFont(level: Int, using preferences: AppPreferences) -> NSFont {
         let scale: CGFloat
         switch level {
-        case 1: scale = 1.85
-        case 2: scale = 1.52
-        case 3: scale = 1.28
+        case 1: scale = 1.65
+        case 2: scale = 1.4
+        case 3: scale = 1.22
         case 4: scale = 1.12
         default: scale = 1
         }
@@ -45,7 +59,7 @@ enum Theme {
     static func defaultAttributes(using preferences: AppPreferences) -> [NSAttributedString.Key: Any] {
         [
             .font: editorFont(using: preferences),
-            .foregroundColor: NSColor.textColor,
+            .foregroundColor: NSColor.labelColor.withAlphaComponent(0.9),
             .paragraphStyle: defaultParagraphStyle(using: preferences),
         ]
     }

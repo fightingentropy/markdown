@@ -118,6 +118,8 @@ private enum EditorLinkScanner {
     struct MarkdownLinkMatch {
         /// Range of the whole `[text](destination)` construct.
         let range: NSRange
+        /// Range of the reader-facing label inside the square brackets.
+        let labelRange: NSRange
         /// Range of just the destination inside the parentheses.
         let destinationRange: NSRange
     }
@@ -163,6 +165,7 @@ private enum EditorLinkScanner {
         guard destinationEnd < limit, destinationEnd > destinationStart else { return nil }
         return MarkdownLinkMatch(
             range: NSRange(location: location, length: destinationEnd + 1 - location),
+            labelRange: NSRange(location: textStart, length: closingBracket - textStart),
             destinationRange: NSRange(location: destinationStart, length: destinationEnd - destinationStart)
         )
     }
@@ -312,6 +315,7 @@ final class SyntaxHighlighter {
         let inlineCodeAttributes: [NSAttributedString.Key: Any]
         let codeBlockAttributes: [NSAttributedString.Key: Any]
         let linkAttributes: [NSAttributedString.Key: Any]
+        let linkSyntaxAttributes: [NSAttributedString.Key: Any]
         let quoteAttributes: [NSAttributedString.Key: Any]
         let metaAttributes: [NSAttributedString.Key: Any]
     }
@@ -430,8 +434,8 @@ final class SyntaxHighlighter {
 
                 applyBoldSpans(to: textStorage, in: text, range: lineContentRange, styles: styles)
                 applyInlineCodeSpans(to: textStorage, in: text, range: lineContentRange, styles: styles)
-                applyMarkdownConstructs(to: textStorage, in: text, range: lineContentRange, styles: styles)
                 applyBareLinks(to: textStorage, in: text, range: lineContentRange, styles: styles)
+                applyMarkdownConstructs(to: textStorage, in: text, range: lineContentRange, styles: styles)
             }
 
             let nextLocation = NSMaxRange(fullLineRange)
@@ -590,7 +594,7 @@ final class SyntaxHighlighter {
                     limit: end,
                     isImage: true
                 ) {
-                    storage.addAttributes(styles.linkAttributes, range: imageMatch.range)
+                    applyMarkdownLinkStyle(imageMatch, to: storage, styles: styles)
                     location = NSMaxRange(imageMatch.range)
                     continue
                 }
@@ -610,12 +614,35 @@ final class SyntaxHighlighter {
                         limit: end,
                         isImage: false
                       ) {
-                storage.addAttributes(styles.linkAttributes, range: linkMatch.range)
+                applyMarkdownLinkStyle(linkMatch, to: storage, styles: styles)
                 location = NSMaxRange(linkMatch.range)
                 continue
             }
 
             location += 1
+        }
+    }
+
+    private func applyMarkdownLinkStyle(
+        _ match: EditorLinkScanner.MarkdownLinkMatch,
+        to storage: NSTextStorage,
+        styles: Styles
+    ) {
+        let prefixRange = NSRange(
+            location: match.range.location,
+            length: match.labelRange.location - match.range.location
+        )
+        let suffixRange = NSRange(
+            location: NSMaxRange(match.labelRange),
+            length: NSMaxRange(match.range) - NSMaxRange(match.labelRange)
+        )
+
+        if prefixRange.length > 0 {
+            storage.addAttributes(styles.linkSyntaxAttributes, range: prefixRange)
+        }
+        storage.addAttributes(styles.linkAttributes, range: match.labelRange)
+        if suffixRange.length > 0 {
+            storage.addAttributes(styles.linkSyntaxAttributes, range: suffixRange)
         }
     }
 
@@ -660,6 +687,13 @@ final class SyntaxHighlighter {
             .foregroundColor: Theme.linkColor,
             .underlineStyle: NSUnderlineStyle.single.rawValue
         ]
+        let linkSyntaxAttributes: [NSAttributedString.Key: Any] = [
+            .font: preferences.editorFontChoice.nsFont(
+                size: max(11, preferences.editorFontSizeCGFloat * 0.75)
+            ),
+            .foregroundColor: Theme.metaColor,
+            .underlineStyle: 0
+        ]
 
         let styles = Styles(
             defaultAttributes: Theme.defaultAttributes(using: preferences),
@@ -668,6 +702,7 @@ final class SyntaxHighlighter {
             inlineCodeAttributes: [.font: codeFont, .foregroundColor: Theme.codeColor, .backgroundColor: Theme.codeBackground],
             codeBlockAttributes: [.font: codeFont, .foregroundColor: Theme.codeColor, .backgroundColor: Theme.codeBackground],
             linkAttributes: linkAttributes,
+            linkSyntaxAttributes: linkSyntaxAttributes,
             quoteAttributes: [.foregroundColor: Theme.quoteColor],
             metaAttributes: [.foregroundColor: Theme.metaColor]
         )

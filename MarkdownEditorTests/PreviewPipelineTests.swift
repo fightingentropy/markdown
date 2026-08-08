@@ -484,8 +484,9 @@ final class LinkParserParityTests: XCTestCase {
     func testConsumersAgreeOnMarkdownLink() {
         let text = "See [Docs](https://example.com/docs) for details"
         let linkRange = (text as NSString).range(of: "[Docs](https://example.com/docs)")
+        let labelRange = (text as NSString).range(of: "Docs")
 
-        assertLinkUnderline(in: text, range: linkRange)
+        assertMarkdownLinkStyling(in: text, range: linkRange, labelRange: labelRange)
 
         // The detector resolves a click anywhere inside the link span, and
         // nowhere outside it.
@@ -553,8 +554,9 @@ final class LinkParserParityTests: XCTestCase {
     func testConsumersAgreeOnMarkdownImage() throws {
         let text = "![Alt text](images/photo.png \"Caption\")"
         let fullRange = NSRange(location: 0, length: (text as NSString).length)
+        let labelRange = (text as NSString).range(of: "Alt text")
 
-        assertLinkUnderline(in: text, range: fullRange)
+        assertMarkdownLinkStyling(in: text, range: fullRange, labelRange: labelRange)
 
         let match = try XCTUnwrap(MarkdownNoteLinkExtractor.markdownImage(in: Array(text), from: 0))
         XCTAssertEqual(match.original, text)
@@ -624,6 +626,53 @@ final class LinkParserParityTests: XCTestCase {
                 file: file,
                 line: line
             )
+        }
+    }
+
+    /// Markdown keeps the reader-facing label prominent while treating the
+    /// punctuation and destination as quiet authoring metadata.
+    private func assertMarkdownLinkStyling(
+        in text: String,
+        range: NSRange,
+        labelRange: NSRange,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let storage = NSTextStorage(string: text)
+        SyntaxHighlighter(preferences: AppPreferences()).highlight(storage)
+
+        for index in range.location..<NSMaxRange(range) {
+            if NSLocationInRange(index, labelRange) {
+                XCTAssertEqual(
+                    storage.attribute(.foregroundColor, at: index, effectiveRange: nil) as? NSColor,
+                    Theme.linkColor,
+                    "expected reader-facing label color at index \(index)",
+                    file: file,
+                    line: line
+                )
+                XCTAssertEqual(
+                    storage.attribute(.underlineStyle, at: index, effectiveRange: nil) as? Int,
+                    NSUnderlineStyle.single.rawValue,
+                    "expected reader-facing label underline at index \(index)",
+                    file: file,
+                    line: line
+                )
+            } else {
+                XCTAssertEqual(
+                    storage.attribute(.foregroundColor, at: index, effectiveRange: nil) as? NSColor,
+                    Theme.metaColor,
+                    "expected muted Markdown syntax at index \(index)",
+                    file: file,
+                    line: line
+                )
+                XCTAssertEqual(
+                    storage.attribute(.underlineStyle, at: index, effectiveRange: nil) as? Int,
+                    0,
+                    "expected unadorned Markdown syntax at index \(index)",
+                    file: file,
+                    line: line
+                )
+            }
         }
     }
 }

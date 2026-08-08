@@ -158,15 +158,18 @@ struct SidebarFolderRow: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "folder")
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
 
                 Text(node.name)
+                    .font(.system(size: 13))
                     .lineLimit(1)
 
                 Spacer()
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(minHeight: 27)
             .contentShape(Rectangle())
             .accessibilityElement(children: .combine)
             .accessibilityLabel("\(node.name), folder")
@@ -295,17 +298,26 @@ struct SidebarAssetRow: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "photo")
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
 
                 Text(node.name)
+                    .font(.system(size: 13))
                     .lineLimit(1)
 
                 Spacer()
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 2)
-            .contentShape(Rectangle())
+            .frame(height: 27)
+            .padding(.horizontal, 7)
+            .background {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Color.primary.opacity(0.09))
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             .accessibilityElement(children: .combine)
             .accessibilityLabel("\(node.name), asset")
             .accessibilityAddTraits(isSelected ? .isSelected : [])
@@ -333,7 +345,7 @@ struct SidebarAssetRow: View {
             }
             Button("Cancel", role: .cancel) {}
         }
-        .listRowBackground(isSelected ? Color.primary.opacity(0.095) : Color.clear)
+        .listRowBackground(Color.clear)
     }
 }
 
@@ -355,22 +367,26 @@ struct SidebarFileRow: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: isSelected ? "doc.text.fill" : "doc.text")
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
 
                 Text(workspace.title(for: file))
+                    .font(.system(size: 13))
                     .lineLimit(1)
 
-                Spacer(minLength: 12)
-
-                Text(file.modificationDate, format: .dateTime.hour().minute())
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .monospacedDigit()
+                Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 2)
-            .contentShape(Rectangle())
+            .frame(height: 27)
+            .padding(.horizontal, 7)
+            .background {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Color.primary.opacity(0.09))
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             .accessibilityElement(children: .combine)
             .accessibilityLabel(workspace.title(for: file))
             .accessibilityAddTraits(isSelected ? .isSelected : [])
@@ -415,11 +431,11 @@ struct SidebarFileRow: View {
             }
             Button("Cancel", role: .cancel) {}
         }
-        .listRowBackground(isSelected ? Color.primary.opacity(0.095) : Color.clear)
+        .listRowBackground(Color.clear)
     }
 }
 
-let sidebarRowInsets = EdgeInsets(top: 2, leading: 6, bottom: 2, trailing: 10)
+let sidebarRowInsets = EdgeInsets(top: 1, leading: 2, bottom: 1, trailing: 8)
 
 // MARK: - Sidebar Root Drop Area
 

@@ -259,6 +259,9 @@ enum EditorLinkPreviewDetector {
         pattern: #"https?://[^\s<>\"]+"#,
         options: [.caseInsensitive]
     )
+    private static let standaloneMarkerRegex = try! NSRegularExpression(
+        pattern: #"^(?:>\s*)?(?:(?:[-+*]|\d+[.)])\s*)?$"#
+    )
 
     static func previews(in markdown: String) -> [EditorLinkPreview] {
         let text = markdown as NSString
@@ -295,6 +298,20 @@ enum EditorLinkPreviewDetector {
         }
 
         return results
+    }
+
+    /// Detection remains intentionally broad because it is shared with the
+    /// canonical Markdown link parser. Presentation is narrower: large cards
+    /// belong only to links that own their line.
+    static func presentationPreviews(in markdown: String) -> [EditorLinkPreview] {
+        let text = markdown as NSString
+        return previews(in: markdown).filter { preview in
+            isStandalonePreview(
+                sourceRange: preview.sourceRange,
+                contentRange: lineContentRange(preview.paragraphRange, in: text),
+                in: text
+            )
+        }
     }
 
     private static func firstPreview(
@@ -334,16 +351,48 @@ enum EditorLinkPreviewDetector {
                 continue
             }
             let trimmedLength = (trimmedURL as NSString).length
+            let sourceRange = NSRange(location: match.range.location, length: trimmedLength)
             return EditorLinkPreview(
                 url: url,
                 kind: kind,
                 label: nil,
-                sourceRange: NSRange(location: match.range.location, length: trimmedLength),
+                sourceRange: sourceRange,
                 paragraphRange: paragraphRange
             )
         }
 
         return nil
+    }
+
+    /// Inline links should read like ordinary prose. Large embeds are reserved
+    /// for a URL that owns its line; otherwise a card turns a sentence or list
+    /// item into disconnected fragments. Lightweight wrappers and a list/quote
+    /// marker are treated as presentation syntax, not surrounding commentary.
+    private static func isStandalonePreview(
+        sourceRange: NSRange,
+        contentRange: NSRange,
+        in text: NSString
+    ) -> Bool {
+        let leadingRange = NSRange(
+            location: contentRange.location,
+            length: max(0, sourceRange.location - contentRange.location)
+        )
+        let trailingStart = NSMaxRange(sourceRange)
+        let trailingRange = NSRange(
+            location: trailingStart,
+            length: max(0, NSMaxRange(contentRange) - trailingStart)
+        )
+        var remainder = text.substring(with: leadingRange) + text.substring(with: trailingRange)
+
+        for wrapper in ["<u>", "</u>", "<U>", "</U>", "**", "__"] {
+            remainder = remainder.replacingOccurrences(of: wrapper, with: "")
+        }
+        remainder = remainder.trimmingCharacters(in: .whitespaces)
+        remainder = remainder.trimmingCharacters(in: CharacterSet(charactersIn: ".,;:!?)]}"))
+
+        guard !remainder.isEmpty else { return true }
+        let range = NSRange(location: 0, length: (remainder as NSString).length)
+        return standaloneMarkerRegex.firstMatch(in: remainder, range: range)?.range == range
     }
 
     private static func normalizedURL(_ value: String) -> URL? {
@@ -698,7 +747,7 @@ final class EditorLinkPreviewController {
         let viewportAnchor = EditorViewportAnchor.capture(in: textView)
         installScrollWheelForwarding(in: textView)
         clearSourcePresentation(in: textView)
-        previews = EditorLinkPreviewDetector.previews(in: textView.string)
+        previews = EditorLinkPreviewDetector.presentationPreviews(in: textView.string)
         openURLHandler = openURL
         let activeIDs = Set(previews.map(\.id))
         pruneInactiveCards(activeIDs: activeIDs)

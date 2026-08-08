@@ -37,6 +37,7 @@ struct ContentView: View {
                 .focusedValue(\.editorController, controller)
         }
         .navigationSplitViewStyle(.balanced)
+        .tint(.gray)
         .navigationTitle("")
         .toolbar {
             if #available(macOS 26.0, *) {
@@ -172,9 +173,9 @@ struct ContentView: View {
                 }
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 10)
-                .frame(height: 30)
+                .frame(height: 32)
                 .background {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .fill(Color.primary.opacity(0.06))
                 }
                 .contentShape(Rectangle())
@@ -183,32 +184,8 @@ struct ContentView: View {
             .help("Search Notes")
             .accessibilityLabel("Search Notes")
             .padding(.horizontal, 10)
-            .padding(.top, 10)
-            .padding(.bottom, 8)
-
-            HStack {
-                Text("Everything")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-
-                Spacer()
-
-                Button {
-                    workspace.createNewFile()
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 18, height: 18)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("New Note")
-                .accessibilityLabel("New Note")
-            }
-            .padding(.leading, 14)
-            .padding(.trailing, 10)
-            .padding(.bottom, 4)
+            .padding(.top, 12)
+            .padding(.bottom, 6)
 
             Group {
                 if workspace.sidebarNodes.isEmpty {
@@ -232,6 +209,7 @@ struct ContentView: View {
                         BacklinksSection(workspace: workspace)
                     }
                     .listStyle(.sidebar)
+                    .scrollContentBackground(.hidden)
                     .contentMargins(.top, 0, for: .scrollContent)
                     .contentMargins(.horizontal, 6, for: .scrollContent)
                 }
@@ -253,7 +231,7 @@ struct ContentView: View {
                 )
             }
 
-            Divider()
+            Divider().opacity(0.5)
 
             HStack(spacing: 9) {
                 Image(systemName: "folder.fill")
@@ -295,9 +273,10 @@ struct ContentView: View {
 
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.vertical, 9)
         }
-        .navigationSplitViewColumnWidth(min: 210, ideal: 232, max: 340)
+        .background(Color(nsColor: Theme.sidebarBackgroundColor).ignoresSafeArea())
+        .navigationSplitViewColumnWidth(min: 220, ideal: 232, max: 280)
         .overlay {
             if isSidebarRootDropTargeted {
                 RoundedRectangle(cornerRadius: 10)
@@ -325,51 +304,41 @@ struct ContentView: View {
     }
 
     private var noteViewToolbar: some View {
-        HStack(spacing: 2) {
+        Menu {
             ForEach(OpenViewMode.allCases) { mode in
-                TitlebarIconButton(
-                    systemImage: mode.systemImage,
-                    isSelected: viewMode == mode,
-                    help: mode.title
-                ) {
+                Button {
                     viewMode = mode
+                } label: {
+                    Label(
+                        mode.title,
+                        systemImage: viewMode == mode ? "checkmark" : mode.systemImage
+                    )
                 }
             }
 
-            TitlebarSeparator()
+            Divider()
 
-            TitlebarIconButton(
-                systemImage: "rectangle.split.2x1",
-                isActive: workspaceSession.splitPreview,
-                help: workspaceSession.splitPreview ? "Hide Split Preview" : "Show Split Preview"
-            ) {
+            Button {
                 workspaceSession.splitPreview.toggle()
+            } label: {
+                Label(
+                    workspaceSession.splitPreview ? "Hide Split Preview" : "Show Split Preview",
+                    systemImage: "rectangle.split.2x1"
+                )
             }
             .disabled(!workspace.selectedFileIsMarkdown || viewMode != .editor)
 
-            TitlebarIconButton(
-                systemImage: "sidebar.trailing",
-                isActive: isInspectorPresented,
-                help: isInspectorPresented ? "Hide Note Inspector" : "Show Note Inspector"
-            ) {
+            Button {
                 isInspectorPresented.toggle()
+            } label: {
+                Label(
+                    isInspectorPresented ? "Hide Note Inspector" : "Show Note Inspector",
+                    systemImage: "sidebar.trailing"
+                )
             }
 
-            TitlebarSeparator()
+            Divider()
 
-            moreNoteActionsMenu
-        }
-        .padding(.horizontal, 4)
-        .padding(.vertical, 3)
-        .background {
-            Capsule(style: .continuous)
-                .fill(Color.primary.opacity(0.055))
-        }
-        .fixedSize()
-    }
-
-    private var moreNoteActionsMenu: some View {
-        Menu {
             Button {
                 workspace.createNewFile()
             } label: {
@@ -758,20 +727,39 @@ private struct EditorStatusBar: View {
         text.split(whereSeparator: { $0.isWhitespace }).count
     }
 
+    private var paragraphCount: Int {
+        var count = 0
+        var isInsideParagraph = false
+
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let isBlank = line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if isBlank {
+                isInsideParagraph = false
+            } else if !isInsideParagraph {
+                count += 1
+                isInsideParagraph = true
+            }
+        }
+
+        return count
+    }
+
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 18) {
             Spacer()
-            Text("\(wordCount) words")
-            Text("·")
-            Text("\(text.count) characters")
+            Text("\(wordCount.formatted()) words")
+            Text("\(text.count.formatted()) characters")
+            Text("\(paragraphCount.formatted()) paragraphs")
         }
         .font(.system(size: 10.5))
         .foregroundStyle(.tertiary)
-        .padding(.horizontal, 14)
-        .frame(height: 24)
-        .background(Color(nsColor: .textBackgroundColor))
+        .padding(.horizontal, 20)
+        .frame(height: 26)
+        .background(Color(nsColor: Theme.editorBackgroundColor))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(wordCount) words, \(text.count) characters")
+        .accessibilityLabel(
+            "\(wordCount) words, \(text.count) characters, \(paragraphCount) paragraphs"
+        )
     }
 }
 
@@ -827,6 +815,9 @@ private struct WindowToolbarConfigurator: NSViewRepresentable {
         guard let window = view.window, let toolbar = window.toolbar else { return }
         window.title = title
         window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        window.backgroundColor = Theme.editorBackgroundColor
         window.toolbarStyle = .unified
         toolbar.displayMode = .iconOnly
         toolbar.sizeMode = .regular
