@@ -987,9 +987,31 @@ final class EditorLinkPreviewController {
         containerOrigin: CGPoint,
         availableWidth: CGFloat
     ) -> NSRect? {
-        guard preview.sourceRange.length > 0 else { return nil }
+        guard preview.sourceRange.length > 0,
+              let textStorage = layoutManager.textStorage else {
+            return nil
+        }
+
+        // Paragraph spacing reserves the card's footprint after the complete
+        // paragraph. Anchor the overlay there as well. Using the URL's last
+        // glyph puts the card on top of any prose that follows the URL and
+        // wraps onto later visual lines in the same paragraph.
+        let paragraphStart = preview.paragraphRange.location
+        var paragraphContentEnd = min(
+            NSMaxRange(preview.paragraphRange),
+            textStorage.length
+        )
+        let text = textStorage.string as NSString
+        while paragraphContentEnd > paragraphStart {
+            let character = text.character(at: paragraphContentEnd - 1)
+            guard character == 10 || character == 13 else { break }
+            paragraphContentEnd -= 1
+        }
+        let anchorRange = paragraphContentEnd > paragraphStart
+            ? NSRange(location: paragraphContentEnd - 1, length: 1)
+            : preview.sourceRange
         let glyphRange = layoutManager.glyphRange(
-            forCharacterRange: preview.sourceRange,
+            forCharacterRange: anchorRange,
             actualCharacterRange: nil
         )
         guard glyphRange.length > 0 else { return nil }

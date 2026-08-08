@@ -1,9 +1,64 @@
 import AppKit
+import SwiftUI
 import XCTest
 
 @testable import Markdown
 
 final class EditorLinkPreviewTests: XCTestCase {
+    @MainActor
+    func testXPreviewStartsAfterWrappedMarkdownLinkCommentary() throws {
+        let scrollView = NSTextView.scrollableTextView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 420, height: 900)
+        let textView = try XCTUnwrap(scrollView.documentView as? NSTextView)
+        textView.isVerticallyResizable = true
+        textView.minSize = NSSize(width: 0, height: 900)
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.containerSize = NSSize(
+            width: 280,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+
+        let link = "[Tile-pattern branding effect](https://x.com/user/status/12345)"
+        textView.string = """
+        \(link) — This commentary deliberately continues after the post URL and wraps onto several visual lines in the same Markdown paragraph.
+        Following paragraph
+        """
+
+        let controller = EditorLinkPreviewController()
+        XCTAssertEqual(controller.refresh(in: textView, openURL: { _ in }), 1)
+        let layoutManager = try XCTUnwrap(textView.layoutManager)
+        let textContainer = try XCTUnwrap(textView.textContainer)
+        layoutManager.ensureLayout(for: textContainer)
+        controller.layoutCards(in: textView)
+
+        let firstParagraph = (textView.string as NSString).paragraphRange(
+            for: NSRange(location: 0, length: 0)
+        )
+        let paragraphContentRange = NSRange(
+            location: firstParagraph.location,
+            length: firstParagraph.length - 1
+        )
+        let paragraphGlyphRange = layoutManager.glyphRange(
+            forCharacterRange: paragraphContentRange,
+            actualCharacterRange: nil
+        )
+        let finalParagraphLine = layoutManager.lineFragmentUsedRect(
+            forGlyphAt: NSMaxRange(paragraphGlyphRange) - 1,
+            effectiveRange: nil
+        )
+        let card = try XCTUnwrap(
+            textView.subviews.compactMap { $0 as? NSHostingView<EditorLinkPreviewCard> }.first
+        )
+
+        XCTAssertGreaterThanOrEqual(
+            card.frame.minY,
+            textView.textContainerOrigin.y + finalParagraphLine.maxY + 2 - 0.5
+        )
+    }
+
     @MainActor
     func testViewportAnchorKeepsCaretFixedWhenContentAboveItExpands() throws {
         let scrollView = NSTextView.scrollableTextView()
