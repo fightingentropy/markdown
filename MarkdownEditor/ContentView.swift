@@ -29,7 +29,8 @@ struct ContentView: View {
         _viewMode = State(initialValue: preferences.defaultOpenViewMode)
     }
 
-    var body: some View {
+    // Separate layout, observation, and presentation to keep SwiftUI type checking bounded.
+    private var workspaceLayout: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebar
         } detail: {
@@ -68,6 +69,10 @@ struct ContentView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.98)))
             }
         }
+    }
+
+    private var observedWorkspace: some View {
+        workspaceLayout
         .onAppear {
             restoreExpandedFoldersIfNeeded()
             restoreWorkspaceSession()
@@ -120,6 +125,10 @@ struct ContentView: View {
             showEditorForSearch()
             controller.activateSearch()
         }
+    }
+
+    var body: some View {
+        observedWorkspace
         .sheet(item: $renameRequest) { request in
             RenameItemSheet(target: request) { proposedName in
                 try workspace.renameItem(request.url, to: proposedName)
