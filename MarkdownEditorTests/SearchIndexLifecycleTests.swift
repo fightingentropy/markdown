@@ -5,6 +5,50 @@ import XCTest
 
 @MainActor
 final class SearchIndexLifecycleTests: XCTestCase {
+    func testAdvancedMetadataTracksUnsavedSavedAndExternalChanges() async throws {
+        let initialBody = "---\ntags: [draft]\nstatus: active\n---\n# Project\n"
+        let fixture = try makeVault(files: [("Project", initialBody)])
+        let workspace = Workspace()
+        workspace.vaultURL = fixture.vaultURL
+        workspace.refreshFiles()
+        workspace.selectFile(fixture.fileURLs[0])
+        let originalSnapshot = workspace.makeSearchEntries()
+        XCTAssertEqual(
+            ObsidianAdvancedSearchEvaluator.search(originalSnapshot, query: "tag:draft property:status=active").count,
+            1
+        )
+
+        workspace.text = "---\ntags: [published]\nstatus: done\n---\n# Project\n"
+        let editedSnapshot = workspace.makeSearchEntries()
+        XCTAssertEqual(
+            ObsidianAdvancedSearchEvaluator.search(editedSnapshot, query: "tag:published property:status=done").count,
+            1
+        )
+        XCTAssertTrue(ObsidianAdvancedSearchEvaluator.search(editedSnapshot, query: "tag:draft").isEmpty)
+        XCTAssertEqual(ObsidianAdvancedSearchEvaluator.search(originalSnapshot, query: "tag:draft").count, 1)
+
+        workspace.saveCurrentFile()
+        XCTAssertEqual(
+            ObsidianAdvancedSearchEvaluator.search(workspace.makeSearchEntries(), query: "tag:published").count,
+            1
+        )
+
+        try "---\ntags: [external]\nstatus: archived\n---\n# Project\n".write(
+            to: fixture.fileURLs[0], atomically: true, encoding: .utf8
+        )
+        workspace.handleExternalChanges([.changed(fixture.fileURLs[0])])
+        for _ in 0..<200 where workspace.isLoadingSnapshot {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(workspace.isLoadingSnapshot)
+        let externalSnapshot = workspace.makeSearchEntries()
+        XCTAssertEqual(
+            ObsidianAdvancedSearchEvaluator.search(externalSnapshot, query: "tag:external property:status=archived").count,
+            1
+        )
+        XCTAssertTrue(ObsidianAdvancedSearchEvaluator.search(externalSnapshot, query: "tag:published").isEmpty)
+    }
+
     func testIndexIncrementallyReusesUnchangedBodiesAcrossAddChangeRenameAndDelete() throws {
         let fixture = try makeVault(files: [
             ("Alpha", "# Alpha\n\nfirst body"),

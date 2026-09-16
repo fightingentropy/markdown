@@ -7,11 +7,13 @@ struct WelcomeView: View {
 
     var body: some View {
         VStack(spacing: 20) {
-            Image(systemName: "doc.richtext")
-                .font(.system(size: 56, weight: .thin))
-                .foregroundStyle(.secondary)
+            Image("ObsidianLogo")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 80, height: 80)
+                .accessibilityHidden(true)
 
-            Text("Markdown Editor")
+            Text("Obsidian")
                 .font(.largeTitle)
                 .fontWeight(.bold)
 

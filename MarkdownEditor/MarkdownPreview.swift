@@ -54,6 +54,8 @@ struct MarkdownPreview: View {
     var body: some View {
         let document = MarkdownPreprocessor.preprocessCached(markdown, context: context)
         switch document.preferredRenderMode {
+        case .embedded:
+            EmbeddedMarkdownPreview(document: document, preferences: preferences, onOpenInternalFile: onOpenInternalFile)
         case .native:
             NativeMarkdownPreview(
                 markdown: markdown,
@@ -77,22 +79,9 @@ private struct NativeMarkdownPreview: View {
     let preferences: AppPreferences
     let onOpenInternalFile: (URL) -> Void
 
-    private var inlineStyle: InlineStyle {
-        InlineStyle.gitHub.code(
-            .font(preferences.previewCodeFontChoice.swiftUIFont(size: preferences.previewCodeFontSizeCGFloat)),
-            .backgroundColor(Color(nsColor: .quaternaryLabelColor).opacity(0.22))
-        )
-    }
-
     var body: some View {
         ScrollView {
-            StructuredText(markdown, parser: NativePreviewMarkupParser(context: context))
-                .font(preferences.previewFontChoice.swiftUIFont(size: preferences.previewFontSizeCGFloat))
-                .textual.structuredTextStyle(.gitHub)
-                .textual.inlineStyle(inlineStyle)
-                .textual.codeBlockStyle(ConfigurablePreviewCodeBlockStyle(preferences: preferences))
-                .textual.imageAttachmentLoader(PreviewImageAttachmentLoader(context: context))
-                .textual.overflowMode(.wrap)
+            NativeMarkdownContent(markdown: markdown, context: context, preferences: preferences)
                 .padding(.horizontal, 72)
                 .padding(.top, 48)
                 .padding(.bottom, 120)
@@ -112,6 +101,114 @@ private struct NativeMarkdownPreview: View {
 
             return NSWorkspace.shared.open(url) ? .handled : .discarded
         })
+    }
+}
+
+private struct NativeMarkdownContent: View {
+    let markdown: String
+    let context: PreviewContext
+    let preferences: AppPreferences
+
+    private var inlineStyle: InlineStyle {
+        InlineStyle.gitHub.code(
+            .font(preferences.previewCodeFontChoice.swiftUIFont(size: preferences.previewCodeFontSizeCGFloat)),
+            .backgroundColor(Color(nsColor: .quaternaryLabelColor).opacity(0.22))
+        )
+    }
+
+    var body: some View {
+            StructuredText(markdown, parser: NativePreviewMarkupParser(context: context))
+                .font(preferences.previewFontChoice.swiftUIFont(size: preferences.previewFontSizeCGFloat))
+                .textual.structuredTextStyle(.gitHub)
+                .textual.inlineStyle(inlineStyle)
+                .textual.codeBlockStyle(ConfigurablePreviewCodeBlockStyle(preferences: preferences))
+                .textual.imageAttachmentLoader(PreviewImageAttachmentLoader(context: context))
+                .textual.overflowMode(.wrap)
+    }
+}
+
+private struct EmbeddedMarkdownPreview: View {
+    let document: PreviewDocument
+    let preferences: AppPreferences
+    let onOpenInternalFile: (URL) -> Void
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 16) {
+                ForEach(Array(document.segments.enumerated()), id: \.offset) { _, segment in
+                    switch segment {
+                    case .embed(let preview):
+                        ReadingEmbedCard(preview: preview, openURL: openURL)
+                            .id(preview.id)
+                    case .markdown(let markdown) where !document.requiresHTMLFallback:
+                        NativeMarkdownContent(markdown: markdown, context: document.context, preferences: preferences)
+                    default:
+                        FittedHTMLPreview(document: PreviewDocument(source: document.source, context: document.context,
+                            segments: [segment], requiresHTMLFallback: true), preferences: preferences,
+                            onOpenInternalFile: onOpenInternalFile)
+                    }
+                }
+            }
+            .padding(.horizontal, 72)
+            .padding(.top, 48)
+            .padding(.bottom, 120)
+            .frame(maxWidth: preferences.previewPageWidthCGFloat, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+        .background(Color(nsColor: .textBackgroundColor))
+        .environment(\.openURL, OpenURLAction { url in openURL(url); return .handled })
+    }
+
+    private func openURL(_ url: URL) {
+        if let internalURL = PreviewURLPolicy.internalVaultFile(url, vaultURL: document.context.vaultURL) {
+            onOpenInternalFile(internalURL)
+        } else if PreviewURLPolicy.canOpenExternally(url) { NSWorkspace.shared.open(url) }
+    }
+}
+
+private struct ReadingEmbedCard: View {
+    let preview: EditorLinkPreview
+    let openURL: (URL) -> Void
+    @State private var tweetHeight: CGFloat = 220
+    @State private var width: CGFloat = 550
+    @State private var visible = false
+
+    private var isTweet: Bool { if case .xPost = preview.kind { return true }; return false }
+
+    var body: some View {
+        EditorLinkPreviewCard(preview: preview, openURL: openURL, xEmbedHeightChanged: { value in
+            guard value.isFinite, value > 0, value <= 100_000 else { return }
+            tweetHeight = max(220, ceil(value) + 4)
+            if case .xPost(_, let statusID) = preview.kind {
+                EditorEmbedCache.shared.saveXHeight(tweetHeight, for: statusID, width: width)
+            }
+        }, isPresented: visible)
+        .frame(maxWidth: isTweet ? 550 : 640)
+        .frame(height: isTweet ? tweetHeight : max(200, width * 9 / 16))
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { newWidth in
+            guard newWidth > 0, width != newWidth else { return }
+            width = newWidth
+            if case .xPost(_, let statusID) = preview.kind {
+                tweetHeight = EditorEmbedCache.shared.xHeight(for: statusID, width: newWidth) ?? 220
+            }
+        }
+        .onScrollVisibilityChange(threshold: 0.01) { visible = $0 }
+        .onDisappear { visible = false }
+    }
+}
+
+private struct FittedHTMLPreview: View {
+    let document: PreviewDocument
+    let preferences: AppPreferences
+    let onOpenInternalFile: (URL) -> Void
+    @State private var height: CGFloat = 1
+
+    var body: some View {
+        HTMLPreviewWebView(html: PreviewStylesheet.page(body: HTMLPreviewRenderer.render(document: document),
+            preferences: preferences, compact: true), baseURL: document.context.previewBaseURL,
+            vaultURL: document.context.vaultURL, onOpenInternalFile: onOpenInternalFile,
+            heightChanged: { height = max(1, $0) })
+            .frame(height: height)
     }
 }
 
@@ -215,7 +312,9 @@ final class KaTeXBundleSchemeHandler: NSObject, WKURLSchemeHandler {
 private struct HTMLPreviewWebView: NSViewRepresentable {
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         var lastHTML: String?
+        var scrollForwarder: EmbedScrollForwarder?
         var lastBaseURL: URL?
+        var heightChanged: ((CGFloat) -> Void)?
         var vaultURL: URL?
         var onOpenInternalFile: (URL) -> Void
 
@@ -228,6 +327,12 @@ private struct HTMLPreviewWebView: NSViewRepresentable {
             _ userContentController: WKUserContentController,
             didReceive message: WKScriptMessage
         ) {
+            guard message.frameInfo.isMainFrame else { return }
+            if message.name == "previewHeight", let value = message.body as? Double,
+               value.isFinite, value > 0 {
+                heightChanged?(CGFloat(ceil(value)))
+                return
+            }
             guard message.name == "openLink",
                   let urlString = message.body as? String,
                   let url = URL(string: urlString) else { return }
@@ -270,7 +375,10 @@ private struct HTMLPreviewWebView: NSViewRepresentable {
         }
 
         func tearDown(_ webView: WKWebView) {
-            webView.configuration.userContentController.removeScriptMessageHandler(forName: "openLink")
+            scrollForwarder = nil
+            webView.stopLoading()
+            webView.navigationDelegate = nil
+            webView.configuration.userContentController.removeAllScriptMessageHandlers()
         }
     }
 
@@ -278,6 +386,7 @@ private struct HTMLPreviewWebView: NSViewRepresentable {
     let baseURL: URL?
     let vaultURL: URL?
     let onOpenInternalFile: (URL) -> Void
+    var heightChanged: ((CGFloat) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(vaultURL: vaultURL, onOpenInternalFile: onOpenInternalFile)
@@ -313,13 +422,25 @@ private struct HTMLPreviewWebView: NSViewRepresentable {
         )
         configuration.userContentController.addUserScript(script)
         configuration.userContentController.add(context.coordinator, name: "openLink")
+        if heightChanged != nil {
+            configuration.userContentController.add(context.coordinator, name: "previewHeight")
+            configuration.userContentController.addUserScript(WKUserScript(source: """
+                function reportPreviewHeight() {
+                    window.webkit.messageHandlers.previewHeight.postMessage(document.body.getBoundingClientRect().height);
+                }
+                new ResizeObserver(reportPreviewHeight).observe(document.body);
+                reportPreviewHeight();
+                """, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        }
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
+        if heightChanged != nil { context.coordinator.scrollForwarder = EmbedScrollForwarder(host: webView) }
         return webView
     }
 
     func updateNSView(_ nsView: WKWebView, context: Context) {
+        context.coordinator.heightChanged = heightChanged
         context.coordinator.vaultURL = vaultURL
         context.coordinator.onOpenInternalFile = onOpenInternalFile
         guard context.coordinator.lastHTML != html || context.coordinator.lastBaseURL != baseURL else {

@@ -234,9 +234,12 @@ struct ContentView: View {
             Divider().opacity(0.5)
 
             HStack(spacing: 9) {
-                Image(systemName: "folder.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                Image("ObsidianLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 18, height: 18)
+                    .accessibilityLabel("Obsidian")
+                    .help("Obsidian")
 
                 Text(workspace.vaultURL?.lastPathComponent ?? "Vault")
                     .font(.system(size: 12, weight: .medium))
@@ -245,31 +248,25 @@ struct ContentView: View {
                 Spacer(minLength: 8)
 
                 Menu {
-                    Button { workspace.sortOrder = .byDate } label: {
-                        Label("Date Modified", systemImage: workspace.sortOrder == .byDate ? "checkmark" : "")
+                    Picker("Sort notes by", selection: $workspace.sortOrder) {
+                        Text("Name").tag(SortOrder.byName)
+                        Text("Date Modified").tag(SortOrder.byDate)
                     }
-                    Button { workspace.sortOrder = .byName } label: {
-                        Label("Name", systemImage: workspace.sortOrder == .byName ? "checkmark" : "")
-                    }
+                    .pickerStyle(.inline)
+
+                    Divider()
+
+                    Button("Collapse All Folders", action: collapseSidebarFolders)
+                        .disabled(expandedFolderURLs.isEmpty)
                 } label: {
-                    Image(systemName: "arrow.up.arrow.down")
-                        .foregroundStyle(.secondary)
+                    MoreMenuLabel()
                 }
                 .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
                 .fixedSize()
-                .help("Sort Order")
-                .accessibilityLabel("Sort Order")
-
-                Button {
-                    collapseSidebarFolders()
-                } label: {
-                    Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Collapse All Folders")
-                .accessibilityLabel("Collapse All Folders")
-                .disabled(expandedFolderURLs.isEmpty)
+                .help("Sidebar options: sort notes or collapse folders")
+                .accessibilityLabel("Sidebar options")
+                .accessibilityValue(workspace.sortOrder == .byDate ? "Sorted by date modified" : "Sorted by name")
 
             }
             .padding(.horizontal, 12)
@@ -390,7 +387,7 @@ struct ContentView: View {
                 Label("Vault Health", systemImage: "checkmark.shield")
             }
         } label: {
-            TitlebarMenuLabel()
+            MoreMenuLabel()
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -772,7 +769,7 @@ private struct TitlebarSeparator: View {
     }
 }
 
-private struct TitlebarMenuLabel: View {
+private struct MoreMenuLabel: View {
     @State private var isHovering = false
 
     var body: some View {

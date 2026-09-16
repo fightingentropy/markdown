@@ -85,6 +85,56 @@ final class ObsidianAdvancedSearchEvaluatorTests: XCTestCase {
         )
     }
 
+    func testConcurrentFiltersShareNoteBodiesWithoutChangingResults() async {
+        let entries = [
+            entry(
+                title: "Project",
+                path: "work/Project.md",
+                body: "---\ntags: [swift]\nstatus: active\n---\n- [ ] Ship it"
+            ),
+            entry(
+                title: "Archive",
+                path: "archive/Old.md",
+                body: "---\ntags: [archive]\nstatus: done\n---\n- [x] Done"
+            )
+        ]
+
+        let outputs = await withTaskGroup(of: [String].self, returning: [[String]].self) { group in
+            for _ in 0..<24 {
+                group.addTask {
+                    ObsidianAdvancedSearchEvaluator.search(
+                        entries,
+                        query: "tag:swift property:status=active task:open"
+                    ).map(\.title)
+                }
+            }
+            var outputs: [[String]] = []
+            for await output in group { outputs.append(output) }
+            return outputs
+        }
+
+        XCTAssertEqual(outputs.count, 24)
+        XCTAssertTrue(outputs.allSatisfy { $0 == ["Project"] })
+    }
+
+    func testTaskFiltersPreserveMarkersLineEndingsAndUnicodeMatching() {
+        let entries = [
+            entry(title: "Open", path: "Open.md", body: "Preamble\r\n\t+ [ ] Ship\r\n"),
+            entry(title: "Done", path: "Done.md", body: "Intro\n  * [X] Re\u{301}sume\u{301}\u{2028}- [x] Done"),
+            entry(title: "Other", path: "Other.md", body: "- [y] Not a task\nInline - [ ] Not a task")
+        ]
+
+        for (query, expected) in [
+            ("task:any", ["Open", "Done"]),
+            ("task:open", ["Open"]),
+            ("task:done", ["Done"]),
+            ("task:resume", ["Done"]),
+            ("-task:any", ["Other"])
+        ] {
+            XCTAssertEqual(ObsidianAdvancedSearchEvaluator.search(entries, query: query).map(\.title), expected)
+        }
+    }
+
     private func entry(
         title: String,
         path: String,

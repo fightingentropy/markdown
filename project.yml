@@ -46,8 +46,9 @@ targets:
         CURRENT_PROJECT_VERSION: "3"
         CODE_SIGN_ENTITLEMENTS: MarkdownEditor/MarkdownEditor.entitlements
         CODE_SIGN_STYLE: Automatic
-        PRODUCT_NAME: Markdown
-        INFOPLIST_KEY_CFBundleDisplayName: Markdown
+        PRODUCT_NAME: Obsidian
+        PRODUCT_MODULE_NAME: Markdown
+        INFOPLIST_KEY_CFBundleDisplayName: Obsidian
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
         SPARKLE_FEED_URL: ""
         SPARKLE_PUBLIC_ED_KEY: ""
@@ -57,6 +58,7 @@ targets:
     info:
       path: MarkdownEditor/Info.plist
       properties:
+        CFBundleDisplayName: "$(PRODUCT_NAME)"
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         SUFeedURL: "$(SPARKLE_FEED_URL)"
@@ -98,7 +100,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.md.MarkdownEditorTests
         GENERATE_INFOPLIST_FILE: YES
-        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Markdown.app/Contents/MacOS/Markdown"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Obsidian.app/Contents/MacOS/Obsidian"
         BUNDLE_LOADER: "$(TEST_HOST)"
 
 schemes:

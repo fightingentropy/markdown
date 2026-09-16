@@ -1,6 +1,8 @@
 import Foundation
 
 enum ObsidianAdvancedSearchEvaluator {
+    private static let taskPattern = try! NSRegularExpression(pattern: #"^\s*[-*+]\s+\[([ xX])\]"#)
+
     static func search(_ entries: [NoteSearchEntry], query source: String) -> [NoteSearchResult] {
         let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return Workspace.search(entries, query: "") }
@@ -11,27 +13,27 @@ enum ObsidianAdvancedSearchEvaluator {
         let query = ObsidianAdvancedSearchParser.parse(trimmed)
         guard !query.isEmpty else { return Workspace.search(entries, query: trimmed) }
 
+        let snippetTerm = query.groups
+            .flatMap(\.terms)
+            .first(where: { !$0.isExcluded && isTextPredicate($0.predicate) })
+        let snippetQuery = snippetTerm.flatMap { term -> String? in
+            guard case .text(let value, _) = term.predicate else { return nil }
+            return value
+        }
+        let foldedSnippetQuery = snippetQuery.map(Workspace.foldedForSearch)
+
         var results: [NoteSearchResult] = []
         for entry in entries {
             guard !Task.isCancelled else { return [] }
-            let metadata = entry.searchMetadata
-                ?? ObsidianMetadataParser.searchMetadata(in: entry.body)
             guard query.groups.contains(where: { group in
                 group.terms.allSatisfy { term in
-                    let matches = matches(term.predicate, entry: entry, metadata: metadata)
+                    let matches = matches(term.predicate, entry: entry)
                     return term.isExcluded ? !matches : matches
                 }
             }) else { continue }
 
-            let snippetTerm = query.groups
-                .flatMap(\.terms)
-                .first(where: { !$0.isExcluded && isTextPredicate($0.predicate) })
-            let snippetQuery = snippetTerm.flatMap { term -> String? in
-                guard case .text(let value, _) = term.predicate else { return nil }
-                return value
-            }
-            if let snippetQuery,
-               entry.bodyStorage.foldedText.contains(Workspace.foldedForSearch(snippetQuery)) {
+            if let snippetQuery, let foldedSnippetQuery,
+               entry.bodyStorage.foldedText.contains(foldedSnippetQuery) {
                 results.append(
                     NoteSearchResult(
                         id: entry.id,
@@ -62,8 +64,7 @@ enum ObsidianAdvancedSearchEvaluator {
 
     private static func matches(
         _ predicate: ObsidianSearchPredicate,
-        entry: NoteSearchEntry,
-        metadata: ObsidianSearchMetadata
+        entry: NoteSearchEntry
     ) -> Bool {
         switch predicate {
         case .text(let value, _):
@@ -76,11 +77,11 @@ enum ObsidianAdvancedSearchEvaluator {
         case .path(let value, _):
             return contains(value, in: entry.relativePath ?? entry.url.path)
         case .tag(let value, _):
-            return metadata.tags.contains { tag in
+            return entry.metadataForSearch.tags.contains { tag in
                 contains(value, in: tag)
             }
         case .property(let name, let value, _):
-            guard let property = metadata.properties.first(where: {
+            guard let property = entry.metadataForSearch.properties.first(where: {
                 $0.key.caseInsensitiveCompare(name) == .orderedSame
             })?.value else { return false }
             guard let value else { return true }
@@ -107,12 +108,10 @@ enum ObsidianAdvancedSearchEvaluator {
     }
 
     private static func taskState(in line: String) -> Bool? {
-        let pattern = #"^\s*[-*+]\s+\[([ xX])\]"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(
-                in: line,
-                range: NSRange(location: 0, length: (line as NSString).length)
-              ),
+        guard let match = taskPattern.firstMatch(
+            in: line,
+            range: NSRange(location: 0, length: (line as NSString).length)
+        ),
               match.numberOfRanges > 1 else { return nil }
         let marker = (line as NSString).substring(with: match.range(at: 1))
         return marker.lowercased() == "x"

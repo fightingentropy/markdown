@@ -6,7 +6,9 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOCAL_BUILD_ROOT="$ROOT_DIR/.codex-build/local-install"
 LOCAL_DERIVED_DATA="$LOCAL_BUILD_ROOT/deriveddata"
 LOCAL_SPM_DIR="$LOCAL_BUILD_ROOT/spm"
-INSTALL_APP_PATH="/Applications/Markdown.app"
+INSTALL_APP_PATH="/Applications/Obsidian.app"
+LEGACY_INSTALL_APP_PATH="/Applications/Markdown.app"
+APP_BUNDLE_IDENTIFIER="com.md.MarkdownEditor"
 LOCAL_CODESIGN_IDENTITY="${LOCAL_CODESIGN_IDENTITY:-Markdown}"
 
 function require_tool() {
@@ -19,6 +21,15 @@ function require_tool() {
 require_tool security
 require_tool xcodegen
 require_tool xcodebuild
+
+# Never replace a different app that happens to use the same display name.
+if [[ -e "$INSTALL_APP_PATH" ]]; then
+  installed_identifier=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$INSTALL_APP_PATH/Contents/Info.plist" 2>/dev/null || true)
+  if [[ "$installed_identifier" != "$APP_BUNDLE_IDENTIFIER" ]]; then
+    echo "A different app already exists at $INSTALL_APP_PATH; leaving it untouched." >&2
+    exit 1
+  fi
+fi
 
 if ! security find-identity -v -p codesigning | grep -F "\"$LOCAL_CODESIGN_IDENTITY\"" >/dev/null; then
   "$ROOT_DIR/scripts/create_local_codesigning_identity.sh" "$LOCAL_CODESIGN_IDENTITY"
@@ -42,16 +53,44 @@ xcodebuild \
   DEVELOPMENT_TEAM="" \
   build
 
-APP_PATH="$LOCAL_DERIVED_DATA/Build/Products/Debug/Markdown.app"
+APP_PATH="$LOCAL_DERIVED_DATA/Build/Products/Debug/Obsidian.app"
 if [[ ! -d "$APP_PATH" ]]; then
   echo "Local app not found at $APP_PATH" >&2
   exit 1
 fi
 
-pkill -x Markdown >/dev/null 2>&1 || true
+# Ask the existing app to quit so it can save pending note edits.
+osascript <<'APPLESCRIPT'
+if application id "com.md.MarkdownEditor" is running then
+  tell application id "com.md.MarkdownEditor" to quit
+end if
+APPLESCRIPT
+
+for attempt in {1..80}; do
+  if ! pgrep -f '/Applications/(Markdown|Obsidian)\.app/Contents/MacOS/(Markdown|Obsidian)( |$)' >/dev/null; then
+    break
+  fi
+  sleep 0.25
+done
+if pgrep -f '/Applications/(Markdown|Obsidian)\.app/Contents/MacOS/(Markdown|Obsidian)( |$)' >/dev/null; then
+  echo "The app is still running; installation stopped to preserve pending edits." >&2
+  exit 1
+fi
+
 rm -rf "$INSTALL_APP_PATH"
 ditto "$APP_PATH" "$INSTALL_APP_PATH"
 xattr -cr "$INSTALL_APP_PATH"
+
+# Keep the previous Markdown install as a backup outside /Applications.
+if [[ -d "$LEGACY_INSTALL_APP_PATH" ]]; then
+  legacy_identifier=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$LEGACY_INSTALL_APP_PATH/Contents/Info.plist" 2>/dev/null || true)
+  if [[ "$legacy_identifier" == "$APP_BUNDLE_IDENTIFIER" ]]; then
+    BACKUP_DIR="$ROOT_DIR/.codex-build/previous-apps/$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$BACKUP_DIR"
+    mv "$LEGACY_INSTALL_APP_PATH" "$BACKUP_DIR/Markdown.app"
+  fi
+fi
+
 open -na "$INSTALL_APP_PATH"
 
 echo "Installed local build to $INSTALL_APP_PATH"

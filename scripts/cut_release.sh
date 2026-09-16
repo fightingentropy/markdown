@@ -14,7 +14,7 @@ Environment:
   SPARKLE_KEY_ACCOUNT               Optional. Keychain account name used to derive the public key
 
 Options:
-  --notes-file <path>               Copy release notes from this file to releases/Markdown-<version>.md
+  --notes-file <path>               Copy release notes from this file to releases/Obsidian-<version>.md
   --archives-dir <path>             Local cache for archives and generated appcast (default: .release-assets)
   --derived-data-path <path>        Derived data path for the build (default: .release-build)
   --repo <owner/repo>               GitHub repository used for release uploads (default: current gh repo)
@@ -44,8 +44,8 @@ function require_tool() {
 
 function sync_release_notes() {
   mkdir -p "$ARCHIVES_DIR"
-  rm -f "$ARCHIVES_DIR"/Markdown-*.md
-  for notes in "$ROOT_DIR"/releases/Markdown-*.md(N); do
+  rm -f "$ARCHIVES_DIR"/Markdown-*.md(N) "$ARCHIVES_DIR"/Obsidian-*.md(N)
+  for notes in "$ROOT_DIR"/releases/Markdown-*.md(N) "$ROOT_DIR"/releases/Obsidian-*.md(N); do
     cp "$notes" "$ARCHIVES_DIR/"
   done
 }
@@ -66,8 +66,8 @@ function download_existing_release_assets() {
 
 function upload_current_release_assets() {
   local tag="v$VERSION"
-  local title="Markdown $VERSION"
-  local delta_files=("$ARCHIVES_DIR"/Markdown${BUILD}-*.delta(N))
+  local title="Obsidian $VERSION"
+  local delta_files=("$ARCHIVES_DIR"/Obsidian${BUILD}-*.delta(N))
 
   if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
     gh release edit "$tag" --repo "$REPO" --title "$title" --notes-file "$DEFAULT_NOTES_PATH" >/dev/null
@@ -218,7 +218,7 @@ xcodebuild \
   SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY" \
   build
 
-APP_PATH="$DERIVED_DATA_PATH/Build/Products/Release/Markdown.app"
+APP_PATH="$DERIVED_DATA_PATH/Build/Products/Release/Obsidian.app"
 if [[ ! -d "$APP_PATH" ]]; then
   echo "Release app not found at $APP_PATH" >&2
   exit 1
@@ -226,8 +226,8 @@ fi
 
 VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_PATH/Contents/Info.plist")
 BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP_PATH/Contents/Info.plist")
-ARCHIVE_PATH="$ARCHIVES_DIR/Markdown-$VERSION.zip"
-DEFAULT_NOTES_PATH="$ROOT_DIR/releases/Markdown-$VERSION.md"
+ARCHIVE_PATH="$ARCHIVES_DIR/Obsidian-$VERSION.zip"
+DEFAULT_NOTES_PATH="$ROOT_DIR/releases/Obsidian-$VERSION.md"
 
 if [[ -n "$NOTES_FILE" ]]; then
   mkdir -p "$ROOT_DIR/releases"
@@ -261,7 +261,7 @@ if [[ "$PUBLISH_GITHUB_RELEASE" == true ]]; then
   sync_root_appcast
 fi
 
-echo "Built Markdown $VERSION ($BUILD)"
+echo "Built Obsidian $VERSION ($BUILD)"
 echo "Archive cache: $ARCHIVE_PATH"
 echo "Release notes: $DEFAULT_NOTES_PATH"
 echo "Appcast cache: $ARCHIVES_DIR/appcast.xml"

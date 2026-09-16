@@ -36,10 +36,12 @@ struct ResolvedAsset: Equatable {
 
 enum PreviewSegment {
     case markdown(String)
+    case embed(EditorLinkPreview)
     case mermaid(source: String, diagram: MermaidDiagram?)
 }
 
 enum PreviewRenderMode {
+    case embedded
     case native
     case html
 }
@@ -61,6 +63,9 @@ struct PreviewDocument {
     }
 
     var preferredRenderMode: PreviewRenderMode {
+        if segments.contains(where: { if case .embed = $0 { return true }; return false }) {
+            return .embedded
+        }
         if requiresHTMLFallback || containsMermaid {
             return .html
         }
@@ -271,10 +276,6 @@ struct AssetResolver {
     }
 }
 
-private let youtubeURLPattern = try! NSRegularExpression(
-    pattern: #"(?:youtube\.com/watch\?[^\s"]*v=|youtu\.be/|youtube\.com/embed/)([a-zA-Z0-9_-]{11})"#
-)
-
 /// Encodes LaTeX source into an ASCII-only placeholder token that survives
 /// cmark and our HTML-escape pass unchanged. The token is replaced with a
 /// KaTeX-targeted `<span>` in post-processing.
@@ -343,6 +344,14 @@ enum MarkdownPreprocessor {
         let normalizedSource = markdown.replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
         let lines = normalizedSource.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let embeds = Dictionary(uniqueKeysWithValues: EditorLinkPreviewDetector.presentationPreviews(in: normalizedSource)
+            .map { ($0.paragraphRange.location, $0) })
+        var lineOffsets: [Int] = []
+        var offset = 0
+        for line in lines {
+            lineOffsets.append(offset)
+            offset += (line as NSString).length + 1
+        }
         let resolver = AssetResolver(context: context)
         let noteResolver = NoteReferenceResolver(
             noteURLs: context.assetLookupByFilename.values
@@ -351,6 +360,7 @@ enum MarkdownPreprocessor {
             vaultURL: context.vaultURL
         )
 
+        let references = embeds.isEmpty ? "" : referenceDefinitions(in: lines)
         var segments: [PreviewSegment] = []
         var markdownBuffer: [String] = []
         var requiresHTMLFallback = false
@@ -361,13 +371,19 @@ enum MarkdownPreprocessor {
                 return
             }
 
-            segments.append(.markdown(markdownBuffer.joined(separator: "\n")))
+            segments.append(.markdown(markdownBuffer.joined(separator: "\n") + (references.isEmpty ? "" : "\n\n" + references)))
             markdownBuffer.removeAll(keepingCapacity: true)
         }
 
         while index < lines.count {
             let line = lines[index]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if let embed = embeds[lineOffsets[index]] {
+                flushMarkdownBuffer()
+                segments.append(.embed(embed))
+                index += 1
+                continue
+            }
 
             if let fence = codeFenceMarker(in: trimmed) {
                 let language = trimmed.dropFirst(fence.count).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -458,22 +474,49 @@ enum MarkdownPreprocessor {
         )
     }
 
+    private static func referenceDefinitions(in lines: [String]) -> String {
+        var definitions: [String] = []
+        var fence: String?
+        let definition = try! NSRegularExpression(pattern: #"^ {0,3}\[[^\]\n]+\]:[ \t]*\S+"#)
+        var index = 0
+        while index < lines.count {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if let marker = codeFenceMarker(in: trimmed) {
+                if let activeFence = fence {
+                    if marker.first == activeFence.first, marker.count >= activeFence.count,
+                       trimmed.allSatisfy({ $0 == activeFence.first || $0.isWhitespace }) { fence = nil }
+                } else { fence = marker }
+            } else if fence == nil, definition.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length)) != nil {
+                definitions.append(line)
+                if index + 1 < lines.count {
+                    let next = lines[index + 1]
+                    let title = next.trimmingCharacters(in: .whitespaces)
+                    let isTitle = (title.hasPrefix("\"") && title.hasSuffix("\"")) ||
+                        (title.hasPrefix("'") && title.hasSuffix("'")) ||
+                        (title.hasPrefix("(") && title.hasSuffix(")"))
+                    if next.first?.isWhitespace == true, isTitle {
+                        definitions.append(next)
+                        index += 1
+                    }
+                }
+            }
+            index += 1
+        }
+        return definitions.joined(separator: "\n")
+    }
+
     private static func codeFenceMarker(in trimmedLine: String) -> String? {
-        guard trimmedLine.hasPrefix("```") else {
+        guard trimmedLine.hasPrefix("```") || trimmedLine.hasPrefix("~~~") else {
             return nil
         }
 
-        let marker = trimmedLine.prefix { $0 == "`" }
+        let marker = trimmedLine.prefix { $0 == trimmedLine.first }
         guard marker.count >= 3 else {
             return nil
         }
 
         return String(marker)
-    }
-
-    static func containsYouTubeURL(_ text: String) -> Bool {
-        let range = NSRange(location: 0, length: (text as NSString).length)
-        return youtubeURLPattern.firstMatch(in: text, range: range) != nil
     }
 
     private static func rewriteInlineSyntax(
@@ -483,9 +526,6 @@ enum MarkdownPreprocessor {
         documentURL: URL?,
         requiresHTMLFallback: inout Bool
     ) -> String {
-        if !requiresHTMLFallback && containsYouTubeURL(line) {
-            requiresHTMLFallback = true
-        }
 
         let characters = Array(line)
         var result = ""
@@ -732,9 +772,6 @@ enum HTMLPreviewRenderer {
     private static let obsidianWidthTitlePattern = try! NSRegularExpression(
         pattern: #"title="codex-obsidian-width-(\d+)""#
     )
-    private static let youtubeAnchorPattern = try! NSRegularExpression(
-        pattern: #"<a\s+href="((?:https?://)?(?:www\.)?(?:youtube\.com/watch\?[^\s"]*v=[a-zA-Z0-9_-]{11}[^\s"]*|youtu\.be/[a-zA-Z0-9_-]{11}[^\s"]*))">(.*?)</a>"#
-    )
     private static let paragraphBlockPattern = try! NSRegularExpression(
         pattern: #"<p>((?s:.*?))</p>"#
     )
@@ -778,6 +815,10 @@ enum HTMLPreviewRenderer {
 
     private static func render(_ segment: PreviewSegment) -> String {
         switch segment {
+        case .embed(let preview):
+            // Static HTML/export keeps a usable source link. The app renders
+            // this segment with the same interactive card as the editor.
+            return "<p><a href=\"\(escapeHTML(preview.url.absoluteString))\">\(escapeHTML(preview.title))</a></p>"
         case .markdown(let markdown):
             guard !markdown.isEmpty else {
                 return ""
@@ -863,8 +904,7 @@ enum HTMLPreviewRenderer {
         )
 
         let paragraphTransformed = transformParagraphBlocks(in: widthAdjustedHTML)
-        let youtubeTransformed = transformYouTubeLinks(in: paragraphTransformed)
-        let mathTransformed = transformMathTokens(in: youtubeTransformed)
+        let mathTransformed = transformMathTokens(in: paragraphTransformed)
         return sanitizeDangerousURLSchemes(in: mathTransformed)
     }
 
@@ -926,53 +966,6 @@ enum HTMLPreviewRenderer {
             let replacement = "<span class=\"\(cssClass)\">\(escaped)</span>"
             result = (result as NSString).replacingCharacters(in: match.range, with: replacement)
         }
-        return result
-    }
-
-    private static func extractYouTubeVideoID(from url: String) -> String? {
-        let range = NSRange(location: 0, length: (url as NSString).length)
-        guard let match = youtubeURLPattern.firstMatch(in: url, range: range) else { return nil }
-        let idRange = match.range(at: 1)
-        guard idRange.location != NSNotFound else { return nil }
-        return (url as NSString).substring(with: idRange)
-    }
-
-    private static func transformYouTubeLinks(in html: String) -> String {
-        let nsHTML = html as NSString
-        let range = NSRange(location: 0, length: nsHTML.length)
-        let matches = youtubeAnchorPattern.matches(in: html, range: range)
-        guard !matches.isEmpty else { return html }
-
-        var result = html
-        for match in matches.reversed() {
-            let urlRange = match.range(at: 1)
-            let titleRange = match.range(at: 2)
-            guard urlRange.location != NSNotFound, titleRange.location != NSNotFound else { continue }
-
-            let url = nsHTML.substring(with: urlRange)
-            let title = nsHTML.substring(with: titleRange)
-            guard let videoID = extractYouTubeVideoID(from: url) else { continue }
-
-            let displayTitle = title == url ? "" : title
-            let thumbnailURL = "https://img.youtube.com/vi/\(videoID)/hqdefault.jpg"
-
-            var card = """
-            <a href="\(url)" class="youtube-card">
-            <div class="youtube-thumb-wrap">
-            <img class="youtube-thumb" src="\(thumbnailURL)" alt="">
-            <div class="youtube-play"><svg viewBox="0 0 68 48" width="68" height="48"><path d="M66.52 7.74c-.78-2.93-2.49-5.41-5.42-6.19C55.79.13 34 0 34 0S12.21.13 6.9 1.55C3.97 2.33 2.27 4.81 1.48 7.74.06 13.05 0 24 0 24s.06 10.95 1.48 16.26c.78 2.93 2.49 5.41 5.42 6.19C12.21 47.87 34 48 34 48s21.79-.13 27.1-1.55c2.93-.78 4.64-3.26 5.42-6.19C67.94 34.95 68 24 68 24s-.06-10.95-1.48-16.26z" fill="red"/><path d="M45 24 27 14v20" fill="white"/></svg></div>
-            </div>
-            """
-
-            if !displayTitle.isEmpty {
-                card += "<span class=\"youtube-title\">\(displayTitle)</span>"
-            }
-
-            card += "</a>"
-
-            result = (result as NSString).replacingCharacters(in: match.range, with: card)
-        }
-
         return result
     }
 

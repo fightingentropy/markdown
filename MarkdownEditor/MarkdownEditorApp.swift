@@ -50,7 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
-struct MarkdownEditorApp: App {
+struct ObsidianApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
     @State private var workspace: Workspace
@@ -75,7 +75,7 @@ struct MarkdownEditorApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup("Obsidian") {
             Group {
                 if workspace.hasVault {
                     ContentView(

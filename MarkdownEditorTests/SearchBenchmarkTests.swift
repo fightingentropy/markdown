@@ -5,6 +5,58 @@ import XCTest
 @testable import Markdown
 
 final class SearchBenchmarkTests: XCTestCase {
+    func testAdvancedFiltersAcrossTwoThousandNotes() {
+        let noteCount = 2_000
+        let filler = String(repeating: "Reference material and project planning details.\n", count: 20)
+        let entries = (0..<noteCount).map { index in
+            let title = String(format: "Note %05d", index)
+            let isActive = index.isMultiple(of: 2)
+            let body = "---\ntags: [swift]\nstatus: \(isActive ? "active" : "archived")\n---\n"
+                + "# \(title)\n\n" + filler
+                + (isActive ? "- [ ] Ship the release\n" : "- [x] Archive the release\n")
+            let url = URL(fileURLWithPath: "/benchmark/work/\(title).md")
+            return NoteSearchEntry(
+                id: url,
+                url: url,
+                title: title,
+                relativePath: "work/\(title).md",
+                body: body,
+                foldedTitle: Workspace.foldedForSearch(title),
+                foldedTitleHaystack: Workspace.foldedForSearch("\(title)\n\(title).md")
+            )
+        }
+
+        for (label, query, expectedCount) in [
+            ("file", "file:\"Note 00073\"", 1),
+            ("task", "task:open", noteCount / 2),
+            ("metadata", "tag:swift property:status=active", noteCount / 2)
+        ] {
+            var samples: [Double] = []
+            // Each call starts with the maintained index snapshot, as opening
+            // a new palette does. Only the shared note bodies retain caches.
+            for _ in 0..<4 {
+                let started = DispatchTime.now().uptimeNanoseconds
+                let results = ObsidianAdvancedSearchEvaluator.search(entries, query: query)
+                samples.append(Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000)
+                XCTAssertEqual(results.count, expectedCount)
+            }
+            let repeatedSamples = Array(samples.dropFirst()).sorted()
+            print(String(
+                format: "ADVANCED_SEARCH_BENCHMARK filter=%@ notes=%d first_ms=%.2f reopen_p50_ms=%.2f reopen_p95_ms=%.2f",
+                label,
+                noteCount,
+                samples[0],
+                Self.percentile(0.50, in: repeatedSamples),
+                Self.percentile(0.95, in: repeatedSamples)
+            ))
+            XCTAssertLessThanOrEqual(
+                Self.percentile(0.95, in: repeatedSamples),
+                150,
+                "Reopening \(label) searches should avoid reparsing the 2,000-note corpus"
+            )
+        }
+    }
+
     func testDeterministicTenAndFiftyThousandNoteThresholds() async throws {
 #if MARKDOWN_SEARCH_BENCHMARK_FULL
         let iterations = 12

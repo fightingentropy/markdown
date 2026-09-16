@@ -3,14 +3,28 @@ import Foundation
 /// Immutable note text shared by the metadata cache, maintained search index,
 /// palette snapshots, and lazy result snippets. `String` is copy-on-write, but
 /// an explicit reference makes that sharing durable as arrays and dictionaries
-/// are reconciled during iCloud bursts.
-final class SearchableNoteBody: Sendable {
+/// are reconciled during iCloud bursts. Parsed search metadata is also shared
+/// across palette sessions. All mutable cache access is protected by the lock.
+final class SearchableNoteBody: @unchecked Sendable {
     let text: String
     let foldedText: String
+    private let metadataLock = NSLock()
+    private var cachedSearchMetadata: ObsidianSearchMetadata?
 
     init(_ text: String) {
         self.text = text
         self.foldedText = Workspace.foldedForSearch(text)
+    }
+
+    var searchMetadata: ObsidianSearchMetadata {
+        metadataLock.lock()
+        defer { metadataLock.unlock() }
+        if let cachedSearchMetadata {
+            return cachedSearchMetadata
+        }
+        let metadata = ObsidianMetadataParser.searchMetadata(in: text)
+        cachedSearchMetadata = metadata
+        return metadata
     }
 }
 
@@ -27,6 +41,9 @@ struct NoteSearchEntry: Sendable, Identifiable {
     var searchMetadata: ObsidianSearchMetadata? = nil
 
     var body: String { bodyStorage.text }
+    var metadataForSearch: ObsidianSearchMetadata {
+        searchMetadata ?? bodyStorage.searchMetadata
+    }
 
     init(
         id: URL,

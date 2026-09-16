@@ -2,8 +2,17 @@ import Foundation
 
 @MainActor
 enum PreviewStylesheet {
+    private static let pageCache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 8
+        cache.totalCostLimit = 4 * 1_024 * 1_024
+        return cache
+    }()
 
-    static func page(body: String, preferences: AppPreferences) -> String {
+    static func page(body: String, preferences: AppPreferences, compact: Bool = false) -> String {
+        let stylesheet = css(using: preferences)
+        let key = (stylesheet + "\n" + String(compact) + "\n" + body) as NSString
+        if let cached = pageCache.object(forKey: key) { return cached as String }
         let needsMath = body.contains("class=\"math-inline\"") || body.contains("class=\"math-display\"")
         let mathAssets = needsMath ? mathAssetsHTML : ""
         // Per-render nonce authorizes only our own inline bootstrap script.
@@ -28,19 +37,21 @@ enum PreviewStylesheet {
             "object-src 'none'"
         ].joined(separator: "; ")
 
-        return """
+        let page = """
         <!DOCTYPE html>
         <html>
         <head>
         <meta charset="utf-8">
         <meta http-equiv="Content-Security-Policy" content="\(csp)">
         <meta name="color-scheme" content="light dark">
-        <style>\(css(using: preferences))</style>
+        <style>\(stylesheet)\(compact ? "html,body{padding:0;margin:0;max-width:none;overflow:hidden;background:transparent}body{display:flow-root}" : "")</style>
         \(mathAssets)
         </head>
         <body>\(body)\(needsMath ? mathBootstrapScript(nonce: nonce) : "")</body>
         </html>
         """
+        pageCache.setObject(page as NSString, forKey: key, cost: page.utf8.count + key.length * 2)
+        return page
     }
 
     // KaTeX 0.16.11 served from the app bundle via a custom URL scheme

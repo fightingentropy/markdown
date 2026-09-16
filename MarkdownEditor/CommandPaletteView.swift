@@ -4,11 +4,6 @@ enum PaletteResult: Equatable {
     case file(URL)
 }
 
-private struct PaletteSearchOutput: Sendable {
-    var entries: [NoteSearchEntry]
-    let results: [NoteSearchResult]
-}
-
 struct CommandPaletteView: View {
     let workspace: Workspace
     let onDismiss: () -> Void
@@ -184,9 +179,9 @@ struct CommandPaletteView: View {
             }
             guard !Task.isCancelled, generation == searchGeneration else { return }
             let worker = Task.detached(priority: .userInitiated) {
-                Self.search(entries: snapshot, query: currentQuery)
+                ObsidianAdvancedSearchEvaluator.search(snapshot, query: currentQuery)
             }
-            let output = await withTaskCancellationHandler {
+            let filteredResults = await withTaskCancellationHandler {
                 await worker.value
             } onCancel: {
                 worker.cancel()
@@ -194,40 +189,10 @@ struct CommandPaletteView: View {
 
             guard !Task.isCancelled,
                   generation == searchGeneration,
-                  currentQuery == query,
-                  let output else { return }
-            entries = output.entries
-            results = output.results
+                  currentQuery == query else { return }
+            results = filteredResults
             selectedIndex = 0
         }
-    }
-
-    private nonisolated static func search(
-        entries: [NoteSearchEntry],
-        query: String
-    ) -> PaletteSearchOutput? {
-        var indexedEntries = entries
-        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Plain text takes the lightweight ranked path. Actual operators cache
-        // their metadata once in this palette snapshot so subsequent advanced
-        // queries do not reparse every note.
-        if !trimmedQuery.isEmpty,
-           ObsidianAdvancedSearchParser.plainTextQuery(in: trimmedQuery) == nil {
-            for index in indexedEntries.indices {
-                guard !Task.isCancelled else { return nil }
-                if indexedEntries[index].searchMetadata == nil {
-                    indexedEntries[index].searchMetadata = ObsidianMetadataParser.searchMetadata(
-                        in: indexedEntries[index].body
-                    )
-                }
-            }
-        }
-
-        guard !Task.isCancelled else { return nil }
-        let results = ObsidianAdvancedSearchEvaluator.search(indexedEntries, query: query)
-        guard !Task.isCancelled else { return nil }
-        return PaletteSearchOutput(entries: indexedEntries, results: results)
     }
 
     @ViewBuilder

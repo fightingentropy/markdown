@@ -307,7 +307,27 @@ final class EditorLinkPreviewTests: XCTestCase {
     }
 
     @MainActor
-    func testEmbedCachePersistsXHeightAndSnapshotAcrossInstances() throws {
+    func testPartiallyVisibleYouTubeCardStaysAttachedWithoutAnyTweets() throws {
+        let scrollView = NSTextView.scrollableTextView()
+        scrollView.frame = NSRect(x: 0, y: 0, width: 660, height: 160)
+        let textView = try XCTUnwrap(scrollView.documentView as? NSTextView)
+        textView.isVerticallyResizable = true
+        textView.minSize = NSSize(width: 0, height: 160)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.containerSize = NSSize(width: 640, height: CGFloat.greatestFiniteMagnitude)
+        textView.string = "https://youtu.be/AVEZBy1uAk8\n" + (0..<100).map { "Line \($0)" }.joined(separator: "\n")
+        let controller = EditorLinkPreviewController()
+        defer { controller.removeAll() }
+        controller.refresh(in: textView, openURL: { _ in })
+        let card = try XCTUnwrap(textView.subviews.compactMap { $0 as? NSHostingView<EditorLinkPreviewCard> }.first)
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: card.frame.maxY - 40))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        controller.layoutCards(in: textView)
+        XCTAssertEqual(controller.visibleCardCount, 1)
+    }
+
+    @MainActor
+    func testEmbedCachePersistsXHeightAndSnapshotAcrossInstances() async throws {
         let suiteName = "EditorLinkPreviewTests.\(UUID().uuidString)"
         let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         let snapshotDirectory = FileManager.default.temporaryDirectory
@@ -340,7 +360,7 @@ final class EditorLinkPreviewTests: XCTestCase {
         )
         let image = NSImage(size: NSSize(width: 8, height: 8))
         image.addRepresentation(representation)
-        firstCache.saveSnapshot(image, for: "x-2031783721397809397-dark")
+        await firstCache.saveSnapshot(image, for: "x-2031783721397809397-dark")
 
         let restoredCache = EditorEmbedCache(
             userDefaults: userDefaults,
@@ -352,7 +372,8 @@ final class EditorLinkPreviewTests: XCTestCase {
             438,
             accuracy: 0.5
         )
-        XCTAssertNotNil(restoredCache.snapshot(for: "x-2031783721397809397-dark"))
+        let snapshot = await restoredCache.snapshot(for: "x-2031783721397809397-dark")
+        XCTAssertNotNil(snapshot)
     }
 
     @MainActor
@@ -370,7 +391,7 @@ final class EditorLinkPreviewTests: XCTestCase {
             heightStorageKey: "heights",
             snapshotDirectoryURL: snapshotDirectory
         )
-        cache.saveXHeight(438, for: "2031783721397809397")
+        cache.saveXHeight(1438, for: "2031783721397809397")
 
         let scrollView = NSTextView.scrollableTextView()
         scrollView.frame = NSRect(x: 0, y: 0, width: 640, height: 320)
@@ -402,7 +423,7 @@ final class EditorLinkPreviewTests: XCTestCase {
                 effectiveRange: nil
             ) as? NSParagraphStyle
         )
-        XCTAssertEqual(paragraphStyle.paragraphSpacing, 448, accuracy: 0.5)
+        XCTAssertEqual(paragraphStyle.paragraphSpacing, 1448, accuracy: 0.5)
     }
 
     func testRecognizesBareXStatusAndYouTubeLinks() {

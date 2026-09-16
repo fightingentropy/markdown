@@ -1,6 +1,6 @@
-# Markdown
+# Obsidian
 
-Markdown is a native macOS Markdown notes app built with SwiftUI and AppKit.
+Obsidian is a native macOS Markdown notes app built with SwiftUI and AppKit.
 
 It is designed as an Obsidian-compatible home for a plain-text vault, with safe local files, iCloud Drive support, fast note switching, metadata, backlinks, workflows, and preview.
 
@@ -52,7 +52,11 @@ It is designed as an Obsidian-compatible home for a plain-text vault, with safe 
 - Preserves note bytes on open, including YAML frontmatter and CRLF line endings
 - Sidebar titles use frontmatter titles or the first heading when available
 - Supports Obsidian-style `[[Wiki Links]]` with title completion
-- Shows real X post cards and interactive 16:9 YouTube players while editing; embed source links reveal on hover or caret focus
+- Shows real X post cards and interactive YouTube players in both editing and reading preview; standalone links and `![](YouTube URL)` use the same renderer, while links within commentary stay inline
+- Expands tall posts to their measured height, with width-aware height caching and stable editor scrolling
+- Shows retry and original-link controls for unavailable, offline, timed-out, or crashed embeds
+- Pauses offscreen embeds and restores YouTube playback positions during the session without autoplay
+- Encodes and loads snapshots off the UI thread, with a 32 MB memory budget, 64 MB disk budget, and seven-day disk expiry
 - Copies pasted or dropped attachments into the configured Obsidian attachment folder
 - Toggle Markdown tasks with `Shift-Command-Return`
 
@@ -96,6 +100,7 @@ It is designed as an Obsidian-compatible home for a plain-text vault, with safe 
 - Obsidian-style filters for text, file, path, tag, property, and task state
 - Quoted phrases, `OR` groups, exclusions, result snippets, and saved searches
 - Incrementally maintained full-text index with cancellation-safe background filtering and lazy snippets
+- Reuses parsed tags and properties across search sessions; filename, path, and task filters skip metadata parsing
 
 ### Updates
 
@@ -103,7 +108,7 @@ It is designed as an Obsidian-compatible home for a plain-text vault, with safe 
 - `Check for Updates…` menu item in the app
 - App reads the update feed from the root [appcast.xml](appcast.xml)
 - Sparkle archives are intended to be hosted in GitHub Releases, not committed into the repo
-- Local installs intentionally disable Sparkle so `/Applications/Markdown.app` does not drift from the published feed
+- Local installs intentionally disable Sparkle so `/Applications/Obsidian.app` does not drift from the published feed
 
 ## Keyboard Shortcuts
 
@@ -150,9 +155,14 @@ That script will:
 - create a local `Markdown` code-signing identity if needed
 - generate the Xcode project
 - build a local app
-- install a clean `/Applications/Markdown.app`
+- install a clean `/Applications/Obsidian.app`
+- back up the previous `Markdown.app` outside `/Applications`
 - launch it
 - blank the Sparkle feed and public key for that local build
+
+The rename preserves the bundle identifier and local signing identity, so existing vaults and preferences continue to work. The installer stops if `/Applications/Obsidian.app` belongs to a different application.
+
+The logo and app icon sources are documented in [branding](branding/README.md).
 
 ### Manual Builds
 
@@ -186,7 +196,9 @@ bash scripts/check.sh
 ```
 
 The mandatory test suite includes deterministic 10,000- and 50,000-note search
-smoke thresholds. To collect a 12-sample p50/p95 distribution separately, run:
+smoke thresholds and a 2,000-note advanced-filter benchmark. Advanced filters
+also cover concurrent queries and cache invalidation after local or external edits.
+To collect a 12-sample p50/p95 distribution for the larger corpora separately, run:
 
 ```bash
 scripts/benchmark_search.sh --full
@@ -203,13 +215,13 @@ package graph is committed so a moving branch cannot silently change a build.
 The built app bundle is usually here:
 
 ```bash
-~/Library/Developer/Xcode/DerivedData/MarkdownEditor-*/Build/Products/Debug/Markdown.app
+~/Library/Developer/Xcode/DerivedData/MarkdownEditor-*/Build/Products/Debug/Obsidian.app
 ```
 
 or for Release:
 
 ```bash
-~/Library/Developer/Xcode/DerivedData/MarkdownEditor-*/Build/Products/Release/Markdown.app
+~/Library/Developer/Xcode/DerivedData/MarkdownEditor-*/Build/Products/Release/Obsidian.app
 ```
 
 ## How To Use The App
@@ -276,13 +288,13 @@ Edit [project.yml](project.yml):
 Create this file:
 
 ```bash
-releases/Markdown-<version>.md
+releases/Obsidian-<version>.md
 ```
 
 Example:
 
 ```bash
-releases/Markdown-1.0.3.md
+releases/Obsidian-1.0.3.md
 ```
 
 ### 3. Run The Release Script
@@ -296,7 +308,7 @@ That command will:
 - generate the Xcode project
 - build the Release app
 - create a local archive cache in `.release-assets/`
-- upload `Markdown-<version>.zip` and any new delta files to the matching GitHub Release
+- upload `Obsidian-<version>.zip` and any new delta files to the matching GitHub Release
 - generate a local appcast from that archive cache
 - sync the root [appcast.xml](appcast.xml) that Sparkle actually reads
 
@@ -328,9 +340,9 @@ Once `main` contains the new release notes and updated appcast, Sparkle can offe
 
 After a release, you should expect:
 
-- `releases/Markdown-<version>.md`
+- `releases/Obsidian-<version>.md`
 - root [appcast.xml](appcast.xml)
-- local `.release-assets/Markdown-<version>.zip`
+- local `.release-assets/Obsidian-<version>.zip`
 - GitHub Release assets for that version
 
 ## If You Only Need To Regenerate The Appcast
@@ -352,7 +364,7 @@ If the archive URLs or notes URLs are hosted somewhere else:
 - If you need a non-default feed URL, set `SPARKLE_FEED_URL` when invoking the release script
 - Do not commit private keys to the repo
 - Use the same `SPARKLE_PRIVATE_KEY` for future releases if you want existing users to keep receiving Sparkle updates without a manual reinstall
-- Local `/Applications/Markdown.app` installs should be signed with the local `Markdown` identity, not ad-hoc
+- Local `/Applications/Obsidian.app` installs should be signed with the local `Markdown` identity, not ad-hoc
 
 ## Current Update Feed
 
