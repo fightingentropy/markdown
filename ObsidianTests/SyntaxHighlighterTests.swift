@@ -1,7 +1,7 @@
 import AppKit
 import XCTest
 
-@testable import Markdown
+@testable import Obsidian
 
 @MainActor
 final class SyntaxHighlighterTests: XCTestCase {

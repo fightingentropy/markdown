@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import XCTest
 
-@testable import Markdown
+@testable import Obsidian
 
 final class EditorLinkPreviewTests: XCTestCase {
     func testStandaloneWrappedXLinkStillCreatesPreview() {

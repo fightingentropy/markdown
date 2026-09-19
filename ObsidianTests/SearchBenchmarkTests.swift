@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import XCTest
 
-@testable import Markdown
+@testable import Obsidian
 
 final class SearchBenchmarkTests: XCTestCase {
     func testAdvancedFiltersAcrossTwoThousandNotes() {

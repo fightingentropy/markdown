@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import XCTest
 
-@testable import Markdown
+@testable import Obsidian
 
 final class PreviewPipelineTests: XCTestCase {
     func testPreviewURLPolicyAllowsOnlySafeExternalSchemes() throws {

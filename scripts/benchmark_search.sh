@@ -19,8 +19,8 @@ if [[ "$PROFILE" == "full" ]]; then
   XCODE_SETTINGS+=("SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG MARKDOWN_SEARCH_BENCHMARK_FULL")
 fi
 xcodebuild test \
-  -project MarkdownEditor.xcodeproj \
-  -scheme MarkdownEditor \
+  -project Obsidian.xcodeproj \
+  -scheme Obsidian \
   -destination 'platform=macOS' \
-  -only-testing:MarkdownEditorTests/SearchBenchmarkTests \
+  -only-testing:ObsidianTests/SearchBenchmarkTests \
   "${XCODE_SETTINGS[@]}"

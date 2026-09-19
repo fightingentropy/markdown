@@ -8,12 +8,12 @@ python3 scripts/check_docs.py
 xcodegen generate --quiet --spec project.yml
 
 xcodebuild -resolvePackageDependencies \
-  -project MarkdownEditor.xcodeproj \
-  -scheme MarkdownEditor
+  -project Obsidian.xcodeproj \
+  -scheme Obsidian
 git diff --exit-code -- \
-  MarkdownEditor.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+  Obsidian.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 xcodebuild test \
-  -project MarkdownEditor.xcodeproj \
-  -scheme MarkdownEditor \
+  -project Obsidian.xcodeproj \
+  -scheme Obsidian \
   -destination 'platform=macOS' \
   CODE_SIGNING_ALLOWED=NO

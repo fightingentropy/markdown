@@ -8,8 +8,8 @@ fi
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ARCHIVES_DIR="$1"
-DOWNLOAD_URL_PREFIX="${2:-https://raw.githubusercontent.com/fightingentropy/markdown/main/releases}"
-RELEASE_NOTES_URL_PREFIX="${3:-https://raw.githubusercontent.com/fightingentropy/markdown/main/releases}"
+DOWNLOAD_URL_PREFIX="${2:-https://raw.githubusercontent.com/fightingentropy/Obsidian/main/releases}"
+RELEASE_NOTES_URL_PREFIX="${3:-https://raw.githubusercontent.com/fightingentropy/Obsidian/main/releases}"
 ED_KEY_FILE="${4:-${SPARKLE_PRIVATE_KEY_FILE:-}}"
 SPARKLE_BIN="${SPARKLE_BIN:-$ROOT_DIR/.derived/SourcePackages/artifacts/sparkle/Sparkle/bin/generate_appcast}"
 OUTPUT_APPCAST="$ARCHIVES_DIR/appcast.xml"
@@ -23,7 +23,7 @@ cmd=(
   "$SPARKLE_BIN"
   --download-url-prefix "$DOWNLOAD_URL_PREFIX"
   --release-notes-url-prefix "$RELEASE_NOTES_URL_PREFIX"
-  --link "https://github.com/fightingentropy/markdown"
+  --link "https://github.com/fightingentropy/Obsidian"
 )
 
 if [[ -n "$ED_KEY_FILE" ]]; then

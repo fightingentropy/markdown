@@ -1,7 +1,7 @@
 import AppKit
 import WebKit
 import XCTest
-@testable import Markdown
+@testable import Obsidian
 
 @MainActor
 final class EmbedReliabilityTests: XCTestCase {

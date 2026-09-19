@@ -182,8 +182,8 @@ else
 fi
 if [[ -z "$SPARKLE_BIN_DIR" ]]; then
   xcodebuild \
-    -project MarkdownEditor.xcodeproj \
-    -scheme MarkdownEditor \
+    -project Obsidian.xcodeproj \
+    -scheme Obsidian \
     -resolvePackageDependencies \
     -derivedDataPath "$DERIVED_DATA_PATH" >/dev/null
   SPARKLE_BIN_DIR="$(find "$DERIVED_DATA_PATH" -path '*/artifacts/sparkle/Sparkle/bin' -type d | head -1)"
@@ -210,8 +210,8 @@ if [[ -z "$SPARKLE_PUBLIC_ED_KEY" ]]; then
 fi
 
 xcodebuild \
-  -project MarkdownEditor.xcodeproj \
-  -scheme MarkdownEditor \
+  -project Obsidian.xcodeproj \
+  -scheme Obsidian \
   -configuration Release \
   -derivedDataPath "$DERIVED_DATA_PATH" \
   SPARKLE_FEED_URL="$SPARKLE_FEED_URL" \

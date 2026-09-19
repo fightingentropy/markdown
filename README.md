@@ -133,8 +133,8 @@ It is designed as an Obsidian-compatible home for a plain-text vault, with safe 
 
 ## Project Structure
 
-- [MarkdownEditor](MarkdownEditor): app source code
-- [MarkdownEditorTests](MarkdownEditorTests): unit tests
+- [Obsidian](Obsidian): app source code
+- [ObsidianTests](ObsidianTests): unit tests
 - [project.yml](project.yml): XcodeGen project definition
 - [scripts](scripts): helper scripts, including release tooling
 - [releases](releases): tracked release notes
@@ -160,7 +160,7 @@ That script will:
 - launch it
 - blank the Sparkle feed and public key for that local build
 
-The rename preserves the bundle identifier and local signing identity, so existing vaults and preferences continue to work. The installer stops if `/Applications/Obsidian.app` belongs to a different application.
+The project, scheme, and Swift module are named `Obsidian`. The app retains the `com.md.MarkdownEditor` bundle identifier and the local `Markdown` signing identity so existing vaults, preferences, and recovery drafts continue to work. Published releases retain their original archive filenames. The installer stops if `/Applications/Obsidian.app` belongs to a different application.
 
 The logo and app icon sources are documented in [branding](branding/README.md).
 
@@ -177,13 +177,13 @@ xcodegen
 Debug build:
 
 ```bash
-xcodebuild -project MarkdownEditor.xcodeproj -scheme MarkdownEditor -configuration Debug build
+xcodebuild -project Obsidian.xcodeproj -scheme Obsidian -configuration Debug build
 ```
 
 Release build:
 
 ```bash
-xcodebuild -project MarkdownEditor.xcodeproj -scheme MarkdownEditor -configuration Release build
+xcodebuild -project Obsidian.xcodeproj -scheme Obsidian -configuration Release build
 ```
 
 ### Mandatory Check
@@ -215,13 +215,13 @@ package graph is committed so a moving branch cannot silently change a build.
 The built app bundle is usually here:
 
 ```bash
-~/Library/Developer/Xcode/DerivedData/MarkdownEditor-*/Build/Products/Debug/Obsidian.app
+~/Library/Developer/Xcode/DerivedData/Obsidian-*/Build/Products/Debug/Obsidian.app
 ```
 
 or for Release:
 
 ```bash
-~/Library/Developer/Xcode/DerivedData/MarkdownEditor-*/Build/Products/Release/Obsidian.app
+~/Library/Developer/Xcode/DerivedData/Obsidian-*/Build/Products/Release/Obsidian.app
 ```
 
 ## How To Use The App
@@ -371,4 +371,4 @@ If the archive URLs or notes URLs are hosted somewhere else:
 Release builds should inject:
 
 - [appcast.xml](appcast.xml)
-- feed URL: `https://raw.githubusercontent.com/fightingentropy/markdown/main/appcast.xml`
+- feed URL: `https://raw.githubusercontent.com/fightingentropy/Obsidian/main/appcast.xml`

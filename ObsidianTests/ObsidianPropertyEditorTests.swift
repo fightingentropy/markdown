@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import Markdown
+@testable import Obsidian
 
 final class ObsidianPropertyEditorTests: XCTestCase {
     func testAddsFrontmatterWithoutChangingBody() throws {

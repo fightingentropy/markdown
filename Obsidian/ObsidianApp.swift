@@ -6,7 +6,7 @@ extension Notification.Name {
 }
 
 extension NSUserInterfaceItemIdentifier {
-    static let settingsWindow = Self("MarkdownEditor.SettingsWindow")
+    static let settingsWindow = Self("Obsidian.SettingsWindow")
 }
 
 private enum WindowSceneID {

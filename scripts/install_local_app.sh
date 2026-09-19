@@ -41,8 +41,8 @@ mkdir -p "$LOCAL_BUILD_ROOT"
 cd "$ROOT_DIR"
 xcodegen
 xcodebuild \
-  -project MarkdownEditor.xcodeproj \
-  -scheme MarkdownEditor \
+  -project Obsidian.xcodeproj \
+  -scheme Obsidian \
   -configuration Debug \
   -xcconfig "$ROOT_DIR/LocalBuild.xcconfig" \
   -derivedDataPath "$LOCAL_DERIVED_DATA" \

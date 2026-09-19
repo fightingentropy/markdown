@@ -1,4 +1,4 @@
-name: MarkdownEditor
+name: Obsidian
 options:
   bundleIdPrefix: com.md
   deploymentTarget:
@@ -23,14 +23,14 @@ packages:
     from: 0.3.1
 
 targets:
-  MarkdownEditor:
+  Obsidian:
     type: application
     platform: macOS
     sources:
-      - path: MarkdownEditor
+      - path: Obsidian
         excludes:
           - "Resources/katex/**"
-      - path: MarkdownEditor/Resources/katex
+      - path: Obsidian/Resources/katex
         type: folder
     dependencies:
       - package: Sparkle
@@ -41,13 +41,14 @@ targets:
         product: Textual
     settings:
       base:
+        # Keep the installed app identity and its preferences.
         PRODUCT_BUNDLE_IDENTIFIER: com.md.MarkdownEditor
         MARKETING_VERSION: "1.0.2"
         CURRENT_PROJECT_VERSION: "3"
-        CODE_SIGN_ENTITLEMENTS: MarkdownEditor/MarkdownEditor.entitlements
+        CODE_SIGN_ENTITLEMENTS: Obsidian/Obsidian.entitlements
         CODE_SIGN_STYLE: Automatic
         PRODUCT_NAME: Obsidian
-        PRODUCT_MODULE_NAME: Markdown
+        PRODUCT_MODULE_NAME: Obsidian
         INFOPLIST_KEY_CFBundleDisplayName: Obsidian
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
         SPARKLE_FEED_URL: ""
@@ -56,7 +57,7 @@ targets:
         INFOPLIST_KEY_SUPublicEDKey: "$(SPARKLE_PUBLIC_ED_KEY)"
         SWIFT_STRICT_CONCURRENCY: complete
     info:
-      path: MarkdownEditor/Info.plist
+      path: Obsidian/Info.plist
       properties:
         CFBundleDisplayName: "$(PRODUCT_NAME)"
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
@@ -89,26 +90,26 @@ targets:
             UTTypeConformsTo:
               - public.data
             UTTypeDescription: Markdown Sidebar Drag Item
-  MarkdownEditorTests:
+  ObsidianTests:
     type: bundle.unit-test
     platform: macOS
     sources:
-      - MarkdownEditorTests
+      - ObsidianTests
     dependencies:
-      - target: MarkdownEditor
+      - target: Obsidian
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.md.MarkdownEditorTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.md.ObsidianTests
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Obsidian.app/Contents/MacOS/Obsidian"
         BUNDLE_LOADER: "$(TEST_HOST)"
 
 schemes:
-  MarkdownEditor:
+  Obsidian:
     build:
       targets:
-        MarkdownEditor: all
-        MarkdownEditorTests: [test]
+        Obsidian: all
+        ObsidianTests: [test]
     test:
       targets:
-        - name: MarkdownEditorTests
+        - name: ObsidianTests

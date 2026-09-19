@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
 
-@testable import Markdown
+@testable import Obsidian
 
 final class AttachmentStoreTests: XCTestCase {
     func testUsesObsidianAttachmentFolderAndCreatesCollisionSafeEmbed() throws {

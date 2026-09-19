@@ -2,7 +2,7 @@ import AppKit
 
 @MainActor
 enum Theme {
-    static let editorBackgroundColor = NSColor(name: NSColor.Name("MarkdownEditorBackground")) { appearance in
+    static let editorBackgroundColor = NSColor(name: NSColor.Name("ObsidianBackground")) { appearance in
         if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
             return NSColor(srgbRed: 0.055, green: 0.055, blue: 0.058, alpha: 1)
         }

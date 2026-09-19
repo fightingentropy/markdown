@@ -5,7 +5,7 @@ let root = URL(fileURLWithPath: #filePath)
     .deletingLastPathComponent()
     .deletingLastPathComponent()
 let source = root.appendingPathComponent("branding/obsidian-icon.svg")
-let destination = root.appendingPathComponent("MarkdownEditor/Assets.xcassets/AppIcon.appiconset")
+let destination = root.appendingPathComponent("Obsidian/Assets.xcassets/AppIcon.appiconset")
 
 guard let image = NSImage(contentsOf: source) else {
     fatalError("Unable to load the Obsidian icon at \(source.path)")

@@ -254,7 +254,7 @@ private struct ConfigurablePreviewCodeBlockStyle: StructuredText.CodeBlockStyle 
 
 /// Serves bundled KaTeX assets to the preview WKWebView via a custom URL
 /// scheme so LaTeX rendering works completely offline. Resources live under
-/// `MarkdownEditor/Resources/katex/` in the app bundle.
+/// `Obsidian/Resources/katex/` in the app bundle.
 final class KaTeXBundleSchemeHandler: NSObject, WKURLSchemeHandler {
     static let scheme = "katex-asset"
 
