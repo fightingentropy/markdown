@@ -143,7 +143,7 @@ struct ObsidianApp: App {
             )
             .background(SettingsWindowAccessor())
         }
-        .defaultSize(width: 980, height: 720)
+        .defaultSize(width: 800, height: 580)
         .windowResizability(.contentSize)
     }
 
